@@ -8,7 +8,7 @@ struct LineAnimationView: View {
 
     @State private var path: Path = Path()
     @State private var headPosition: Double = 0
-    @State private var lastUpdate: Date = Date()
+    @State private var lastUpdate: CFTimeInterval = 0
     @State private var previousSeed: Int = 0
     @State private var viewSize: CGSize = .zero
     @State private var tick: UInt = 0
@@ -16,6 +16,7 @@ struct LineAnimationView: View {
     @State private var starStartTime: Date = Date()
     private let segmentCount = 8
     private let starCount = 4
+    private let displayLink = DisplayLink.shared
 
     private struct Star {
         let normX: Double
@@ -45,7 +46,7 @@ struct LineAnimationView: View {
                 viewSize = geo.size
                 regeneratePath()
                 regenerateStars(seed: trackSeed)
-                lastUpdate = Date()
+                lastUpdate = CACurrentMediaTime()
                 previousSeed = trackSeed
             }
             .onChange(of: trackSeed) { _, newSeed in
@@ -60,13 +61,21 @@ struct LineAnimationView: View {
                 regeneratePath()
                 regenerateStars(seed: trackSeed)
             }
+            .onChange(of: viewModel.isAnimationPaused) { _, paused in
+                if paused {
+                    displayLink.stop()
+                } else {
+                    displayLink.start()
+                }
+            }
         }
-        .onReceive(Timer.publish(every: 1.0 / 30.0, on: .main, in: .common).autoconnect()) { now in
-            guard viewModel.playerState.isPlaying || viewModel.playerState == .autoMix else {
+        .onReceive(displayLink.framePublisher) { now in
+            guard viewModel.playerState.isPlaying || viewModel.playerState == .autoMix,
+                  !viewModel.isAnimationPaused else {
                 lastUpdate = now
                 return
             }
-            let dt = min(now.timeIntervalSince(lastUpdate), 0.12)
+            let dt = min(now - lastUpdate, 0.12)
             lastUpdate = now
             let energy = Double(viewModel.currentEnergyValue)
             let speed = 0.1 + energy * 0.4
@@ -77,6 +86,12 @@ struct LineAnimationView: View {
             }
             tick &+= 1
         }
+        .onAppear {
+            if !(viewModel.isAnimationPaused) {
+                displayLink.start()
+            }
+        }
+        .onDisappear { displayLink.stop() }
     }
 
     // MARK: - Trail Views
@@ -117,7 +132,7 @@ struct LineAnimationView: View {
                 .trimmedPath(from: 0, to: 1)
                 .stroke(theme.dotInactive, lineWidth: 1.5)
                 .opacity(0.3)
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { _ in
+            TimelineView(.animation) { _ in
                 Canvas { context, size in
                     drawStars(context: context, size: size)
                 }

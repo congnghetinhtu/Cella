@@ -251,9 +251,18 @@ struct Crossfader {
         let toEnergy = toAnalysis.averageRMS
         let energyDiff = abs(fromEnergy - toEnergy)
 
+        // Energy slope: direction of energy at transition boundaries
+        let outSlope = energySlope(fromAnalysis.energyProfile, at: .end)
+        let inSlope = energySlope(toAnalysis.energyProfile, at: .start)
+        let slopeMatch = 1.0 - min(1.0, abs(outSlope - inSlope) * 5.0)
+
         var rawDuration: Double
         if energyDiff > 0.15 {
+            // Large energy gap — shorter crossfade, less overlap time for jarring transition
             rawDuration = baseDuration * 0.65
+        } else if slopeMatch > 0.8 && energyDiff < 0.08 {
+            // Energy levels AND trajectories match — longer crossfade for seamless blend
+            rawDuration = baseDuration * 1.25
         } else {
             let compat = MixEngine.scoreCompatibility(a: fromAnalysis, b: toAnalysis)
             if compat > 0.85 {
@@ -272,6 +281,27 @@ struct Crossfader {
         // Quantize to nearest bar boundary (minimum 2 bars)
         let bars = max(2.0, round(rawDuration / barInterval))
         return bars * barInterval
+    }
+
+    /// Energy slope: positive = rising, negative = falling.
+    /// Computed from the last/first 12 samples of the energy profile.
+    private enum SlopeRegion { case start, end }
+
+    private static func energySlope(_ profile: [Float], at region: SlopeRegion) -> Double {
+        guard profile.count >= 6 else { return 0 }
+        let count = min(12, profile.count / 4)
+        let slice: [Float]
+        switch region {
+        case .start:
+            slice = Array(profile.prefix(count))
+        case .end:
+            slice = Array(profile.suffix(count))
+        }
+        guard slice.count >= 2 else { return 0 }
+        let mid = slice.count / 2
+        let first = Double(slice[..<(slice.count - mid)].reduce(0, +)) / Double(max(1, slice.count - mid))
+        let second = Double(slice[(slice.count - mid)...].reduce(0, +)) / Double(max(1, mid))
+        return second - first
     }
 
     // MARK: - Vocal Overlap Prevention

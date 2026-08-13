@@ -66,6 +66,9 @@ class MixAudioEngine {
 
     private var crossfadeTimer: Timer?
     private var trackEndTimer: Timer?
+    private var preCrossfadeTimer: Timer?
+    private var preCrossfadeRampTimer: Timer?
+    private var preCrossfadeRampStartTime: Date?
     private var trackStartTime: Date?
 
     private var remainingAtStart: TimeInterval = 0
@@ -87,6 +90,7 @@ class MixAudioEngine {
     private var incomingGain: Float = 1.0
     private var outgoingCrossfadeStartPos: TimeInterval = 0
     private var curveExponent: Double = 1.0
+    private var moodEqLowPassEndHz: Float = 3000.0  // mood-adapted EQ end frequency
     private var tempoRampTimer: Timer?
     private var tempoRampGeneration: Int = 0
     private var volumeRampTimer: Timer?
@@ -132,6 +136,8 @@ class MixAudioEngine {
         stop()
         crossfadeTimer?.invalidate()
         trackEndTimer?.invalidate()
+        preCrossfadeTimer?.invalidate()
+        preCrossfadeRampTimer?.invalidate()
         tempoRampTimer?.invalidate()
     }
 
@@ -222,7 +228,9 @@ class MixAudioEngine {
             outgoingAnalysis: nil,
             incomingAnalysis: nil
         )
-        scheduleTrackEndTimer(delay: max(0.1, remainingAtStart - beatAlignedCrossfadeTime))
+        let reloadDelay = max(0.1, remainingAtStart - beatAlignedCrossfadeTime)
+        schedulePreCrossfadeEQ(delay: reloadDelay - 5.0)
+        scheduleTrackEndTimer(delay: reloadDelay)
 
         print("[Engine] Resumed on new device at \(String(format: "%.1f", position))s")
     }
@@ -370,6 +378,8 @@ class MixAudioEngine {
 
         print("[Engine] Playing: \(url.lastPathComponent) — \(String(format: "%.1f", duration))s @ rate \(String(format: "%.3f", rate)), crossfade in \(String(format: "%.2f", finalDelay))s (bar=\(String(format: "%.2f", triggerOffset)), vocalEnd=\(String(format: "%.2f", vocalEndFloor)))")
 
+        // Start low-pass filter 5 seconds before crossfade for smooth prep
+        schedulePreCrossfadeEQ(delay: finalDelay - 5.0)
         scheduleTrackEndTimer(delay: finalDelay)
     }
 
@@ -434,6 +444,7 @@ class MixAudioEngine {
         crossfadeStartTime = nil
         lastIncomingVolume = 1.0
         cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
         crossfadeTimer?.invalidate()
         crossfadeTimer = nil
         tempoRampTimer?.invalidate()
@@ -519,6 +530,7 @@ class MixAudioEngine {
         }
 
         cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
         tempoRampTimer?.invalidate()
         tempoRampTimer = nil
 
@@ -542,8 +554,17 @@ class MixAudioEngine {
             pendingIncomingURL = incomingURL
             let incomingFile = try AudioHelpers.readAudio(url: incomingURL)
             let incomingDuration = incomingFile.duration
-            let crossfadeDuration = params.duration
+            var crossfadeDuration = params.duration
             actualIncomingDuration = incomingDuration    // may shrink if intro skipped
+
+            // ── 0. MOOD PRESERVATION ──────────────────────────────────────
+            // Compute mood-based adaptations: curve shape, EQ intensity, duration.
+            let moodParams = computeMoodPreservationParams(
+                outgoingAnalysis: outgoingAnalysis,
+                incomingAnalysis: incomingAnalysis
+            )
+            crossfadeDuration *= moodParams.durationMultiplier
+            self.moodEqLowPassEndHz = moodParams.eqLowPassEndHz
 
             // ── 1. BPM SYNC via timePitch (pitch preserved) ──────────
             // Only slow incoming to match outgoing, never speed up.
@@ -563,10 +584,11 @@ class MixAudioEngine {
             }
 
             // ── 2. BEAT PHASE ALIGNMENT ──────────────────────────────────
-            // Cue the incoming to its first detected beat so its downbeat lands on
-            // the outgoing bar line at the crossfade point (real beat lock, no pitch shift).
+            // Align incoming's first beat with outgoing's bar boundary at crossfade point.
+            // Compute delay = outgoingNextBar - outgoingCurrentTime.
+            // Prepend that many seconds of silence to incoming buffer so its downbeat
+            // lands exactly on the outgoing's bar line.
             let incomingFirstBeat = incomingAnalysis?.beatTimestamps.first ?? 0
-            var beatPhaseOffset: Double = 0  // grids align via cue; no silence padding needed
             incomingCueOffset = incomingFirstBeat
             currentTrackAnalysis = incomingAnalysis
 
@@ -592,6 +614,29 @@ class MixAudioEngine {
                 self.startTempoRamp(node: otherTimePitch, from: 1.0, to: incomingTargetRate, duration: min(2.0, crossfadeDuration * 0.4))
             }
 
+            // Compute real beat phase delay: outgoing bar boundary - current time.
+            let outgoingNow = self.currentTime
+            var beatPhaseDelay: Double = 0
+            if let outBars = outgoingAnalysis?.barTimestamps, !outBars.isEmpty {
+                // Find next bar boundary after current position
+                var nextBar: Double?
+                for barTime in outBars {
+                    if barTime > outgoingNow + 0.05 {
+                        nextBar = barTime
+                        break
+                    }
+                }
+                // If no future bar, extrapolate from last bar + bar interval
+                if nextBar == nil, let lastBar = outBars.last, let outBPM = outgoingAnalysis?.bpm, outBPM > 0 {
+                    let barInterval = 240.0 / outBPM
+                    nextBar = lastBar + barInterval
+                }
+                if let nextBar {
+                    beatPhaseDelay = max(0, nextBar - outgoingNow)
+                }
+            }
+            print("[Engine] Beat phase delay: \(String(format: "%.3f", beatPhaseDelay))s (outgoingNow=\(String(format: "%.2f", outgoingNow)), incomingFirstBeat=\(String(format: "%.3f", incomingFirstBeat)))")
+
             // ── 3b. VOCAL CONNECTION POINT / INTRO SKIP ────────────────
             let sampleRate = incomingFile.processingFormat.sampleRate
             var bufferToSchedule: AVAudioPCMBuffer?
@@ -606,28 +651,31 @@ class MixAudioEngine {
                 if skipFrames > 0, skipFrames < AVAudioFramePosition(fileBuffer.frameLength) {
                     let remainingFrames = fileBuffer.frameLength - AVAudioFrameCount(skipFrames)
                     if let trimmed = AudioHelpers.extractBuffer(fileBuffer, from: skipFrames, frameCount: remainingFrames) {
-                        bufferToSchedule = self.padWithSilence(trimmed, sampleRate: sampleRate, beatPhaseOffset: beatPhaseOffset, rate: incomingTargetRate)
+                        // Prepend silence for beat phase alignment
+                        bufferToSchedule = self.padWithSilence(trimmed, sampleRate: sampleRate, beatPhaseOffset: beatPhaseDelay, rate: incomingTargetRate)
                     }
                 }
             } else {
                 let fileBuffer = try readEntireFile(incomingFile)
-                bufferToSchedule = self.padWithSilence(fileBuffer, sampleRate: sampleRate, beatPhaseOffset: beatPhaseOffset, rate: incomingTargetRate)
-            }
-
-            // Cue incoming to its first detected beat for beat phase alignment.
-            // Skipped when skipIntro is active — the vocal connection point already
-            // positions the buffer at the right offset, and the first-beat timestamp
-            // is relative to the full track, not the trimmed buffer.
-            if !params.skipIntro,
-               incomingFirstBeat > 0.01,
-               let buf = bufferToSchedule {
-                let cueFrames = AVAudioFramePosition(incomingFirstBeat * buf.format.sampleRate)
-                if cueFrames > 0, cueFrames < AVAudioFramePosition(buf.frameLength) {
-                    let remaining = buf.frameLength - AVAudioFrameCount(cueFrames)
-                    if let cued = AudioHelpers.extractBuffer(buf, from: cueFrames, frameCount: remaining) {
-                        actualIncomingDuration = max(1.0, incomingDuration - incomingFirstBeat)
-                        bufferToSchedule = cued
+                // Cue incoming to its first beat, then prepend silence to align
+                // that beat with outgoing's bar boundary.
+                if incomingFirstBeat > 0.01 {
+                    let cueFrames = AVAudioFramePosition(incomingFirstBeat * sampleRate)
+                    if cueFrames > 0, cueFrames < AVAudioFramePosition(fileBuffer.frameLength) {
+                        let remaining = fileBuffer.frameLength - AVAudioFrameCount(cueFrames)
+                        if let cued = AudioHelpers.extractBuffer(fileBuffer, from: cueFrames, frameCount: remaining) {
+                            actualIncomingDuration = max(1.0, incomingDuration - incomingFirstBeat)
+                            // The cue trimmed the buffer so first beat is at frame 0.
+                            // Now prepend silence so that frame 0 lands at outgoing's bar boundary.
+                            bufferToSchedule = self.padWithSilence(cued, sampleRate: sampleRate, beatPhaseOffset: beatPhaseDelay, rate: incomingTargetRate)
+                        } else {
+                            bufferToSchedule = self.padWithSilence(fileBuffer, sampleRate: sampleRate, beatPhaseOffset: beatPhaseDelay, rate: incomingTargetRate)
+                        }
+                    } else {
+                        bufferToSchedule = self.padWithSilence(fileBuffer, sampleRate: sampleRate, beatPhaseOffset: beatPhaseDelay, rate: incomingTargetRate)
                     }
+                } else {
+                    bufferToSchedule = self.padWithSilence(fileBuffer, sampleRate: sampleRate, beatPhaseOffset: beatPhaseDelay, rate: incomingTargetRate)
                 }
             }
 
@@ -655,7 +703,7 @@ class MixAudioEngine {
             // When the outgoing is much louder, the incoming fades in more gradually
             // (exponent > 1). When the incoming is louder, it blends in sooner
             // (exponent < 1). This prevents sudden volume jumps from energy mismatch.
-            self.curveExponent = computeEnergyCurveExponent(
+            let energyExponent = computeEnergyCurveExponent(
                 outgoingAnalysis: outgoingAnalysis,
                 incomingAnalysis: incomingAnalysis,
                 outgoingTime: self.outgoingCrossfadeStartPos,
@@ -663,8 +711,10 @@ class MixAudioEngine {
                 incomingTime: self.incomingCueOffset,
                 incomingDuration: actualIncomingDuration
             )
+            // Mood bias: energetic = steeper (×0.9), calm = gentler (×1.3)
+            self.curveExponent = max(0.3, min(3.5, energyExponent * moodParams.curveExponentBias))
 
-            print("[Engine] Automix: \(String(format: "%.1f", crossfadeDuration))s, strategy \(params.vocalStrategy), curveExp \(String(format: "%.2f", self.curveExponent))")
+            print("[Engine] Automix: \(String(format: "%.1f", crossfadeDuration))s, strategy \(params.vocalStrategy), curveExp \(String(format: "%.2f", self.curveExponent)), moodExpBias \(String(format: "%.2f", moodParams.curveExponentBias))")
 
             // ── 4. CROSSFADE VOLUME ENVELOPE ──────────────────────
             isCrossfading = true
@@ -682,14 +732,17 @@ class MixAudioEngine {
 
                 // ── Energy-equalized crossfade ─────────────────────────
                 let progress = min(1.0, Double(currentStep) / Double(max(1, crossfadeSteps)))
+                // Smoothstep S-curve on raw progress: gentle start, gentle finish, fast middle.
+                // Prevents incoming from jumping in too early.
+                let s = progress * progress * (3.0 - 2.0 * progress)
                 let warpedProgress: Double
                 if self.curveExponent != 1.0 {
-                    warpedProgress = pow(progress, self.curveExponent)
+                    warpedProgress = pow(s, self.curveExponent)
                 } else {
-                    warpedProgress = progress
+                    warpedProgress = s
                 }
-                let outAmplitude = Float(sqrt(1.0 - warpedProgress))
-                let inAmplitude = Float(sqrt(warpedProgress))
+                let outAmplitude = Float(1.0 - warpedProgress)
+                let inAmplitude = Float(warpedProgress)
                 let outVol = outAmplitude * self.outgoingGain
                 let inVol = inAmplitude * self.incomingGain
                 self.currentPlayer.volume = self.clampVolume(outVol)
@@ -699,23 +752,28 @@ class MixAudioEngine {
                     self.lastIncomingVolume = self.clampVolume(inVol)
                 }
 
-                // ── Spectral blend: EQ sweep ──────────────────────────────
-                // Outgoing low-pass rolls off highs as it fades; incoming
-                // high-pass opens lows. Keeps midrange from clashing.
+                // ── Low-pass filter on outgoing ──────────────────────────────
+                // Smoothly rolls off highs on the outgoing track as it fades.
+                // Keeps midrange from clashing with the incoming track.
+                // EQ intensity adapts to mood: calm = more filtering, energetic = less.
+                // If pre-crossfade ramp already started, continue from its position.
                 if self.config.eqFadeEnabled {
-                    let eqP = Float(progress * progress * (3.0 - 2.0 * progress))  // smoothstep
-                    let lpCut = self.config.eqLowPassStartHz * pow(self.config.eqLowPassEndHz / self.config.eqLowPassStartHz, eqP)
-                    let hpCut = self.config.eqHighPassStartHz * pow(self.config.eqHighPassEndHz / self.config.eqHighPassStartHz, eqP)
-                    // Set type every tick — player roles swap after completeCrossfade
-                    // so the correct filter must follow the role, not the hardware node.
+                    // Compute starting progress from where pre-crossfade ramp left off
+                    let preProgress: Double
+                    if let rampStart = self.preCrossfadeRampStartTime {
+                        let elapsed = Date().timeIntervalSince(rampStart)
+                        preProgress = min(1.0, elapsed / 5.0)  // 5s ramp duration
+                    } else {
+                        preProgress = 0
+                    }
+                    let adjustedProgress = min(1.0, preProgress + (1.0 - preProgress) * progress)
+                    let eqP = Float(adjustedProgress * adjustedProgress * (3.0 - 2.0 * adjustedProgress))  // smoothstep
+                    let lpCut = self.config.eqLowPassStartHz * pow(self.moodEqLowPassEndHz / self.config.eqLowPassStartHz, eqP)
+                    // Apply low-pass to outgoing only — incoming stays clean
                     let outEQ = self.currentEQ
                     outEQ.bands[0].filterType = .lowPass
                     outEQ.bands[0].frequency = lpCut
                     outEQ.bands[0].bypass = false
-                    let inEQ = self.otherEQ
-                    inEQ.bands[0].filterType = .highPass
-                    inEQ.bands[0].frequency = hpCut
-                    inEQ.bands[0].bypass = false
                 }
 
                 // ── End ─────────────────────────────────────────────────
@@ -767,7 +825,9 @@ class MixAudioEngine {
         let elapsed = -startTime.timeIntervalSinceNow
         let remaining = remainingAtStart - elapsed
         if remaining > beatAlignedCrossfadeTime {
-            scheduleTrackEndTimer(delay: remaining - beatAlignedCrossfadeTime)
+            let delay = remaining - beatAlignedCrossfadeTime
+            schedulePreCrossfadeEQ(delay: delay - 5.0)
+            scheduleTrackEndTimer(delay: delay)
         } else if remaining > 0 {
             scheduleTrackEndTimer(delay: max(0.1, remaining))
         }
@@ -776,6 +836,60 @@ class MixAudioEngine {
     private func cancelTrackEndTimer() {
         trackEndTimer?.invalidate()
         trackEndTimer = nil
+    }
+
+    private func cancelPreCrossfadeEQ() {
+        preCrossfadeTimer?.invalidate()
+        preCrossfadeTimer = nil
+        preCrossfadeRampTimer?.invalidate()
+        preCrossfadeRampTimer = nil
+        preCrossfadeRampStartTime = nil
+    }
+
+    /// Starts a 5-second low-pass filter ramp on the outgoing player
+    /// before the crossfade begins. Smoothly rolls off highs so the
+    /// transition feels prepared, not abrupt.
+    private func schedulePreCrossfadeEQ(delay: TimeInterval) {
+        cancelPreCrossfadeEQ()
+        guard delay > 0.5, config.eqFadeEnabled else { return }
+        preCrossfadeTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self, self.isPlaying, !self.isCrossfading else { return }
+            self.preCrossfadeTimer = nil
+            self.startPreCrossfadeRamp()
+        }
+    }
+
+    private func startPreCrossfadeRamp() {
+        let rampDuration: TimeInterval = 5.0  // 5 seconds to roll off
+        let startHz = config.eqLowPassStartHz  // 20000
+        let endHz = self.moodEqLowPassEndHz     // mood-adapted target
+        let interval: TimeInterval = 0.1
+        let steps = Int(rampDuration / interval)
+        var currentStep = 0
+        preCrossfadeRampStartTime = Date()
+
+        preCrossfadeRampTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] timer in
+            guard let self = self, self.isPlaying, !self.isCrossfading else {
+                timer.invalidate()
+                self?.preCrossfadeRampTimer = nil
+                return
+            }
+            currentStep += 1
+            let progress = min(1.0, Double(currentStep) / Double(max(1, steps)))
+            // Smoothstep for gentle roll-off
+            let s = progress * progress * (3.0 - 2.0 * progress)
+            let cutHz = startHz * pow(endHz / startHz, Float(s))
+            let outEQ = self.currentEQ
+            outEQ.bands[0].filterType = .lowPass
+            outEQ.bands[0].frequency = cutHz
+            outEQ.bands[0].bypass = false
+
+            if currentStep >= steps {
+                timer.invalidate()
+                self.preCrossfadeRampTimer = nil
+                self.preCrossfadeRampStartTime = nil
+            }
+        }
     }
 
     /// Time (seconds) of the outgoing track's last musical content (vocal OR energy
@@ -1032,10 +1146,12 @@ class MixAudioEngine {
     }
 
     /// Samples a track's vocal activity level (0–1) at a given time.
-    /// Computes crossfade curve exponent from energy ratio at the transition point.
+    /// Computes crossfade curve exponent from energy ratio and slope direction at the transition.
     /// When outgoing energy >> incoming energy, exponent > 1 delays incoming blend
     /// (outgoing stays full longer, incoming rises gradually). When incoming energy >>
-    /// outgoing, exponent < 1 blends incoming sooner. Keeps perceived volume smooth.
+    /// outgoing, exponent < 1 blends incoming sooner. Slope direction adjusts the exponent:
+    /// both falling (calm→calm) = smoother blend, outgoing falling + incoming rising (build) =
+    /// incoming rises faster, outgoing rising + incoming falling (drop) = outgoing stays dominant.
     private func computeEnergyCurveExponent(
         outgoingAnalysis: TrackAnalysis?,
         incomingAnalysis: TrackAnalysis?,
@@ -1051,19 +1167,129 @@ class MixAudioEngine {
         }
         let outIdx = max(0, min(outEnergy.count - 1, Int(outgoingTime / outgoingDuration * Double(outEnergy.count))))
         let inIdx = max(0, min(inEnergy.count - 1, Int(incomingTime / incomingDuration * Double(inEnergy.count))))
-        // Average a small window (3 samples) for stability
-        let outSlice = max(0, outIdx - 1)...min(outEnergy.count - 1, outIdx + 1)
-        let inSlice = max(0, inIdx - 1)...min(inEnergy.count - 1, inIdx + 1)
+        // Wider averaging window (5 samples) for stability
+        let halfWindow = 2
+        let outSlice = max(0, outIdx - halfWindow)...min(outEnergy.count - 1, outIdx + halfWindow)
+        let inSlice = max(0, inIdx - halfWindow)...min(inEnergy.count - 1, inIdx + halfWindow)
         let outAvg = outSlice.map { Double(outEnergy[$0]) }.reduce(0, +) / Double(outSlice.count)
         let inAvg = inSlice.map { Double(inEnergy[$0]) }.reduce(0, +) / Double(inSlice.count)
         let ratio = inAvg / max(outAvg, 0.001)
-        // Map ratio to exponent: ratio=1 → 1.0, ratio=0.25 → 0.4, ratio=4 → 2.5
-        // When outgoing is louder (ratio < 1), exponent < 1 → tracks cross early,
-        // so the quiet incoming becomes audible before the loud outgoing fully fades.
-        // When incoming is louder (ratio > 1), exponent > 1 → incoming rises gradually
-        // so it doesn't blast over the quieter outgoing.
-        // Clamped to [0.4, 2.5] — outside this range the crossfade sounds abrupt.
-        return max(0.4, min(2.5, ratio))
+
+        // Base exponent from ratio: ratio=1 → 1.0, ratio=0.25 → 0.4, ratio=4 → 2.5
+        var exponent = max(0.4, min(2.5, ratio))
+
+        // Slope adjustment: consider energy direction at transition point
+        let outSlope = energyDirectionAt(outEnergy, index: outIdx)
+        let inSlope = energyDirectionAt(inEnergy, index: inIdx)
+
+        // Both falling (calm→calm): smooth blend, nudge exponent toward 1.0
+        if outSlope < -0.01 && inSlope < -0.01 {
+            exponent = exponent * 0.85 + 0.15 // pull toward 1.0
+        }
+        // Outgoing falling, incoming rising (build): incoming rises faster
+        else if outSlope < -0.01 && inSlope > 0.01 {
+            exponent = max(0.35, exponent * 0.8)
+        }
+        // Outgoing rising, incoming falling (drop): outgoing stays dominant
+        else if outSlope > 0.01 && inSlope < -0.01 {
+            exponent = min(3.0, exponent * 1.2)
+        }
+
+        return max(0.35, min(3.0, exponent))
+    }
+
+    /// Energy direction at a given index: positive = rising, negative = falling.
+    private func energyDirectionAt(_ profile: [Float], index: Int) -> Double {
+        guard profile.count >= 3 else { return 0 }
+        let window = 3
+        let lo = max(0, index - window)
+        let hi = min(profile.count - 1, index + window)
+        guard hi > lo else { return 0 }
+        let firstHalf = profile[lo..<(lo + (hi - lo) / 2 + 1)]
+        let secondHalf = profile[(lo + (hi - lo) / 2)...hi]
+        let firstAvg = Double(firstHalf.reduce(0, +)) / Double(firstHalf.count)
+        let secondAvg = Double(secondHalf.reduce(0, +)) / Double(secondHalf.count)
+        return secondAvg - firstAvg
+    }
+
+    // MARK: - Mood Preservation
+
+    struct MoodPreservationParams {
+        /// Volume curve exponent adjustment: energetic tracks get steeper curves.
+        let curveExponentBias: Double
+        /// EQ low-pass end Hz: energetic = less filtering, calm = more.
+        let eqLowPassEndHz: Float
+        /// Duration multiplier: mood-matched = longer, clash = shorter.
+        let durationMultiplier: Double
+        /// Whether both tracks share a similar mood (for logging).
+        let moodsMatch: Bool
+    }
+
+    /// Computes mood-aware crossfade parameters.
+    /// Energetic tracks: steeper curve, less EQ, shorter overlap.
+    /// Calm tracks: gentler curve, more EQ, longer overlap.
+    /// Mood-matched: extended crossfade for seamless blend.
+    private func computeMoodPreservationParams(
+        outgoingAnalysis: TrackAnalysis?,
+        incomingAnalysis: TrackAnalysis?
+    ) -> MoodPreservationParams {
+        let outMood = MusicMood.from(analysis: outgoingAnalysis)
+        let inMood = MusicMood.from(analysis: incomingAnalysis)
+
+        // Mood energy classification
+        let outEnergetic = outMood == .energeticHappy || outMood == .energeticAngry
+        let inEnergetic = inMood == .energeticHappy || inMood == .energeticAngry
+
+        // Similarity: same mood = 1.0, same energy class = 0.7, different = 0.3
+        let moodsMatch = outMood == inMood
+        let sameEnergyClass = outEnergetic == inEnergetic
+        let similarity: Double
+        if moodsMatch {
+            similarity = 1.0
+        } else if sameEnergyClass {
+            similarity = 0.7
+        } else {
+            similarity = 0.3
+        }
+
+        // Curve exponent: energetic = steeper (0.8–1.2), calm = gentler (1.0–1.5)
+        let curveBias: Double
+        if outEnergetic && inEnergetic {
+            curveBias = 0.9   // fast in, fast out — keep energy up
+        } else if !outEnergetic && !inEnergetic {
+            curveBias = 1.3   // slow in, slow out — preserve calm
+        } else {
+            curveBias = 1.1   // mixed — balanced
+        }
+
+        // EQ: calm tracks benefit from more filtering, energetic need clarity
+        let eqEndHz: Float
+        if outEnergetic && inEnergetic {
+            eqEndHz = 5000.0   // less filtering — preserve brightness
+        } else if !outEnergetic && !inEnergetic {
+            eqEndHz = 2000.0   // more filtering — smooth warm blend
+        } else {
+            eqEndHz = 3000.0   // default
+        }
+
+        // Duration: mood-matched gets longer, clash gets shorter
+        let durationMult: Double
+        if moodsMatch {
+            durationMult = 1.2   // 20% longer for seamless mood preservation
+        } else if sameEnergyClass {
+            durationMult = 1.0   // normal
+        } else {
+            durationMult = 0.8   // shorter — minimize mood clash
+        }
+
+        print("[Mood] out=\(outMood.rawValue), in=\(inMood.rawValue), match=\(moodsMatch), curveBias=\(String(format: "%.2f", curveBias)), eqEnd=\(Int(eqEndHz))Hz, durMult=\(String(format: "%.2f", durationMult))")
+
+        return MoodPreservationParams(
+            curveExponentBias: curveBias,
+            eqLowPassEndHz: eqEndHz,
+            durationMultiplier: durationMult,
+            moodsMatch: moodsMatch
+        )
     }
 
     // MARK: - Private Helpers

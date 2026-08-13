@@ -15,6 +15,7 @@ class PlayerViewModel {
 
     var playerState: PlayerState = .idle
     var currentVolume: Float = 1.0
+    var isAnimationPaused: Bool = false
     var importError: String?
     var analysisProgress: Double = 0
     /// Buffered analysis results keyed by track URL — avoids per-callback COW copies.
@@ -31,6 +32,7 @@ class PlayerViewModel {
     private var animationFrame: Int = 0
     private var moodTransitionTimer: Timer?
     private var pendingMood: MusicMood?
+    private let powerManager = PowerManager.shared
 
     var currentAudioProfile: AudioProfile = .flat
 
@@ -710,7 +712,8 @@ class PlayerViewModel {
         guard animationTimer == nil else { return }
 
         currentMood = MusicMood.from(analysis: mixQueue?.currentTrack?.analysis)
-        let speed = currentMood.animationSpeed
+        let baseSpeed = currentMood.animationSpeed
+        let speed = powerManager.isPluggedIn ? baseSpeed * 0.5 : baseSpeed
         animationFrame = 0
 
         animationTimer = Timer.scheduledTimer(withTimeInterval: speed, repeats: true) { [weak self] _ in

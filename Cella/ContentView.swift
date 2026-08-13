@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var viewModel = PlayerViewModel()
     @FocusState private var isFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("colorSchemeOverride") private var schemeOverride: String = "system"
 
     private var effectiveColorScheme: ColorScheme {
@@ -89,6 +90,14 @@ struct ContentView: View {
                 viewModel.setVolume(savedVolume)
             }
             viewModel.setHallReverb(tab == .feeds)
+            if tab != .cella {
+                viewModel.isAnimationPaused = true
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background || phase == .inactive {
+                viewModel.isAnimationPaused = true
+            }
         }
         .onTapGesture {
             // Re-focus when clicking the background so spacebar still works

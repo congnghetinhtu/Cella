@@ -32,6 +32,19 @@ struct EmotionScreenView: View {
             } else {
                 DotMatrixView(pattern: pattern)
             }
+
+            if viewModel?.isAnimationPaused == true {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        Text("Paused")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(theme.textPrimary.opacity(0.7))
+                    )
+                    .onTapGesture {
+                        viewModel?.isAnimationPaused = false
+                    }
+            }
         }
         .overlay(ambientBar, alignment: .bottom)
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
@@ -64,7 +77,7 @@ struct EmotionScreenView: View {
                     .overlay(
                         Group {
                             if viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix {
-                                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { timeline in
+                                TimelineView(.animation) { timeline in
                                     GeometryReader { geo in
                                         let fw = geo.size.width
                                         let cycle: TimeInterval = 3

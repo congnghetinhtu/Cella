@@ -48,23 +48,23 @@ struct AudioConfig {
     /// Maximum gain reduction in dB.
     var maxGainReductionDB: Float = -10.0
 
-    /// Enable spectral blend (EQ sweep) during crossfade.
-    /// Disabled by default — gentle volume curve + loudness match already sound
-    /// natural. Enable only if you want the DJ filter-fade character.
-    var eqFadeEnabled: Bool = false
+    /// Enable low-pass filter on outgoing track during crossfade.
+    /// Smoothly rolls off highs as the outgoing fades, keeping midrange
+    /// from clashing with the incoming track.
+    var eqFadeEnabled: Bool = true
 
     /// Low-pass filter start cutoff (Hz) — outgoing starts here at progress=0.
     var eqLowPassStartHz: Float = 20000.0
 
     /// Low-pass filter end cutoff (Hz) — outgoing reaches here at progress=1.
-    /// 5000 = gentle high roll-off, 200 = aggressive filter-close.
-    var eqLowPassEndHz: Float = 5000.0
+    /// 3000 = gentle warm roll-off, 500 = aggressive filter-close.
+    var eqLowPassEndHz: Float = 3000.0
 
     /// High-pass filter start cutoff (Hz) — incoming starts here at progress=0.
-    /// 50 = barely rolls off sub-bass, 500 = telephone effect.
-    var eqHighPassStartHz: Float = 50.0
+    var eqHighPassStartHz: Float = 20.0
 
     /// High-pass filter end cutoff (Hz) — incoming reaches here at progress=1.
+    /// Disabled by default (20→20 = no change).
     var eqHighPassEndHz: Float = 20.0
 
     /// Final mix peak limit (linear).

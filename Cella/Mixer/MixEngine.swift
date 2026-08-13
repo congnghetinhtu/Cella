@@ -10,11 +10,11 @@ import Foundation
 
 enum MixEngine {
     /// Weights for compatibility scoring components.
-    private static let tempoWeight: Double = 0.22
-    private static let keyWeight: Double = 0.30
-    private static let energyWeight: Double = 0.26
+    private static let tempoWeight: Double = 0.20
+    private static let keyWeight: Double = 0.25
+    private static let energyWeight: Double = 0.35
     private static let spectralWeight: Double = 0.10
-    private static let vocalWeight: Double = 0.12
+    private static let vocalWeight: Double = 0.10
 
     // MARK: - Compatibility Scoring
 
@@ -329,7 +329,7 @@ enum MixEngine {
     // MARK: - Track Ordering
 
     /// Builds an optimally ordered mix queue from a set of analyzed tracks.
-    /// Uses nearest-insertion TSP heuristic for better global ordering.
+    /// Uses local greedy with 2-step lookahead for energy-flow-aware ordering.
     static func buildMixQueue(tracks: [TrackAsset], startingWith startURL: URL? = nil) -> MixQueue {
         let analyzedTracks = tracks.filter { $0.analysis != nil }
         guard !analyzedTracks.isEmpty else {
@@ -359,18 +359,17 @@ enum MixEngine {
         let orderedIndices: [Int]
         if let startURL,
            let startIndex = analyzedTracks.firstIndex(where: { $0.url == startURL }) {
-            orderedIndices = anchoredForwardOrdering(
-                matrix: compatibilityMatrix,
-                count: n,
-                startIndex: startIndex
+            // Anchored: local greedy from current track
+            var greedy = localGreedyOrdering(
+                matrix: compatibilityMatrix, count: n, startIndex: startIndex
             )
+            greedy = twoOptImprove(indices: greedy, matrix: compatibilityMatrix)
+            orderedIndices = greedy
         } else {
-            // Nearest-insertion TSP heuristic
-            var globalIndices = nearestInsertionOrdering(matrix: compatibilityMatrix, count: n)
-
-            // 2-opt improvement pass
-            globalIndices = twoOptImprove(indices: globalIndices, matrix: compatibilityMatrix)
-            orderedIndices = globalIndices
+            // No anchor: try every track as starting point, pick best energy flow
+            orderedIndices = findBestEnergyFlowOrdering(
+                matrix: compatibilityMatrix, count: n
+            )
         }
 
         // Build ordered arrays
@@ -394,11 +393,48 @@ enum MixEngine {
         )
     }
 
-    // MARK: - Anchored Forward Ordering
+    // MARK: - Best Energy Flow Ordering
 
-    /// Builds the queue from the currently playing track forward.
-    /// This favors the very next transition instead of a global path edge that may wrap badly.
-    private static func anchoredForwardOrdering(matrix: [[Double]], count: Int, startIndex: Int) -> [Int] {
+    /// Tries every track as anchor, picks the chain with highest total energy-matched score.
+    /// O(n³) — capped at 100 tracks for safety.
+    private static func findBestEnergyFlowOrdering(matrix: [[Double]], count: Int) -> [Int] {
+        guard count > 0 else { return [] }
+        let limit = min(count, 100)
+
+        var bestTour: [Int] = []
+        var bestScore = -Double.infinity
+
+        for anchor in 0..<limit {
+            var tour = localGreedyOrdering(
+                matrix: matrix, count: count, startIndex: anchor
+            )
+            tour = twoOptImprove(indices: tour, matrix: matrix)
+            let score = energyFlowScore(tour: tour, matrix: matrix)
+            if score > bestScore {
+                bestScore = score
+                bestTour = tour
+            }
+        }
+
+        print("[MixEngine] Best energy flow anchor: score=\(String(format: "%.3f", bestScore))")
+        return bestTour
+    }
+
+    /// Sum of consecutive edge scores — higher = smoother energy flow through the chain.
+    private static func energyFlowScore(tour: [Int], matrix: [[Double]]) -> Double {
+        guard tour.count > 1 else { return 0 }
+        return (0..<(tour.count - 1)).reduce(0.0) { sum, i in
+            sum + matrix[tour[i]][tour[i + 1]]
+        }
+    }
+
+    // MARK: - Local Greedy with 2-Step Lookahead
+
+    /// Greedy ordering from a starting track. At each step, picks the candidate
+    /// scoring highest on: immediate edge (70%) + next-step best (20%) + two-step best (10%).
+    private static func localGreedyOrdering(
+        matrix: [[Double]], count: Int, startIndex: Int
+    ) -> [Int] {
         guard count > 0 else { return [] }
 
         var ordered = [startIndex]
@@ -407,8 +443,14 @@ enum MixEngine {
 
         while let current = ordered.last, !remaining.isEmpty {
             let next = remaining.max { lhs, rhs in
-                anchoredCandidateScore(current: current, candidate: lhs, remaining: remaining, matrix: matrix) <
-                anchoredCandidateScore(current: current, candidate: rhs, remaining: remaining, matrix: matrix)
+                localCandidateScore(
+                    current: current, candidate: lhs,
+                    remaining: remaining, matrix: matrix
+                ) <
+                localCandidateScore(
+                    current: current, candidate: rhs,
+                    remaining: remaining, matrix: matrix
+                )
             }
 
             guard let next else { break }
@@ -419,95 +461,32 @@ enum MixEngine {
         return ordered
     }
 
-    private static func anchoredCandidateScore(
+    /// Scores a candidate by immediate edge (70%), next-step best (20%), two-step best (10%).
+    private static func localCandidateScore(
         current: Int,
         candidate: Int,
         remaining: Set<Int>,
         matrix: [[Double]]
     ) -> Double {
         let immediate = matrix[current][candidate]
-        let futureBest = remaining
-            .filter { $0 != candidate }
-            .map { matrix[candidate][$0] }
+
+        let remainingAfter = remaining.filter { $0 != candidate }
+
+        let nextBest = remainingAfter
+            .map { matrix[candidate][$0] }.max() ?? 0
+
+        let twoStepBest = remainingAfter
+            .flatMap { c1 in
+                remainingAfter.filter { $0 != c1 }.map { matrix[c1][$0] }
+            }
             .max() ?? 0
 
-        return immediate * 0.82 + futureBest * 0.18
-    }
-
-    // MARK: - TSP Heuristic (Nearest Insertion)
-
-    /// Nearest-insertion algorithm for TSP approximation — O(n²).
-    /// Finds the nearest unvisited node to the current tour, then inserts it
-    /// at the position that maximizes local compatibility.
-    private static func nearestInsertionOrdering(matrix: [[Double]], count: Int) -> [Int] {
-        guard count > 0 else { return [] }
-
-        var tour = [0]
-        var inTour = Set<Int>([0])
-
-        while tour.count < count {
-            // Step 1: Find the nearest unvisited node to any node in the tour.
-            var bestNode = -1
-            var bestEdgeScore = -Double.infinity
-
-            for candidate in 0..<count where !inTour.contains(candidate) {
-                // Best edge from candidate to any node already in tour
-                var bestToTour = -Double.infinity
-                for tourNode in tour {
-                    let score = matrix[candidate][tourNode]
-                    if score > bestToTour {
-                        bestToTour = score
-                    }
-                }
-                if bestToTour > bestEdgeScore {
-                    bestEdgeScore = bestToTour
-                    bestNode = candidate
-                }
-            }
-
-            guard bestNode >= 0 else { break }
-
-            // Step 2: Insert at the position that maximizes local compatibility.
-            var bestInsertIdx = 0
-            var bestInsertDelta = -Double.infinity
-
-            for insertPos in 0...tour.count {
-                let delta = insertionDelta(
-                    matrix: matrix, tour: tour,
-                    candidate: bestNode, at: insertPos
-                )
-                if delta > bestInsertDelta {
-                    bestInsertDelta = delta
-                    bestInsertIdx = insertPos
-                }
-            }
-
-            tour.insert(bestNode, at: bestInsertIdx)
-            inTour.insert(bestNode)
-        }
-
-        return tour
-    }
-
-    /// O(1) score delta for inserting a candidate at a given position.
-    /// Positive = adding this edge improves total compatibility.
-    private static func insertionDelta(matrix: [[Double]], tour: [Int], candidate: Int, at pos: Int) -> Double {
-        let prev = pos > 0 ? tour[pos - 1] : -1
-        let next = pos < tour.count ? tour[pos] : -1
-
-        var delta = 0.0
-        // Gain from new edges to candidate
-        if prev >= 0 { delta += matrix[prev][candidate] }
-        if next >= 0 { delta += matrix[candidate][next] }
-        // Loss from broken edge (if both neighbors exist)
-        if prev >= 0, next >= 0 { delta -= matrix[prev][next] }
-
-        return delta
+        return immediate * 0.70 + nextBest * 0.20 + twoStepBest * 0.10
     }
 
     // MARK: - 2-opt Improvement
 
-    /// 2-opt local search improvement for TSP.
+    /// 2-opt local search improvement.
     /// Repeatedly reverses sub-tours to increase total compatibility. Linear (not cyclic).
     private static func twoOptImprove(indices: [Int], matrix: [[Double]]) -> [Int] {
         var result = indices
@@ -520,8 +499,6 @@ enum MixEngine {
 
             for i in 0..<(n - 1) {
                 for j in (i + 2)..<n {
-                    // Current edges: (i, i+1) and (j, j+1) if j+1 < n
-                    // Alternative: (i, j) and (i+1, j+1) with reversed segment
                     let currentScore = matrix[result[i]][result[i + 1]] +
                         (j + 1 < n ? matrix[result[j]][result[j + 1]] : 0)
                     let newScore = matrix[result[i]][result[j]] +
