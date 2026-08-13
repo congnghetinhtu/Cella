@@ -44,10 +44,40 @@ class PlayerViewModel {
     private let crossfader: Crossfader
     private let config: AudioConfig
 
+    // MARK: - OpenMix Integration
+
+    private let openMixBridge = OpenMixBridge()
+    private var streamEngine: StreamAudioEngine?
+    private var openMixAnalysisComplete = false
+    private var openMixImportURL: URL?
+
+    // MARK: - Engine Log
+
+    var engineLog: [String] = []
+    private let maxLogLines = 30
+
+    // MARK: - OpenMix Analysis (for line animation)
+
+    var currentTrackBPM: Double?
+    var currentTrackKey: String?
+
     // MARK: - Computed Properties
 
     var playlistCount: Int { mixQueue?.count ?? 0 }
     var hasTracks: Bool { mixQueue?.isEmpty == false }
+
+    var activeEngine: String {
+        if streamEngine != nil { return "OpenMix" }
+        return "Real-Time"
+    }
+
+    func log(_ message: String) {
+        let ts = String(format: "%.1f", Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 100))
+        engineLog.append("[\(ts)] \(message)")
+        if engineLog.count > maxLogLines {
+            engineLog.removeFirst(engineLog.count - maxLogLines)
+        }
+    }
 
     var currentPattern: [[Bool]] {
         if let temp = temporaryPattern {
@@ -141,6 +171,8 @@ class PlayerViewModel {
         temporaryPatternTimer?.invalidate()
         nowPlayingTimer?.invalidate()
         moodTransitionTimer?.invalidate()
+        openMixBridge.stop()
+        streamEngine?.stop()
     }
 
     // MARK: - Setup
@@ -583,13 +615,13 @@ class PlayerViewModel {
         }
 
         let currentName = queue.currentTrack?.fileName ?? "?"
-        print("[PlayerViewModel] Track ended: \(currentName)")
+        log("Track ended: \(currentName)")
 
         // Crossfade to next track automatically
         if let nextTrack = queue.nextTrack,
            let outgoingTrack = queue.currentTrack {
             let nextName = nextTrack.fileName
-            print("[PlayerViewModel] Crossfading to: \(nextName)")
+            log("Crossfading to: \(nextName)")
 
             playerState = .autoMix
 
@@ -616,7 +648,7 @@ class PlayerViewModel {
                     self?.playerState = .playing
                     self?.stopAnimationLoop()
                     self?.startAnimationLoop()
-                    print("[PlayerViewModel] Crossfade complete — now playing: \(nextName)")
+                    self?.log("Now playing: \(nextName)")
                 }
             }
         } else {
@@ -814,6 +846,189 @@ class PlayerViewModel {
         moodTransitionTimer?.invalidate()
         moodTransitionTimer = nil
         pendingMood = nil
+    }
+
+    // MARK: - OpenMix Streaming Integration
+
+    func importViaOpenMix(url: URL) {
+        // Stop any existing playback and clear old state
+        cancelPendingMoodTransition()
+        stopAnimationLoop()
+        audioEngine.stop()
+        openMixBridge.stop()
+        streamEngine?.stop()
+        streamEngine = nil
+        openMixAnalysisComplete = false
+        currentTrackBPM = nil
+        currentTrackKey = nil
+
+        importError = nil
+        analysisProgress = 0
+        openMixImportURL = url
+
+        print("[PlayerViewModel] Import via OpenMix: \(url.path)")
+
+        let audioExtensions = ["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"]
+        let fileManager = FileManager.default
+        let contents = (try? fileManager.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: nil
+        )) ?? []
+
+        let audioFiles = contents.filter {
+            audioExtensions.contains($0.pathExtension.lowercased())
+        }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+
+        guard audioFiles.count >= 2 else {
+            importError = "Need at least 2 audio files"
+            return
+        }
+
+        totalTrackCount = audioFiles.count
+        analyzedTrackCount = 0
+
+        let tracks = audioFiles.map { TrackAsset(url: $0) }
+        mixQueue = MixQueue(
+            tracks: tracks,
+            transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))
+        )
+
+        openMixBridge.onStatus = { [weak self] status in
+            self?.handleOpenMixStatus(status)
+        }
+        openMixBridge.onChunkReady = { [weak self] data in
+            self?.handleOpenMixChunk(data)
+        }
+
+        streamEngine = StreamAudioEngine()
+
+        openMixBridge.start()
+        openMixBridge.analyze(tracks: audioFiles)
+    }
+
+    private func handleOpenMixStatus(_ status: OpenMixStatus) {
+        switch status {
+        case .ready:
+            log("OpenMix ready")
+
+        case .analyzingProgress(let current, let total, let file):
+            analyzedTrackCount = current
+            totalTrackCount = total
+            analysisProgress = Double(current) / Double(total)
+            playerState = .analyzing(progress: analysisProgress)
+            log("Analyzing \(current)/\(total): \(file)")
+
+        case .mixingProgress(let current, let total, let file):
+            log("Mixing \(current)/\(total): \(file)")
+
+        case .chunkReady(let index, let bytes, let progress):
+            log("Chunk \(index) ready (\(bytes)B, \(Int(progress * 100))%)")
+            if index == 2 {
+                playerState = .playing
+                streamEngine?.startPlayback()
+            }
+
+        case .analysisDone(let tracks):
+            log("Analysis done: \(tracks.count) tracks")
+            applyOpenMixAnalysis(tracks)
+            // Now trigger mix with auto-order
+            let order = Array(0..<tracks.count)
+            openMixBridge.mix(order: order)
+
+        case .done(let duration):
+            log("Mix done — \(String(format: "%.1f", duration))s")
+            playerState = .playing
+            openMixAnalysisComplete = true
+
+        case .error(let message):
+            log("Error: \(message)")
+            openMixBridge.stop()
+            streamEngine?.stop()
+            streamEngine = nil
+
+            if let url = openMixImportURL {
+                log("Falling back to real-time engine")
+                openMixImportURL = nil
+                importFolder(url: url)
+            } else {
+                importError = message
+            }
+
+        case .cancelled:
+            log("Cancelled")
+        }
+    }
+
+    private func handleOpenMixChunk(_ data: Data) {
+        streamEngine?.scheduleChunk(data)
+    }
+
+    func cancelOpenMix() {
+        openMixBridge.stop()
+        streamEngine?.stop()
+        streamEngine = nil
+    }
+
+    // MARK: - OpenMix Analysis Sync
+
+    private func applyOpenMixAnalysis(_ tracks: [[String: Any]]) {
+        guard var queue = mixQueue else { return }
+
+        for trackData in tracks {
+            guard let path = trackData["path"] as? String,
+                  let fileName = trackData["file"] as? String else { continue }
+
+            let fileNameNoExt = (fileName as NSString).deletingPathExtension
+
+            guard let index = queue.tracks.firstIndex(where: { $0.url.path == path || $0.fileName == fileNameNoExt }) else { continue }
+
+            let tempo = trackData["tempo"] as? Double ?? 120.0
+            let keyName = trackData["key"] as? String ?? "C"
+            let duration = trackData["duration"] as? Double ?? 0
+            let energyArray = trackData["energy"] as? [Double] ?? []
+            let introEnd = trackData["intro_end"] as? Double ?? 0
+            let outroStart = trackData["outro_start"] as? Double ?? duration
+
+            let energyFloat = energyArray.map { Float($0) }
+
+            let analysis = TrackAnalysis(
+                bpm: tempo,
+                beatTimestamps: [],
+                barTimestamps: [],
+                keySignature: TrackAnalysis.KeySignature(tonic: keyName, mode: "major"),
+                loudnessIntegrated: nil,
+                loudnessMomentary: [],
+                loudnessShortTerm: [],
+                loudnessPeak: nil,
+                structureSections: [],
+                instrumentActivity: [],
+                energyProfile: energyFloat,
+                hasVocals: false,
+                vocalActivity: [],
+                duration: duration,
+                spectralCentroid: 0,
+                spectralRolloff: 0,
+                spectralBandwidth: 0,
+                spectralFlatness: 0,
+                averageRMS: Float(trackData["energy_avg"] as? Double ?? 0),
+                peakAmplitude: 0,
+                introRegion: introEnd > 0 ? (start: 0, end: introEnd) : nil,
+                outroRegion: outroStart < duration ? (start: outroStart, end: duration) : nil,
+                vocalOnsetTimestamps: [],
+                vocalOffsetTimestamps: []
+            )
+
+            queue.tracks[index].analysis = analysis
+        }
+
+        mixQueue = queue
+
+        // Update current track BPM/Key for line animation
+        if let current = queue.currentTrack?.analysis {
+            currentTrackBPM = current.bpm
+            currentTrackKey = current.keySignature?.tonic
+        }
+
+        log("Analysis synced to \(queue.tracks.filter { $0.analysis != nil }.count) tracks")
     }
 
 }

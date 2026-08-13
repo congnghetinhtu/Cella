@@ -59,6 +59,38 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+            // Engine indicator + log — top-right corner
+            if viewModel.playerState.isPlaying || viewModel.playerState == .autoMix {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(viewModel.activeEngine)
+                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(viewModel.activeEngine == "OpenMix" ? .green : .orange)
+
+                    if !viewModel.engineLog.isEmpty {
+                        VStack(alignment: .trailing, spacing: 1) {
+                            ForEach(Array(viewModel.engineLog.suffix(8).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 8, weight: .regular, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .transition(.opacity)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .padding(.trailing, 16)
+                .padding(.top, 50)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .allowsHitTesting(false)
+                .animation(.easeInOut(duration: 0.4), value: viewModel.activeEngine)
+                .animation(.easeInOut(duration: 0.3), value: viewModel.playerState.isPlaying)
+                .animation(.easeInOut(duration: 0.25), value: viewModel.engineLog.count)
+            }
         }
         .animation(.easeInOut(duration: 0.3), value: effectiveColorScheme)
         .environment(\.theme, theme)

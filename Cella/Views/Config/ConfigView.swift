@@ -416,7 +416,7 @@ struct ConfigView: View {
         print("[ConfigView] Panel result: \(result.rawValue), url: \(panel.url?.path ?? "nil")")
 
         if result == .OK, let url = panel.url {
-            viewModel.importFolder(url: url)
+            viewModel.importViaOpenMix(url: url)
         }
     }
 }

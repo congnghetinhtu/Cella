@@ -509,6 +509,41 @@ class MixAudioEngine {
         }
     }
 
+    // MARK: - Streaming Chunk Support
+
+    /// Schedule an incoming audio chunk for streaming playback.
+    /// Used when OpenMix is streaming chunks instead of real-time crossfading.
+    func scheduleChunk(_ data: Data) {
+        let format = config.processingFormat
+        let ch = Int(format.channelCount)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                             frameCapacity: AVAudioFrameCount(data.count / (4 * ch))) else {
+            return
+        }
+
+        let sampleCount = data.count / (MemoryLayout<Float>.size * ch)
+        buffer.frameLength = AVAudioFrameCount(sampleCount)
+
+        data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            if let channelData = buffer.floatChannelData {
+                let frameCount = Int(buffer.frameLength)
+                if ch == 2 {
+                    let src = baseAddress.assumingMemoryBound(to: Float.self)
+                    for frame in 0..<frameCount {
+                        channelData[0][frame] = src[frame * 2]
+                        channelData[1][frame] = src[frame * 2 + 1]
+                    }
+                } else {
+                    let src = baseAddress.assumingMemoryBound(to: Float.self)
+                    channelData[0].update(from: src, count: frameCount)
+                }
+            }
+        }
+
+        currentPlayer.scheduleBuffer(buffer, at: nil, options: [])
+    }
+
     // MARK: - Automix Crossfade
 
     /// Full automix transition with beat phase alignment, vocal preservation,
@@ -566,22 +601,8 @@ class MixAudioEngine {
             crossfadeDuration *= moodParams.durationMultiplier
             self.moodEqLowPassEndHz = moodParams.eqLowPassEndHz
 
-            // ── 1. BPM SYNC via timePitch (pitch preserved) ──────────
-            // Only slow incoming to match outgoing, never speed up.
-            // Cap slowdown to prevent audible artifacts.
-            // Skip sync when BPMs within 8% — time stretching artifacts
-            // are more noticeable than the tiny tempo mismatch.
-            let outBPM = outgoingAnalysis?.bpm ?? 0
-            let inBPM = incomingAnalysis?.bpm ?? 0
-            let bpmRatio = outBPM > 0 && inBPM > 0 ? abs(outBPM - inBPM) / max(outBPM, inBPM) : 0
-            if outBPM > 0, inBPM > 0, inBPM >= outBPM, bpmRatio >= 0.08 {
-                let rawRate = Float(outBPM / inBPM)
-                incomingTargetRate = max(0.90, rawRate)
-                print("[Engine] BPM sync: outgoing \(String(format: "%.1f", outBPM)) → incoming \(String(format: "%.1f", inBPM)), rate \(String(format: "%.4f", incomingTargetRate))")
-            } else {
-                incomingTargetRate = 1.0
-                print("[Engine] \(outBPM > 0 && inBPM > 0 ? "Incoming faster/close — no sync" : "No BPM data") — no tempo sync")
-            }
+            // ── 1. BPM SYNC DISABLED — preserve original pitch/speed ────
+            incomingTargetRate = 1.0
 
             // ── 2. BEAT PHASE ALIGNMENT ──────────────────────────────────
             // Align incoming's first beat with outgoing's bar boundary at crossfade point.
