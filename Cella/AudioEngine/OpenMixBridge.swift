@@ -60,13 +60,26 @@ class OpenMixBridge {
 
         let sin = Pipe()
         let sout = Pipe()
+        let serr = Pipe()
         proc.standardInput = sin
         proc.standardOutput = sout
-        proc.standardError = FileHandle.nullDevice
+        proc.standardError = serr
 
         stdinPipe = sin
         stdoutPipe = sout
         process = proc
+
+        // Read Python stderr into Cella log
+        let stderrHandle = serr.fileHandleForReading
+        readQueue.async {
+            while let data = stderrHandle.availableData as Data?, !data.isEmpty {
+                let text = String(data: data, encoding: .utf8) ?? ""
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    print("[OpenMix stderr] \(trimmed)")
+                }
+            }
+        }
 
         let currentProcess = proc
         proc.terminationHandler = { [weak self] term in
@@ -99,6 +112,8 @@ class OpenMixBridge {
         if let proc = process, proc.isRunning {
             sendCommand(["cmd": "cancel"])
             proc.terminate()
+            // Wait up to 2s for process to actually die
+            proc.waitUntilExit()
         }
         cleanup()
     }
