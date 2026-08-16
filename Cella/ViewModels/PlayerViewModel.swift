@@ -61,6 +61,17 @@ class PlayerViewModel {
     var currentTrackBPM: Double?
     var currentTrackKey: String?
 
+    // MARK: - Lyrics
+
+    var currentLyrics: [LrcLine] = []
+    var nextLyrics: [LrcLine] = []
+    var lyricsMode: LyricsMode = .off
+    private var playlistFolderURL: URL?
+
+    var isTransitioning: Bool {
+        playerState == .autoMix
+    }
+
     // MARK: - Computed Properties
 
     var playlistCount: Int { mixQueue?.count ?? 0 }
@@ -316,6 +327,40 @@ class PlayerViewModel {
     private func loadTrackAndRestore(url: URL, rate: Float = 1.0, barTimestamps: [Double] = [], analysis: TrackAnalysis? = nil) throws {
         try audioEngine.loadTrack(url: url, rate: rate, barTimestamps: barTimestamps, analysis: analysis)
         restoreAudioSettings()
+        loadLyrics(for: url)
+    }
+
+    // MARK: - Lyrics
+
+    private func loadLyrics(for trackURL: URL) {
+        guard let folder = playlistFolderURL else {
+            currentLyrics = []
+            nextLyrics = []
+            return
+        }
+
+        let lrcName = trackURL.deletingPathExtension().lastPathComponent + ".lrc"
+        let lrcURL = folder.appendingPathComponent(lrcName)
+
+        if FileManager.default.fileExists(atPath: lrcURL.path) {
+            currentLyrics = LrcParser.load(from: lrcURL)
+            print("[PlayerViewModel] Loaded lyrics: \(currentLyrics.count) lines from \(lrcName)")
+        } else {
+            currentLyrics = []
+        }
+
+        // Preload next track lyrics for transition fusion
+        if let nextTrack = mixQueue?.nextTrack {
+            let nextLrcName = nextTrack.url.deletingPathExtension().lastPathComponent + ".lrc"
+            let nextLrcURL = folder.appendingPathComponent(nextLrcName)
+            if FileManager.default.fileExists(atPath: nextLrcURL.path) {
+                nextLyrics = LrcParser.load(from: nextLrcURL)
+            } else {
+                nextLyrics = []
+            }
+        } else {
+            nextLyrics = []
+        }
     }
 
     func togglePlayPause() {
@@ -391,6 +436,8 @@ class PlayerViewModel {
                     self?.playerState = .playing
                     self?.stopAnimationLoop()
                     self?.startAnimationLoop()
+                    // Load lyrics AFTER transition completes
+                    self?.loadLyrics(for: queue.currentTrack?.url ?? nextTrack.url)
                 }
             }
         }
@@ -436,6 +483,7 @@ class PlayerViewModel {
         importError = nil
         analysisProgress = 0
         analysisBuffer = [:]
+        playlistFolderURL = url
 
         print("[PlayerViewModel] importFolder called: \(url.path)")
 
@@ -649,6 +697,8 @@ class PlayerViewModel {
                     self?.stopAnimationLoop()
                     self?.startAnimationLoop()
                     self?.log("Now playing: \(nextName)")
+                    // Load lyrics AFTER transition completes
+                    self?.loadLyrics(for: queue.currentTrack?.url ?? nextTrack.url)
                 }
             }
         } else {
@@ -861,6 +911,7 @@ class PlayerViewModel {
         openMixAnalysisComplete = false
         currentTrackBPM = nil
         currentTrackKey = nil
+        playlistFolderURL = url
 
         importError = nil
         analysisProgress = 0

@@ -20,17 +20,50 @@ struct EmotionScreenView: View {
         return CGFloat(vm.currentTime / vm.currentDuration)
     }
 
+    private var lyricsMode: LyricsMode {
+        viewModel?.lyricsMode ?? .off
+    }
+
+    private var showFullLyrics: Bool {
+        guard let vm = viewModel else { return false }
+        return lyricsMode == .full && !vm.currentLyrics.isEmpty
+    }
+
+    private var showSlimLyrics: Bool {
+        guard let vm = viewModel else { return false }
+        return lyricsMode == .slim && !vm.currentLyrics.isEmpty
+    }
+
+    private var currentLyricLine: String {
+        guard let vm = viewModel, !vm.currentLyrics.isEmpty else { return "" }
+        for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
+            if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
+                return vm.currentLyrics[i].text
+            }
+        }
+        return vm.currentLyrics.first?.text ?? ""
+    }
+
     var body: some View {
         ZStack {
             RoundedRectangle(cornerRadius: 16)
                 .fill(theme.dotInactiveDeep)
 
-            if displayMode == "static" {
-                EmptyView()
-            } else if displayMode == "line", let vm = viewModel {
-                LineAnimationView(viewModel: vm)
-            } else {
-                DotMatrixView(pattern: pattern)
+            // Main content (matrix / line / static)
+            mainContent
+                .blur(radius: showFullLyrics ? 8 : 0)
+                .animation(.easeInOut(duration: 0.3), value: showFullLyrics)
+
+            // Full lyrics overlay (centered in 21:9)
+            if showFullLyrics, let vm = viewModel {
+                LyricsView(
+                    lyrics: vm.currentLyrics,
+                    currentTime: vm.currentTime,
+                    isPlaying: vm.playerState.isPlaying || vm.playerState == .autoMix,
+                    nextLyrics: vm.nextLyrics,
+                    isTransitioning: vm.isTransitioning
+                )
+                .transition(.opacity)
             }
 
             if viewModel?.isAnimationPaused == true {
@@ -46,9 +79,47 @@ struct EmotionScreenView: View {
                     }
             }
         }
+        .overlay(slimLyricsOverlay, alignment: .bottom)
         .overlay(ambientBar, alignment: .bottom)
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
     }
+
+    // MARK: - Slim Lyrics (single line above progress bar)
+
+    private var slimLyricsOverlay: some View {
+        Group {
+            if showSlimLyrics && !currentLyricLine.isEmpty {
+                Text(currentLyricLine)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.dotActive)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.horizontal, 40)
+                    .padding(.bottom, 28)
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .move(edge: .bottom)),
+                        removal: .opacity.combined(with: .move(edge: .top))
+                    ))
+                    .animation(.easeInOut(duration: 0.3), value: currentLyricLine)
+            }
+        }
+    }
+
+    // MARK: - Main Content
+
+    @ViewBuilder
+    private var mainContent: some View {
+        if displayMode == "static" {
+            EmptyView()
+        } else if displayMode == "line", let vm = viewModel {
+            LineAnimationView(viewModel: vm)
+        } else {
+            DotMatrixView(pattern: pattern)
+        }
+    }
+
+    // MARK: - Progress Bar
 
     private var ambientBar: some View {
         let barHeight: CGFloat = isHoveringBar || isDragging ? 4 : 2

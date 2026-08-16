@@ -21,7 +21,27 @@ struct CellaView: View {
             )
             .padding(.horizontal, 80)
 
-            PlayerIndicatorView(statusText: viewModel.statusText)
+            HStack(spacing: 16) {
+                PlayerIndicatorView(statusText: viewModel.statusText)
+
+                if !viewModel.currentLyrics.isEmpty {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            viewModel.lyricsMode.cycle()
+                        }
+                    } label: {
+                        Image(systemName: viewModel.lyricsMode.iconName)
+                            .font(.system(size: 14))
+                            .foregroundStyle(
+                                viewModel.lyricsMode != .off
+                                    ? theme.dotActive
+                                    : theme.textSecondary
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(viewModel.lyricsMode.label)
+                }
+            }
 
             Spacer()
         }

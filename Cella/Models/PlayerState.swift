@@ -112,3 +112,34 @@ enum PlayerState: Equatable {
         }
     }
 }
+
+/// Lyrics display mode.
+enum LyricsMode: Equatable {
+    case off
+    case full
+    case slim
+
+    mutating func cycle() {
+        switch self {
+        case .off:  self = .full
+        case .full: self = .slim
+        case .slim: self = .off
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .off:  return "text.bubble"
+        case .full: return "text.bubble.fill"
+        case .slim: return "text.badge.checkmark"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .off:  return "Lyrics off"
+        case .full: return "Full lyrics"
+        case .slim: return "Slim lyrics"
+        }
+    }
+}
