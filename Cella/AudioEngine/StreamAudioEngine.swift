@@ -141,6 +141,7 @@ class StreamAudioEngine {
 
     func stop() {
         playerNode.stop()
+        engine.stop()
         bufferLock.lock()
         isPlaying = false
         scheduledBuffers.removeAll()

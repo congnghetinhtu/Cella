@@ -307,6 +307,12 @@ class MixAudioEngine {
         cancelTrackEndTimer()
         stop()
 
+        // Ensure the audio engine is running — may have been stopped by
+        // StreamAudioEngine or a device configuration change while idle.
+        if !engine.isRunning {
+            try? engine.start()
+        }
+
         let file = try AudioHelpers.readAudio(url: url)
         let duration = file.duration
 
@@ -616,17 +622,7 @@ class MixAudioEngine {
             // plays at its natural tempo.
             let outBPM = outgoingAnalysis?.bpm ?? 0
             let inBPM = incomingAnalysis?.bpm ?? 0
-            if outBPM > 0, inBPM > 0 {
-                let ratio = outBPM / inBPM
-                // Only apply if difference is audible but not extreme (< 15%)
-                if abs(ratio - 1.0) < 0.15 {
-                    incomingTargetRate = Float(ratio)
-                } else {
-                    incomingTargetRate = 1.0
-                }
-            } else {
-                incomingTargetRate = 1.0
-            }
+            incomingTargetRate = 1.0
 
             // ── 2. BEAT PHASE ALIGNMENT ──────────────────────────────────
             // Align incoming's first beat with outgoing's bar boundary at crossfade point.
@@ -650,14 +646,7 @@ class MixAudioEngine {
             self.outgoingGain = Float(params.outgoingGainCompensation)
             self.incomingGain = Float(params.incomingGainCompensation)
 
-            // Gradual tempo sync: glide incoming from its natural tempo down to the
-            // matched tempo so beats converge smoothly instead of snapping.
-            // Only activate timePitch when rate actually differs — toggling bypass
-            // mid-playback resets internal buffers and can glitch the audio.
-            if abs(incomingTargetRate - 1.0) > 0.001 {
-                otherTimePitch.bypass = false
-                self.startTempoRamp(node: otherTimePitch, from: 1.0, to: incomingTargetRate, duration: min(2.0, crossfadeDuration * 0.4))
-            }
+
 
             // Compute real beat phase delay: outgoing bar boundary - current time.
             let outgoingNow = self.currentTime
@@ -888,7 +877,6 @@ class MixAudioEngine {
         preCrossfadeTimer = nil
         preCrossfadeRampTimer?.invalidate()
         preCrossfadeRampTimer = nil
-        preCrossfadeRampStartTime = nil
     }
 
     /// Starts a 5-second low-pass filter ramp on the outgoing player
@@ -1438,79 +1426,27 @@ class MixAudioEngine {
         isPlaying = true
 
         let elapsed = -(crossfadeStartTime ?? Date()).timeIntervalSinceNow
-        let totalBuffer = self.actualIncomingDuration
-        let rampDuration = min(2.0, currentCrossfadeDuration * 0.4)
-        let targetRate = Double(incomingTargetRate)
-        let audioConsumedDuringCrossfade: Double
-        if elapsed <= rampDuration {
-            audioConsumedDuringCrossfade = elapsed * (1.0 + targetRate) / 2.0
-        } else {
-            let rampAudio = rampDuration * (1.0 + targetRate) / 2.0
-            audioConsumedDuringCrossfade = rampAudio + (elapsed - rampDuration) * targetRate
-        }
-        let remaining = max(0.1, totalBuffer - audioConsumedDuringCrossfade)
+        let remaining = max(0.1, actualIncomingDuration - elapsed)
         seekOffset = max(0, actualIncomingDuration - remaining)
         trackStartTime = Date()
 
-        // Smoothly ramp back to original tempo over 2 seconds instead of
-        // jumping instantly. This prevents audible pitch shift at crossfade end.
-        let rampBackDuration: TimeInterval = 2.0
-        if abs(incomingTargetRate - 1.0) > 0.001 {
-            // During recovery, currentRate transitions from targetRate → 1.0.
-            // Use average rate for time tracking during the ramp.
-            let avgRate = (targetRate + 1.0) / 2.0
-            currentRate = Float(targetRate)
-            remainingAtStart = remaining / avgRate + rampBackDuration
+        currentRate = 1.0
+        remainingAtStart = remaining
+        currentTimePitch.rate = 1.0
+        currentTimePitch.bypass = true
+        otherTimePitch.rate = 1.0
+        otherTimePitch.bypass = true
 
-            // Cancel existing track end timer — will reschedule after ramp completes
-            cancelTrackEndTimer()
-
-            startTempoRamp(
-                node: currentTimePitch,
-                from: incomingTargetRate,
-                to: 1.0,
-                duration: rampBackDuration
-            ) { [weak self] in
-                guard let self else { return }
-                // After ramp completes, bypass the pitch node to lock at native rate
-                self.currentTimePitch.bypass = true
-                self.currentRate = 1.0
-                // Recalculate remaining time now that rate is stable at 1.0
-                let rampAudioConsumed = rampBackDuration * avgRate
-                let remainingAfterRamp = max(0.1, remaining - rampAudioConsumed)
-                self.remainingAtStart = remainingAfterRamp
-                self.seekOffset = max(0, self.actualIncomingDuration - remainingAfterRamp)
-                self.trackStartTime = Date()
-
-                // Reschedule track end timer with corrected timing
-                let maxFade = max(self.config.crossfadeDuration * 1.5, 12.0)
-                self.beatAlignedCrossfadeTime = self.computeBeatAlignedCrossfadeTime(
-                    duration: incomingDuration,
-                    rate: 1.0,
-                    barTimestamps: self.currentBarTimestamps,
-                    crossfadeDuration: maxFade,
-                    outgoingAnalysis: self.currentTrackAnalysis,
-                    incomingAnalysis: nil
-                )
-                self.scheduleTrackEndTimer(delay: max(0.1, self.remainingAtStart - self.beatAlignedCrossfadeTime))
-                print("[Engine] Tempo recovered to 1.0, next crossfade in \(String(format: "%.1f", self.remainingAtStart - self.beatAlignedCrossfadeTime))s")
-            }
-        } else {
-            currentRate = 1.0
-            remainingAtStart = remaining
-            currentTimePitch.bypass = true
-
-            let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
-            beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
-                duration: incomingDuration,
-                rate: 1.0,
-                barTimestamps: currentBarTimestamps,
-                crossfadeDuration: maxFade,
-                outgoingAnalysis: currentTrackAnalysis,
-                incomingAnalysis: nil
-            )
-            scheduleTrackEndTimer(delay: max(0.1, remainingAtStart - beatAlignedCrossfadeTime))
-        }
+        let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
+        beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
+            duration: incomingDuration,
+            rate: 1.0,
+            barTimestamps: currentBarTimestamps,
+            crossfadeDuration: maxFade,
+            outgoingAnalysis: currentTrackAnalysis,
+            incomingAnalysis: nil
+        )
+        scheduleTrackEndTimer(delay: max(0.1, remainingAtStart - beatAlignedCrossfadeTime))
     }
 
 }

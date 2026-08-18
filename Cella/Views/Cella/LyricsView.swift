@@ -87,20 +87,18 @@ struct LyricsView: View {
 
     @ViewBuilder
     private func currentLyricsContent(geo: GeometryProxy, time: Double) -> some View {
+        let scrollOffset = -CGFloat(currentIndex) * lineHeight
+
         ZStack {
             ForEach(Array(lyrics.enumerated()), id: \.element.id) { index, line in
-                let offset = CGFloat(index - currentIndex) * lineHeight
-                let distFromCenter = abs(offset)
+                let fixedY = CGFloat(index) * lineHeight
+                let distFromCenter = abs(CGFloat(index - currentIndex) * lineHeight)
                 let normalizedDist = min(distFromCenter / (lineHeight * 3.0), 1.0)
                 let isCurrent = index == currentIndex
 
                 let opacity = isCurrent ? 1.0 : max(0.0, 1.0 - normalizedDist * 1.5)
                 let scale: CGFloat = isCurrent ? 1.0 : max(0.85, 1.0 - normalizedDist * 0.15)
-                let yOffset = offset - (isCurrent ? lineHeight * 0.12 : 0)
                 let blur: CGFloat = isCurrent ? 0 : min(3, normalizedDist * 3)
-
-                let fx = isCurrent ? 0 : floatX(index, time: time)
-                let fy = isCurrent ? 0 : floatY(index, time: time)
 
                 if abs(CGFloat(index - currentIndex)) < visibleLines {
                     Text(line.text)
@@ -119,14 +117,12 @@ struct LyricsView: View {
                         .truncationMode(.tail)
                         .frame(width: geo.size.width * 0.85)
                         .multilineTextAlignment(.center)
-                        .offset(x: fx, y: yOffset + fy)
-                        .animation(
-                            .interpolatingSpring(stiffness: 80, damping: 14),
-                            value: currentIndex
-                        )
+                        .offset(y: fixedY)
                 }
             }
         }
+        .offset(y: scrollOffset)
+        .animation(.interpolatingSpring(stiffness: 80, damping: 14), value: currentIndex)
     }
 
     // MARK: - Next Lyrics
