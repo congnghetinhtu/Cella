@@ -29,6 +29,21 @@ struct Theme {
         textSecondary: Color(hex: 0x666666)
     )
 
+    static let seafoam = Theme(
+        dotInactive: Color(hex: 0x2D3A33),
+        dotActive: Color(hex: 0x93E9BE),
+        dotActiveGlow: Color(hex: 0x71EEB8),
+        dotInactiveDeep: Color(hex: 0x1A2420),
+        appBackground: Color(hex: 0x0D1210),
+        screenBackground: Color(hex: 0x1A2420),
+        tabBarBackground: Color(hex: 0x1A2420),
+        tabSelectedBackground: Color(hex: 0x93E9BE, opacity: 0.2),
+        tabSelectedText: Color(hex: 0x93E9BE),
+        tabUnselectedText: Color(hex: 0x5A7A6A),
+        textPrimary: Color(hex: 0xD9E8E0),
+        textSecondary: Color(hex: 0x668878)
+    )
+
     static let light = Theme(
         dotInactive: Color(hex: 0xD4C5B8),
         dotActive: Color(hex: 0xFF8038),
@@ -42,6 +57,21 @@ struct Theme {
         tabUnselectedText: Color(hex: 0x8B7355),
         textPrimary: Color(hex: 0x2D1F17),
         textSecondary: Color(hex: 0x7A6B5D)
+    )
+
+    static let lightSeafoam = Theme(
+        dotInactive: Color(hex: 0xC5D8CE),
+        dotActive: Color(hex: 0x3CB371),
+        dotActiveGlow: Color(hex: 0x2E8B57),
+        dotInactiveDeep: Color(hex: 0xE4EDE8),
+        appBackground: Color(hex: 0xFFFFFF),
+        screenBackground: Color(hex: 0xECF5F0),
+        tabBarBackground: Color(hex: 0xECF5F0),
+        tabSelectedBackground: Color(hex: 0x3CB371, opacity: 0.15),
+        tabSelectedText: Color(hex: 0x3CB371),
+        tabUnselectedText: Color(hex: 0x5A7A6A),
+        textPrimary: Color(hex: 0x1A2E24),
+        textSecondary: Color(hex: 0x5A7A6A)
     )
 }
 

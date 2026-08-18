@@ -24,23 +24,26 @@ struct CellaView: View {
             HStack(spacing: 16) {
                 PlayerIndicatorView(statusText: viewModel.statusText)
 
-                if !viewModel.currentLyrics.isEmpty {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            viewModel.lyricsMode.cycle()
-                        }
-                    } label: {
-                        Image(systemName: viewModel.lyricsMode.iconName)
-                            .font(.system(size: 14))
-                            .foregroundStyle(
-                                viewModel.lyricsMode != .off
-                                    ? theme.dotActive
-                                    : theme.textSecondary
-                            )
+                Button {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        viewModel.lyricsMode.cycle()
                     }
-                    .buttonStyle(.plain)
-                    .help(viewModel.lyricsMode.label)
+                } label: {
+                    Image(systemName: viewModel.lyricsMode.iconName)
+                        .font(.system(size: 14))
+                        .foregroundStyle(
+                            viewModel.lyricsMode != .off
+                                ? theme.dotActive
+                                : viewModel.currentTrackHasLrc
+                                    ? theme.textPrimary
+                                    : theme.textSecondary
+                        )
                 }
+                .buttonStyle(.plain)
+                .help(viewModel.currentTrackHasLrc
+                    ? viewModel.lyricsMode.label
+                    : "No lyrics for this track")
+                .keyboardShortcut("l", modifiers: [])
             }
 
             Spacer()

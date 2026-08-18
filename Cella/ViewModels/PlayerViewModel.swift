@@ -68,6 +68,14 @@ class PlayerViewModel {
     var lyricsMode: LyricsMode = .off
     private var playlistFolderURL: URL?
 
+    var currentTrackHasLrc: Bool {
+        guard let url = mixQueue?.currentTrack?.url,
+              let folder = playlistFolderURL else { return false }
+        let lrcName = url.deletingPathExtension().lastPathComponent + ".lrc"
+        let lrcURL = folder.appendingPathComponent(lrcName)
+        return FileManager.default.fileExists(atPath: lrcURL.path)
+    }
+
     var isTransitioning: Bool {
         playerState == .autoMix
     }

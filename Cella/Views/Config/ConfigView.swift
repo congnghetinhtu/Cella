@@ -4,7 +4,8 @@ import AppKit
 struct ConfigView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
-    @AppStorage("colorSchemeOverride") private var schemeOverride: String = "system"
+    @AppStorage("appearanceMode") private var appearanceMode: String = "system"
+    @AppStorage("themeOverride") private var themeOverride: String = "default"
 
     private let cardRadius: CGFloat = 18
     private let cardPadding: CGFloat = 28
@@ -179,7 +180,7 @@ struct ConfigView: View {
     // MARK: - Appearance Card
 
     @AppStorage("displayMode") private var displayMode: String = "matrix"
-    @AppStorage("lineAnimationMode") private var lineMode: String = "parametric"
+
 
     private var appearanceCard: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -200,15 +201,7 @@ struct ConfigView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            if displayMode == "line" {
-                Picker("Line Style", selection: $lineMode) {
-                    Text("Classic").tag("classic")
-                    Text("Parametric").tag("parametric")
-                    Text("Noise").tag("noise")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-            }
+
 
             Divider().background(cardBorder)
 
@@ -221,10 +214,17 @@ struct ConfigView: View {
                     .foregroundStyle(theme.textPrimary)
             }
 
-            Picker("Theme", selection: $schemeOverride) {
+            Picker("Appearance", selection: $appearanceMode) {
                 Text("System").tag("system")
                 Text("Dark").tag("dark")
                 Text("Light").tag("light")
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Picker("Theme", selection: $themeOverride) {
+                Text("Default").tag("default")
+                Text("Seafoam").tag("seafoam")
             }
             .pickerStyle(.segmented)
             .labelsHidden()

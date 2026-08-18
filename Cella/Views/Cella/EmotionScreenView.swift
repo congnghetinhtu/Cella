@@ -10,6 +10,7 @@ struct EmotionScreenView: View {
     @State private var isHoveringBar = false
     @State private var isDragging = false
     @State private var dragProgress: CGFloat?
+    @State private var frozenLyricIndex = -1
 
     private static let barWidth: CGFloat =
         CGFloat(MatrixPatterns.columns) * 36 + CGFloat(MatrixPatterns.columns - 1) * 24
@@ -61,9 +62,22 @@ struct EmotionScreenView: View {
                     currentTime: vm.currentTime,
                     isPlaying: vm.playerState.isPlaying || vm.playerState == .autoMix,
                     nextLyrics: vm.nextLyrics,
-                    isTransitioning: vm.isTransitioning
+                    isTransitioning: vm.isTransitioning,
+                    frozenIndex: frozenLyricIndex
                 )
                 .transition(.opacity)
+                .onChange(of: vm.isTransitioning) { _, transitioning in
+                    if transitioning && frozenLyricIndex < 0 {
+                        for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
+                            if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
+                                frozenLyricIndex = i
+                                break
+                            }
+                        }
+                    } else if !transitioning {
+                        frozenLyricIndex = -1
+                    }
+                }
             }
 
             if viewModel?.isAnimationPaused == true {

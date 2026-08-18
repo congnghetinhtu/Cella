@@ -14,6 +14,7 @@ struct LyricsView: View {
     let isPlaying: Bool
     var nextLyrics: [LrcLine] = []
     var isTransitioning: Bool = false
+    var frozenIndex: Int = -1
     @Environment(\.theme) private var theme
 
     private let lineHeight: CGFloat = 42
@@ -21,8 +22,19 @@ struct LyricsView: View {
 
     private var currentIndex: Int {
         guard !lyrics.isEmpty else { return -1 }
+        if isTransitioning && frozenIndex >= 0 { return frozenIndex }
         for i in stride(from: lyrics.count - 1, through: 0, by: -1) {
             if currentTime >= lyrics[i].time - 0.1 {
+                return i
+            }
+        }
+        return 0
+    }
+
+    private var nextCurrentIndex: Int {
+        guard !nextLyrics.isEmpty else { return 0 }
+        for i in stride(from: nextLyrics.count - 1, through: 0, by: -1) {
+            if currentTime >= nextLyrics[i].time - 0.1 {
                 return i
             }
         }
@@ -123,10 +135,11 @@ struct LyricsView: View {
     private func nextLyricsContent(geo: GeometryProxy, time: Double) -> some View {
         ZStack {
             ForEach(Array(nextLyrics.prefix(5).enumerated()), id: \.element.id) { index, line in
-                let offset = CGFloat(index - 2) * lineHeight
+                let ni = nextCurrentIndex
+                let offset = CGFloat(index - ni - 2) * lineHeight
                 let distFromCenter = abs(offset)
                 let normalizedDist = min(distFromCenter / (lineHeight * 3.0), 1.0)
-                let isCenter = index == 2
+                let isCenter = index - ni == 2
 
                 let opacity = isCenter ? 1.0 : max(0.15, 1.0 - normalizedDist * 0.9)
                 let scale: CGFloat = isCenter ? 1.0 : max(0.88, 1.0 - normalizedDist * 0.12)

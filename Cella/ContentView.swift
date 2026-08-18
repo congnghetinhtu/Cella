@@ -14,10 +14,11 @@ struct ContentView: View {
     @FocusState private var isFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("colorSchemeOverride") private var schemeOverride: String = "system"
+    @AppStorage("appearanceMode") private var appearanceMode: String = "system"
+    @AppStorage("themeOverride") private var themeOverride: String = "default"
 
     private var effectiveColorScheme: ColorScheme {
-        switch schemeOverride {
+        switch appearanceMode {
         case "dark": return .dark
         case "light": return .light
         default: return colorScheme
@@ -25,14 +26,20 @@ struct ContentView: View {
     }
 
     private var preferredScheme: ColorScheme? {
-        switch schemeOverride {
+        switch appearanceMode {
         case "dark": return .dark
         case "light": return .light
         default: return nil
         }
     }
 
-    private var theme: Theme { effectiveColorScheme == .dark ? .dark : .light }
+    private var theme: Theme {
+        let isDark = effectiveColorScheme == .dark
+        switch themeOverride {
+        case "seafoam": return isDark ? .seafoam : .lightSeafoam
+        default: return isDark ? .dark : .light
+        }
+    }
 
     // MARK: - Body
 
