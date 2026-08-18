@@ -672,7 +672,9 @@ class MixAudioEngine {
             print("[Engine] Beat phase delay: \(String(format: "%.3f", beatPhaseDelay))s (outgoingNow=\(String(format: "%.2f", outgoingNow)), incomingFirstBeat=\(String(format: "%.3f", incomingFirstBeat)))")
 
             // ── 3b. VOCAL CONNECTION POINT / INTRO SKIP ────────────────
-            let sampleRate = incomingFile.processingFormat.sampleRate
+            // Use engine processing format sample rate for frame calculations,
+            // since readEntireFile now converts buffers to engine format.
+            let sampleRate = config.processingFormat.sampleRate
             var bufferToSchedule: AVAudioPCMBuffer?
 
             if params.skipIntro && params.vocalConnectionPoint > 0 {
@@ -721,8 +723,10 @@ class MixAudioEngine {
             }
 
             if let bufferToSchedule {
+                print("[Engine] Scheduling incoming buffer: \(bufferToSchedule.frameLength) frames @ \(String(format: "%.0f", bufferToSchedule.format.sampleRate))Hz/\(bufferToSchedule.format.channelCount)ch")
                 otherPlayer.scheduleBuffer(bufferToSchedule, at: nil)
             } else {
+                print("[Engine] Scheduling incoming file directly (no buffer prep)")
                 otherPlayer.scheduleFile(incomingFile, at: nil)
             }
 
@@ -1328,12 +1332,63 @@ class MixAudioEngine {
     // MARK: - Private Helpers
 
     private func readEntireFile(_ file: AVAudioFile) throws -> AVAudioPCMBuffer {
-        let frameCount = AVAudioFrameCount(file.length)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
-            throw NSError(domain: "MixAudioEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate buffer"])
+        let engineFormat = config.processingFormat
+        let fileFormat = file.processingFormat
+
+        // Read into engine processing format so scheduled buffers match the
+        // connection format. When the file's native rate differs from the
+        // engine rate (e.g. 48 kHz vs 44.1 kHz), scheduleBuffer may not
+        // resample correctly, causing a pitch shift that persists for the
+        // entire scheduled buffer duration.
+        if fileFormat.sampleRate == engineFormat.sampleRate
+            && fileFormat.channelCount == engineFormat.channelCount {
+            // Formats match — fast path, no conversion needed.
+            let frameCount = AVAudioFrameCount(file.length)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
+                throw NSError(domain: "MixAudioEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate buffer"])
+            }
+            try file.read(into: buffer)
+            return buffer
         }
-        try file.read(into: buffer)
-        return buffer
+
+        // Read in file's native format, then convert to engine format.
+        print("[Engine] Format mismatch: file=\(String(format: "%.0f", fileFormat.sampleRate))Hz/\(fileFormat.channelCount)ch, engine=\(String(format: "%.0f", engineFormat.sampleRate))Hz/\(engineFormat.channelCount)ch — converting")
+        let frameCount = AVAudioFrameCount(file.length)
+        guard let srcBuffer = AVAudioPCMBuffer(pcmFormat: fileFormat, frameCapacity: frameCount) else {
+            throw NSError(domain: "MixAudioEngine", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to allocate source buffer"])
+        }
+        try file.read(into: srcBuffer)
+
+        guard let converter = AVAudioConverter(from: fileFormat, to: engineFormat) else {
+            print("[Engine] WARNING: Could not create format converter, using file format buffer")
+            return srcBuffer
+        }
+
+        let dstFrameCount = AVAudioFrameCount(Double(frameCount) * engineFormat.sampleRate / fileFormat.sampleRate)
+        guard let dstBuffer = AVAudioPCMBuffer(pcmFormat: engineFormat, frameCapacity: dstFrameCount) else {
+            print("[Engine] WARNING: Could not allocate destination buffer, using file format buffer")
+            return srcBuffer
+        }
+
+        var conversionError: NSError?
+        var isDone = false
+        converter.convert(to: dstBuffer, error: &conversionError) { _, outStatus in
+            if isDone {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            isDone = true
+            outStatus.pointee = .haveData
+            return srcBuffer
+        }
+
+        if let error = conversionError {
+            print("[Engine] Format conversion failed: \(error), using file format buffer")
+            return srcBuffer
+        }
+
+        print("[Engine] Converted buffer: \(dstBuffer.frameLength) frames @ \(String(format: "%.0f", engineFormat.sampleRate))Hz")
+        return dstBuffer
     }
 
     /// Prepends silence to align the incoming track's first beat with the outgoing
@@ -1398,7 +1453,16 @@ class MixAudioEngine {
     }
 
     private func completeCrossfade(incomingDuration: TimeInterval) {
-        print("[Engine] Automix done")
+        print("[Engine] Automix done — incomingDuration=\(String(format: "%.2f", incomingDuration))s")
+
+        // ── Diagnostic: snapshot all audio node states before swap ──────
+        let outPlayerID = currentPlayer === playerA ? "A" : "B"
+        let inPlayerID = otherPlayer === playerA ? "A" : "B"
+        print("[Engine] Pre-swap: current=\(outPlayerID) vol=\(String(format: "%.3f", currentPlayer.volume)), other=\(inPlayerID) vol=\(String(format: "%.3f", otherPlayer.volume))")
+        print("[Engine] Pre-swap: currentTimePitch rate=\(String(format: "%.4f", currentTimePitch.rate)) bypass=\(currentTimePitch.bypass), otherTimePitch rate=\(String(format: "%.4f", otherTimePitch.rate)) bypass=\(otherTimePitch.bypass)")
+        print("[Engine] Pre-swap: eqA band0 freq=\(String(format: "%.0f", eqA.bands[0].frequency))Hz bypass=\(eqA.bands[0].bypass), eqB band0 freq=\(String(format: "%.0f", eqB.bands[0].frequency))Hz bypass=\(eqB.bands[0].bypass)")
+        print("[Engine] Pre-swap: currentRate=\(String(format: "%.4f", currentRate)), isCrossfading=\(isCrossfading), isPlaying=\(isPlaying)")
+        print("[Engine] Pre-swap: actualIncomingDuration=\(String(format: "%.2f", actualIncomingDuration)), currentDuration=\(String(format: "%.2f", currentDuration)), seekOffset=\(String(format: "%.2f", seekOffset))")
 
         if let url = pendingIncomingURL {
             currentURL = url
@@ -1436,6 +1500,14 @@ class MixAudioEngine {
         currentTimePitch.bypass = true
         otherTimePitch.rate = 1.0
         otherTimePitch.bypass = true
+
+        // ── Diagnostic: verify state after swap ────────────────────────
+        let newCurrentPlayerID = currentPlayer === playerA ? "A" : "B"
+        let newOtherPlayerID = otherPlayer === playerA ? "A" : "B"
+        print("[Engine] Post-swap: currentPlayer=\(newCurrentPlayerID) (was \(inPlayerID)), otherPlayer=\(newOtherPlayerID) (was \(outPlayerID))")
+        print("[Engine] Post-swap: currentTimePitch rate=\(String(format: "%.4f", currentTimePitch.rate)) bypass=\(currentTimePitch.bypass), otherTimePitch rate=\(String(format: "%.4f", otherTimePitch.rate)) bypass=\(otherTimePitch.bypass)")
+        print("[Engine] Post-swap: remaining=\(String(format: "%.2f", remaining)), seekOffset=\(String(format: "%.2f", seekOffset)), currentRate=\(String(format: "%.4f", currentRate))")
+        print("[Engine] Post-swap: currentPlayer playing=\(currentPlayer.isPlaying), otherPlayer playing=\(otherPlayer.isPlaying)")
 
         let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
         beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(

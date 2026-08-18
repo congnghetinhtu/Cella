@@ -56,8 +56,8 @@ struct ContentView: View {
                 // Active tab content
                 Group {
                     switch selectedTab {
-                    case .feeds:
-                        FeedsView(viewModel: viewModel)
+                    case .motions:
+                        CellaMotionsView()
                     case .cella:
                         CellaView(viewModel: viewModel)
                     case .config:
@@ -122,13 +122,13 @@ struct ContentView: View {
             isFocused = true
         }
         .onChange(of: selectedTab) { _, tab in
-            if tab == .feeds {
+            if tab == .motions {
                 savedVolume = viewModel.currentVolume
                 viewModel.setVolume(0.1)
             } else {
                 viewModel.setVolume(savedVolume)
             }
-            viewModel.setHallReverb(tab == .feeds)
+            viewModel.setHallReverb(tab == .motions)
             if tab != .cella {
                 viewModel.isAnimationPaused = true
             }

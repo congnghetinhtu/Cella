@@ -68,6 +68,32 @@ class PlayerViewModel {
     var lyricsMode: LyricsMode = .off
     private var playlistFolderURL: URL?
 
+    // MARK: - Artist Images
+
+    var artistImages: [NSImage] = []
+    var currentArtistImage: NSImage?
+    private var artistImageIndex: Int = 0
+
+    // MARK: - Animated Background (GIF / Video)
+
+    var gifFrames: [NSImage] = []
+    var gifFrameDurations: [Double] = []
+    var currentGifFrame: NSImage?
+    var isGifPlaying: Bool = false
+    private var gifFrameIndex: Int = 0
+    private var gifDirection: Int = 1  // 1 = forward, -1 = backward
+    private var gifTimer: Timer?
+
+    // MP4/MOV boomerang via AVPlayer
+    var videoPlayer: AVPlayer?
+    var isVideoPlaying: Bool = false
+    private var videoBoomerangForward = true
+    private var videoObservation: Any?
+
+    // Multi-artist video playlist
+    var artistVideoURLs: [URL] = []
+    private var artistVideoIndex: Int = 0
+
     var currentTrackHasLrc: Bool {
         guard let url = mixQueue?.currentTrack?.url,
               let folder = playlistFolderURL else { return false }
@@ -190,6 +216,10 @@ class PlayerViewModel {
         temporaryPatternTimer?.invalidate()
         nowPlayingTimer?.invalidate()
         moodTransitionTimer?.invalidate()
+        gifTimer?.invalidate()
+        if let obs = videoObservation {
+            NotificationCenter.default.removeObserver(obs)
+        }
         openMixBridge.stop()
         streamEngine?.stop()
     }
@@ -369,6 +399,346 @@ class PlayerViewModel {
         } else {
             nextLyrics = []
         }
+
+        // Reload artist images/videos for this track's artists
+        if let folder = playlistFolderURL {
+            loadArtistImages(from: folder)
+        }
+    }
+
+    // MARK: - Artist Images
+
+    private func loadArtistImages(from folder: URL) {
+        let artistsDir = folder.appendingPathComponent("artists")
+        guard FileManager.default.fileExists(atPath: artistsDir.path) else {
+            artistImages = []
+            currentArtistImage = nil
+            artistVideoURLs = []
+            stopGifAnimation()
+            return
+        }
+
+        let allExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp", "mp4", "mov"])
+        let animatedExtensions = Set(["gif", "mp4", "mov"])
+        let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
+
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: artistsDir, includingPropertiesForKeys: nil
+        )) ?? []
+
+        let allFiles = contents.filter {
+            allExtensions.contains($0.pathExtension.lowercased())
+        }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+
+        let animatedFiles = allFiles.filter { animatedExtensions.contains($0.pathExtension.lowercased()) }
+        let staticFiles = allFiles.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
+
+        // Parse artist names from current track filename
+        let trackArtists: [String] = {
+            guard let trackName = mixQueue?.currentTrack?.fileName else { return [] }
+            var artists: [String] = []
+            
+            // Main artist: before " - "
+            if let separatorIndex = trackName.range(of: " - ")?.lowerBound {
+                let mainArtist = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
+                if !mainArtist.isEmpty { artists.append(mainArtist) }
+            }
+            
+            // Featured artists: (feat. ...) / (ft. ...) anywhere in filename
+            let patterns = ["feat.", "ft.", "featuring"]
+            for pattern in patterns {
+                var searchRange = trackName.startIndex..<trackName.endIndex
+                while let featRange = trackName.range(of: "(\(pattern) ", options: .caseInsensitive, range: searchRange) {
+                    let afterFeat = featRange.upperBound
+                    guard let closeParen = trackName.range(of: ")", range: afterFeat..<trackName.endIndex) else { break }
+                    let featPart = String(trackName[afterFeat..<closeParen.lowerBound])
+                    // Split featured artists by "&" or ","
+                    for name in featPart.components(separatedBy: CharacterSet(charactersIn: "&,")) {
+                        let trimmed = name.trimmingCharacters(in: .whitespaces)
+                        if !trimmed.isEmpty { artists.append(trimmed) }
+                    }
+                    searchRange = closeParen.upperBound..<trackName.endIndex
+                }
+            }
+            
+            return artists.map { $0.lowercased() }.filter { !$0.isEmpty }
+        }()
+
+        // Match artist names to video files (filename without extension)
+        artistVideoURLs = []
+        if !trackArtists.isEmpty {
+            for videoURL in animatedFiles where videoURL.pathExtension.lowercased() != "gif" {
+                let videoName = videoURL.deletingPathExtension().lastPathComponent
+                    .lowercased()
+                    .replacingOccurrences(of: "-", with: " ")
+                    .replacingOccurrences(of: "_", with: " ")
+                let matched = trackArtists.contains { artist in
+                    // Normalize: remove hyphens/underscores for comparison
+                    let normalized = artist.replacingOccurrences(of: "-", with: " ")
+                        .replacingOccurrences(of: "_", with: " ")
+                    return videoName == normalized
+                        || videoName.hasPrefix(normalized + " ")
+                        || normalized.hasPrefix(videoName + " ")
+                }
+                if matched {
+                    artistVideoURLs.append(videoURL)
+                }
+            }
+        }
+        // Fallback: if no match, use all videos
+        if artistVideoURLs.isEmpty {
+            artistVideoURLs = animatedFiles.filter { $0.pathExtension.lowercased() != "gif" }
+        }
+        artistVideoIndex = 0
+
+        // Load static images
+        artistImages = staticFiles.compactMap { NSImage(contentsOf: $0) }
+        artistImageIndex = 0
+
+        // Load animated frames (priority: first matching GIF, then first video)
+        stopGifAnimation()
+        destroyVideoPlayback()
+        gifFrames = []
+        gifFrameDurations = []
+
+        if let gifURL = animatedFiles.first(where: { $0.pathExtension.lowercased() == "gif" }) {
+            loadGifFrames(from: gifURL)
+        } else if let firstVideo = artistVideoURLs.first {
+            loadVideoPlayer(from: firstVideo)
+        }
+
+        // Set initial image: prefer animated, fallback to static
+        if !gifFrames.isEmpty {
+            currentGifFrame = gifFrames.first
+            currentArtistImage = gifFrames.first
+            startGifAnimation()
+            print("[PlayerViewModel] Loaded animated GIF: \(gifFrames.count) frame(s)")
+        } else if videoPlayer != nil {
+            currentArtistImage = nil
+            if playerState == .playing || playerState == .autoMix {
+                startVideoPlayback()
+            }
+            print("[PlayerViewModel] Loaded video background (\(artistVideoURLs.count) artist video(s))")
+        } else {
+            currentArtistImage = artistImages.first
+        }
+
+        let totalStatic = artistImages.count
+        let totalAnimated = gifFrames.count
+        if totalStatic > 0 || totalAnimated > 0 {
+            print("[PlayerViewModel] Loaded \(totalStatic) image(s), \(totalAnimated) animated frame(s)")
+        }
+    }
+
+    private func cycleArtistImage() {
+        // If animated (GIF/video) is playing, don't cycle static images
+        guard gifFrames.isEmpty, videoPlayer == nil else { return }
+        guard !artistImages.isEmpty else { return }
+        currentArtistImage = artistImages[artistImageIndex % artistImages.count]
+        artistImageIndex += 1
+    }
+
+    // MARK: - GIF Loading & Boomerang
+
+    private func loadGifFrames(from url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return }
+
+        let frameCount = CGImageSourceGetCount(source)
+        guard frameCount > 1 else {
+            // Single-frame GIF, treat as static
+            if let image = NSImage(contentsOf: url) {
+                gifFrames = [image]
+                gifFrameDurations = [0.1]
+            }
+            return
+        }
+
+        var frames: [NSImage] = []
+        var durations: [Double] = []
+
+        for i in 0..<frameCount {
+            guard let cgImage = CGImageSourceCreateImageAtIndex(source, i, nil) else { continue }
+            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            frames.append(nsImage)
+
+            // Extract frame duration from GIF metadata
+            let duration = gifFrameDuration(source: source, index: i)
+            durations.append(duration)
+        }
+
+        gifFrames = frames
+        gifFrameDurations = durations
+        gifFrameIndex = 0
+        gifDirection = 1
+    }
+
+    private func gifFrameDuration(source: CGImageSource, index: Int) -> Double {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
+              let gifDict = properties[kCGImagePropertyGIFDictionary as String] as? [String: Any] else {
+            return 0.1 // default
+        }
+
+        // Try unclamped delay time first, then delay time
+        if let unclamped = gifDict[kCGImagePropertyGIFUnclampedDelayTime as String] as? Double, unclamped > 0 {
+            return unclamped
+        }
+        if let delay = gifDict[kCGImagePropertyGIFDelayTime as String] as? Double, delay > 0 {
+            return delay
+        }
+        return 0.1
+    }
+
+    // MARK: - Video Playback (MP4/MOV via AVPlayer)
+
+    private func loadVideoPlayer(from url: URL) {
+        stopVideoPlayback()
+
+        if artistVideoURLs.count > 1 {
+            // Multi-artist: use AVQueuePlayer for seamless transitions
+            let items = artistVideoURLs.map { AVPlayerItem(url: $0) }
+            let queuePlayer = AVQueuePlayer(items: items)
+            queuePlayer.isMuted = true
+            queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
+            self.videoPlayer = queuePlayer
+
+            // Track current item index for looping
+            artistVideoIndex = 0
+
+            // Observe when current item ends → advance or loop
+            videoObservation = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self = self else { return }
+                self.artistVideoIndex += 1
+                if self.artistVideoIndex >= items.count {
+                    // All videos played — re-insert all items and restart
+                    self.artistVideoIndex = 0
+                    for item in items { item.seek(to: .zero) }
+                    queuePlayer.removeAllItems()
+                    for item in items { queuePlayer.insert(item, after: nil) }
+                    queuePlayer.seek(to: .zero)
+                    queuePlayer.play()
+                }
+            }
+
+            print("[PlayerViewModel] Loaded \(items.count) artist videos via queue player")
+        } else {
+            // Single video: simple AVPlayer with loop
+            let playerItem = AVPlayerItem(url: url)
+            let player = AVPlayer(playerItem: playerItem)
+            player.isMuted = true
+            player.preventsDisplaySleepDuringVideoPlayback = false
+            self.videoPlayer = player
+
+            videoObservation = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: playerItem,
+                queue: .main
+            ) { [weak self] _ in
+                self?.videoPlayer?.seek(to: .zero) { _ in
+                    self?.videoPlayer?.play()
+                }
+            }
+
+            print("[PlayerViewModel] Loaded video: \(url.lastPathComponent)")
+        }
+    }
+
+    func startVideoPlayback() {
+        guard let player = videoPlayer else { return }
+        isVideoPlaying = true
+        if let queuePlayer = player as? AVQueuePlayer {
+            queuePlayer.seek(to: .zero)
+            queuePlayer.play()
+        } else {
+            player.seek(to: .zero)
+            player.play()
+        }
+    }
+
+    func stopVideoPlayback() {
+        // Just pause — keep the player alive for next track
+        videoPlayer?.pause()
+        isVideoPlaying = false
+    }
+
+    func destroyVideoPlayback() {
+        // Full teardown — only when loading new folder
+        if let obs = videoObservation {
+            NotificationCenter.default.removeObserver(obs)
+            videoObservation = nil
+        }
+        videoPlayer?.pause()
+        videoPlayer = nil
+        isVideoPlaying = false
+    }
+
+    private func boomerangSeek() {
+        guard let player = videoPlayer, let item = player.currentItem else { return }
+        let duration = item.duration
+        guard duration.isValid, !duration.isIndefinite else { return }
+
+        if videoBoomerangForward {
+            // Finished forward → seek to start, play again
+            videoBoomerangForward = false
+            player.seek(to: CMTime.zero) { [weak self] _ in
+                self?.videoBoomerangForward = true
+                self?.videoPlayer?.play()
+            }
+        }
+    }
+
+    // MARK: - Boomerang Animation
+
+    func startGifAnimation() {
+        guard !gifFrames.isEmpty, gifTimer == nil else { return }
+        isGifPlaying = true
+        scheduleNextGifFrame()
+    }
+
+    func stopGifAnimation() {
+        gifTimer?.invalidate()
+        gifTimer = nil
+        isGifPlaying = false
+        gifFrameIndex = 0
+        gifDirection = 1
+    }
+
+    private func scheduleNextGifFrame() {
+        guard !gifFrames.isEmpty else { return }
+
+        let duration = gifFrameDurations[gifFrameIndex]
+        gifTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
+            self?.advanceGifFrame()
+        }
+    }
+
+    private func advanceGifFrame() {
+        guard !gifFrames.isEmpty else { return }
+
+        // Boomerang: go forward then backward
+        gifFrameIndex += gifDirection
+
+        if gifFrameIndex >= gifFrames.count {
+            // Reached end — reverse direction
+            gifDirection = -1
+            gifFrameIndex = gifFrames.count - 2
+        } else if gifFrameIndex < 0 {
+            // Reached start — reverse direction
+            gifDirection = 1
+            gifFrameIndex = 1
+        }
+
+        // Clamp safety
+        gifFrameIndex = max(0, min(gifFrameIndex, gifFrames.count - 1))
+
+        currentGifFrame = gifFrames[gifFrameIndex]
+        currentArtistImage = gifFrames[gifFrameIndex]
+
+        scheduleNextGifFrame()
     }
 
     func togglePlayPause() {
@@ -492,6 +862,9 @@ class PlayerViewModel {
         analysisProgress = 0
         analysisBuffer = [:]
         playlistFolderURL = url
+        artistImages = []
+        currentArtistImage = nil
+        loadArtistImages(from: url)
 
         print("[PlayerViewModel] importFolder called: \(url.path)")
 
@@ -833,6 +1206,9 @@ class PlayerViewModel {
             self.animatedPattern = frames[self.animationFrame]
             self.animationFrame = (self.animationFrame + 1) % frames.count
         }
+
+        startGifAnimation()
+        startVideoPlayback()
     }
 
     private func stopAnimationLoop() {
@@ -840,6 +1216,8 @@ class PlayerViewModel {
         animationTimer = nil
         animationFrame = 0
         animatedPattern = MatrixPatterns.smileyFace
+        stopGifAnimation()
+        stopVideoPlayback()
     }
 
     // MARK: - Phase-Aligned Mood Transition
@@ -920,6 +1298,9 @@ class PlayerViewModel {
         currentTrackBPM = nil
         currentTrackKey = nil
         playlistFolderURL = url
+        artistImages = []
+        currentArtistImage = nil
+        loadArtistImages(from: url)
 
         importError = nil
         analysisProgress = 0

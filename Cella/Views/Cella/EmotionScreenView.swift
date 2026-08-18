@@ -1,4 +1,27 @@
 import SwiftUI
+import AVFoundation
+import AVKit
+
+// MARK: - Video Background (NSViewRepresentable for AVPlayerLayer)
+
+struct VideoBackgroundView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .none
+        view.showsFullScreenToggleButton = false
+        view.videoGravity = .resizeAspectFill
+        view.layer?.cornerRadius = 16
+        view.layer?.masksToBounds = true
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        nsView.player = player
+    }
+}
 
 struct EmotionScreenView: View {
     let pattern: [[Bool]]
@@ -50,6 +73,28 @@ struct EmotionScreenView: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(theme.dotInactiveDeep)
 
+            // Artist image background — only when playing
+            if let vm = viewModel,
+               vm.playerState.isPlaying || vm.playerState == .autoMix {
+                if let player = vm.videoPlayer {
+                    // Video boomerang background
+                    VideoBackgroundView(player: player)
+                        .opacity(0.35)
+                        .blur(radius: 4)
+                        .transition(.opacity)
+                } else if let image = vm.currentArtistImage {
+                    // Static/GIF image background
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(21.0 / 9.0, contentMode: .fill)
+                        .opacity(0.35)
+                        .blur(radius: 4)
+                        .clipped()
+                        .transition(.opacity)
+                        .animation(.easeInOut(duration: 0.8), value: vm.currentArtistImage?.hash)
+                }
+            }
+
             // Main content (matrix / line / static)
             mainContent
                 .blur(radius: showFullLyrics ? 8 : 0)
@@ -94,7 +139,12 @@ struct EmotionScreenView: View {
             }
         }
         .overlay(slimLyricsOverlay, alignment: .bottom)
-        .overlay(ambientBar, alignment: .bottom)
+        .overlay(alignment: .bottom) {
+            TimelineView(.animation) { _ in
+                ambientBar
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 16))
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
     }
 

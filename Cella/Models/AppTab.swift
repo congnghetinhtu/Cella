@@ -8,7 +8,7 @@
 import Foundation
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case feeds = "Feeds"
+    case motions = "Cella Motions"
     case cella = "Cella"
     case config = "Config"
 
