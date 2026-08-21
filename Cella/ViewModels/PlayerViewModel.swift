@@ -83,6 +83,7 @@ class PlayerViewModel {
     // Multi-artist video playlist
     var artistVideoURLs: [URL] = []
     private var artistVideoIndex: Int = 0
+    private var profileSoundPlayer: AVAudioPlayer?
 
     var currentTrackHasLrc: Bool {
         guard let url = mixQueue?.currentTrack?.url,
@@ -340,8 +341,19 @@ class PlayerViewModel {
     }
 
     func applyAudioProfile(_ profile: AudioProfile) {
+        let isNew = profile != currentAudioProfile
         currentAudioProfile = profile
         audioEngine.applyProfileEQ(profile)
+        if profile == .airpodsMax && isNew {
+            playProfileSound()
+        }
+    }
+
+    private func playProfileSound() {
+        guard let url = Bundle.main.url(forResource: "airpodsMaxOnline", withExtension: "m4a") else { return }
+        profileSoundPlayer = try? AVAudioPlayer(contentsOf: url)
+        profileSoundPlayer?.volume = 0.8
+        profileSoundPlayer?.play()
     }
 
     private func restoreAudioSettings() {

@@ -552,7 +552,7 @@ struct VideoTrimBar: View {
 
         if zoomLevel > 1.5 {
             // Already zoomed — zoom out to full
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(.smooth) {
                 zoomLevel = 1.0
                 panOffset = 0.0
             }
@@ -565,7 +565,7 @@ struct VideoTrimBar: View {
             let maxPan = max(0, duration - newVisDur)
             let targetPan = maxPan > 0 ? (center - newVisDur / 2) / maxPan : 0
 
-            withAnimation(.easeInOut(duration: 0.3)) {
+            withAnimation(.smooth) {
                 zoomLevel = newZoom
                 panOffset = max(0, min(1.0, targetPan))
             }
@@ -579,7 +579,7 @@ struct VideoTrimBar: View {
             let newVisDur = duration / zoomLevel
             let maxPan = max(0, duration - newVisDur)
             let targetPan = maxPan > 0 ? (center - newVisDur / 2) / maxPan : 0
-            withAnimation(.easeInOut(duration: 0.2)) {
+            withAnimation(.snappy) {
                 panOffset = max(0, min(1.0, targetPan))
             }
         }

@@ -149,11 +149,11 @@ struct TopTabBar: View {
             guard let idx = tabs.firstIndex(of: selectedTab) else { return }
 
             if signal == 1, idx < tabs.count - 1 {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                withAnimation(.snappy) {
                     selectedTab = tabs[idx + 1]
                 }
             } else if signal == -1, idx > 0 {
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                withAnimation(.snappy) {
                     selectedTab = tabs[idx - 1]
                 }
             }
@@ -175,21 +175,21 @@ struct TopTabBar: View {
                     if rawOffset < -threshold && dragStartIndex < tabs.count - 1 {
                         let nextTab = tabs[dragStartIndex + 1]
                         if selectedTab != nextTab {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            withAnimation(.snappy) {
                                 selectedTab = nextTab
                             }
                         }
                     } else if rawOffset > threshold && dragStartIndex > 0 {
                         let prevTab = tabs[dragStartIndex - 1]
                         if selectedTab != prevTab {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            withAnimation(.snappy) {
                                 selectedTab = prevTab
                             }
                         }
                     }
                 }
                 .onEnded { _ in
-                    withAnimation(.spring(response: 0.4, dampingFraction: 0.65)) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                         dragOffset = 0
                     }
                 }
@@ -201,7 +201,7 @@ struct TopTabBar: View {
     @ViewBuilder
     private func tabButton(for tab: AppTab) -> some View {
         Button {
-            withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            withAnimation(.snappy) {
                 selectedTab = tab
             }
         } label: {

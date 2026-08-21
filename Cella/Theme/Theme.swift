@@ -80,3 +80,16 @@ extension EnvironmentValues {
         set { self[ThemeKey.self] = newValue }
     }
 }
+
+// MARK: - Unified Animation Curves
+
+extension Animation {
+    /// Fast UI interactions (button taps, tab switches, hovers)
+    static let snappy = Animation.spring(response: 0.25, dampingFraction: 0.8)
+
+    /// Content transitions (theme changes, image crossfades, blur)
+    static let smooth = Animation.spring(response: 0.35, dampingFraction: 0.85)
+
+    /// Lyrics line transitions (scroll, fade, depth-of-field)
+    static let lyricsSpring = Animation.interpolatingSpring(stiffness: 60, damping: 18)
+}

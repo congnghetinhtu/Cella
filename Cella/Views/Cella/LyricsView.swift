@@ -50,19 +50,13 @@ struct LyricsView: View {
                     currentLyricsContent(geo: geo, time: t)
                         .offset(x: isTransitioning ? -geo.size.width * 0.6 : 0)
                         .opacity(isTransitioning ? 0.0 : 1.0)
-                        .animation(
-                            .interpolatingSpring(stiffness: 50, damping: 16),
-                            value: isTransitioning
-                        )
+                        .animation(.lyricsSpring, value: isTransitioning)
 
                     if isTransitioning && !nextLyrics.isEmpty {
                         nextLyricsContent(geo: geo, time: t)
                             .offset(x: isTransitioning ? 0 : geo.size.width * 0.6)
                             .opacity(isTransitioning ? 1.0 : 0.0)
-                            .animation(
-                                .interpolatingSpring(stiffness: 50, damping: 16),
-                                value: isTransitioning
-                            )
+                            .animation(.lyricsSpring, value: isTransitioning)
                     }
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
@@ -122,7 +116,7 @@ struct LyricsView: View {
             }
         }
         .offset(y: scrollOffset)
-        .animation(.interpolatingSpring(stiffness: 80, damping: 14), value: currentIndex)
+        .animation(.lyricsSpring, value: currentIndex)
     }
 
     // MARK: - Next Lyrics

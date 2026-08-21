@@ -129,13 +129,13 @@ struct TrackDropDelegate: DropDelegate {
 
     func dropEntered(info: DropInfo) {
         guard let dragged = draggedIndex, dragged != destinationIndex else { return }
-        withAnimation(.easeInOut(duration: 0.15)) {
+        withAnimation(.snappy) {
             dropTargetIndex = destinationIndex
         }
     }
 
     func dropExited(info: DropInfo) {
-        withAnimation {
+        withAnimation(.snappy) {
             dropTargetIndex = nil
         }
     }

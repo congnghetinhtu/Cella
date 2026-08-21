@@ -6,6 +6,7 @@ struct ConfigView: View {
     @Environment(\.theme) private var theme
     @AppStorage("appearanceMode") private var appearanceMode: String = "system"
     @AppStorage("themeOverride") private var themeOverride: String = "default"
+    @AppStorage("displayMode") private var displayMode: String = "matrix"
 
     private let cardRadius: CGFloat = 18
     private let cardPadding: CGFloat = 28
@@ -22,16 +23,9 @@ struct ConfigView: View {
 
                 if viewModel.hasTracks {
                     HStack(alignment: .top, spacing: gridSpacing) {
-                        VStack(spacing: gridSpacing) {
-                            statusCard
-                            appearanceCard
-                        }
-                        .frame(maxHeight: .infinity)
+                        statusCard
 
-                        queueCard
-                            .frame(width: 300)
-                            .frame(maxHeight: .infinity)
-                            .clipped()
+                        appearanceCard
                     }
 
                     audioCard
@@ -104,23 +98,10 @@ struct ConfigView: View {
         )
     }
 
-    // MARK: - Queue Card
-
-    private var queueCard: some View {
-        QueueView(viewModel: viewModel)
-            .background(theme.screenBackground)
-            .clipShape(RoundedRectangle(cornerRadius: cardRadius))
-            .clipped()
-            .overlay(
-                RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(cardBorder, lineWidth: 1)
-            )
-    }
-
     // MARK: - Status Card
 
     private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Circle()
                     .fill(viewModel.playerState.isPlaying ? Color.green : theme.textSecondary)
@@ -142,7 +123,16 @@ struct ConfigView: View {
                     .foregroundStyle(theme.textSecondary.opacity(0.6))
             }
 
-            Spacer(minLength: 0)
+            if viewModel.hasTracks {
+                Divider()
+                    .background(cardBorder)
+                    .padding(.vertical, 10)
+
+                QueueView(viewModel: viewModel)
+                    .frame(maxHeight: 260)
+            } else {
+                Spacer(minLength: 0)
+            }
         }
         .padding(cardPadding)
         .frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
@@ -156,9 +146,6 @@ struct ConfigView: View {
 
     // MARK: - Appearance Card
 
-    @AppStorage("displayMode") private var displayMode: String = "matrix"
-
-
     private var appearanceCard: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
@@ -170,15 +157,27 @@ struct ConfigView: View {
                     .foregroundStyle(theme.textPrimary)
             }
 
-            Picker("Display", selection: $displayMode) {
-                Text("Matrix").tag("matrix")
-                Text("Line").tag("line")
-                Text("Static").tag("static")
+            HStack(spacing: 6) {
+                ForEach([("matrix", "Matrix"), ("line", "Line"), ("static", "Static")], id: \.0) { id, label in
+                    let isSelected = displayMode == id
+                    Button {
+                        withAnimation(.snappy) {
+                            displayMode = id
+                        }
+                    } label: {
+                        Text(label)
+                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? .white : theme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-
 
             Divider().background(cardBorder)
 
@@ -191,19 +190,33 @@ struct ConfigView: View {
                     .foregroundStyle(theme.textPrimary)
             }
 
-            Picker("Appearance", selection: $appearanceMode) {
-                Text("System").tag("system")
-                Text("Dark").tag("dark")
-                Text("Light").tag("light")
+            HStack(spacing: 6) {
+                ForEach([("system", "System"), ("dark", "Dark"), ("light", "Light")], id: \.0) { id, label in
+                    let isSelected = appearanceMode == id
+                    Button {
+                        withAnimation(.smooth) {
+                            appearanceMode = id
+                        }
+                    } label: {
+                        Text(label)
+                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? .white : theme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 ForEach([("default", "Default"), ("seafoam", "Seafoam")], id: \.0) { id, label in
                     let isSelected = themeOverride == id
                     Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.smooth) {
                             themeOverride = id
                         }
                     } label: {
@@ -212,8 +225,10 @@ struct ConfigView: View {
                             .foregroundStyle(isSelected ? .white : theme.textSecondary)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 6)
-                            .background(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
+                            )
                     }
                     .buttonStyle(.plain)
                 }
@@ -251,22 +266,45 @@ struct ConfigView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
                 ForEach(AudioProfile.allCases, id: \.self) { profile in
                     let isSelected = profile == viewModel.currentAudioProfile
+                    let isSpecial = profile.isSpecial && isSelected
                     Button {
-                        viewModel.applyAudioProfile(profile)
+                        withAnimation(.snappy) {
+                            viewModel.applyAudioProfile(profile)
+                        }
                     } label: {
                         VStack(spacing: 6) {
                             Image(systemName: profile.iconName)
                                 .font(.system(size: 16))
-                                .foregroundStyle(isSelected ? .white : theme.textSecondary)
+                                .foregroundStyle(isSpecial ? .white : isSelected ? .white : theme.textSecondary)
+                                .shadow(color: isSpecial ? theme.dotActive.opacity(0.8) : .clear, radius: 8)
                             Text(profile.displayName)
                                 .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
-                                .foregroundStyle(isSelected ? .white : theme.textSecondary)
+                                .foregroundStyle(isSpecial ? .white : isSelected ? .white : theme.textSecondary)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .padding(.horizontal, 6)
-                        .background(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .background(
+                            Group {
+                                if isSpecial {
+                                    LinearGradient(
+                                        colors: [theme.dotActive, theme.dotActive.opacity(0.6), theme.dotActive],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                } else {
+                                    theme.dotActive
+                                }
+                            }
+                            .opacity(isSpecial || isSelected ? 1 : 0.25)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        )
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(isSpecial || isSelected ? Color.clear : theme.dotInactive)
+                                .opacity(isSpecial || isSelected ? 0 : 0.25)
+                        )
+                        .shadow(color: isSpecial ? theme.dotActive.opacity(0.4) : .clear, radius: 12)
                     }
                     .buttonStyle(.plain)
                 }
@@ -278,8 +316,12 @@ struct ConfigView: View {
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .stroke(isAirPodsMaxSelected ? Color(theme.dotActive).opacity(0.3) : Color(theme.textSecondary).opacity(0.10), lineWidth: 1)
         )
+    }
+
+    private var isAirPodsMaxSelected: Bool {
+        viewModel.currentAudioProfile == .airpodsMax
     }
 
 

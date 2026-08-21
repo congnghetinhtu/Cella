@@ -92,13 +92,13 @@ struct ContentView: View {
                 .padding(.top, 50)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                 .allowsHitTesting(false)
-                .animation(.easeInOut(duration: 0.4), value: viewModel.activeEngine)
-                .animation(.easeInOut(duration: 0.3), value: viewModel.playerState.isPlaying)
-                .animation(.easeInOut(duration: 0.25), value: viewModel.engineLog.count)
+                .animation(.snappy, value: viewModel.activeEngine)
+                .animation(.snappy, value: viewModel.playerState.isPlaying)
+                .animation(.snappy, value: viewModel.engineLog.count)
             }
         }
-        .animation(.easeInOut(duration: 0.4), value: effectiveColorScheme)
-        .animation(.easeInOut(duration: 0.4), value: themeOverride)
+        .animation(.smooth, value: effectiveColorScheme)
+        .animation(.smooth, value: themeOverride)
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
         .focusable()

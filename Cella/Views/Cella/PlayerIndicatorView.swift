@@ -22,6 +22,6 @@ struct PlayerIndicatorView: View {
             }
         }
         .frame(height: 20)
-        .animation(.easeInOut(duration: 0.4), value: statusText)
+        .animation(.snappy, value: statusText)
     }
 }

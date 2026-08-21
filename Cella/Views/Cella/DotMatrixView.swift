@@ -30,6 +30,7 @@ struct DotMatrixView: View {
                 }
             }
         }
+        .drawingGroup()
     }
 
     // MARK: - Dot View
@@ -40,7 +41,7 @@ struct DotMatrixView: View {
             .fill(isActive ? theme.dotActive : theme.dotInactive)
             .frame(width: dotSize, height: dotSize)
             .opacity(isActive ? 0.9 : 0.6)
-            .animation(.easeInOut(duration: 0.3), value: isActive)
+            .animation(.snappy, value: isActive)
     }
 
 }

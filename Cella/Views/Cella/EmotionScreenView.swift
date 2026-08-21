@@ -91,14 +91,14 @@ struct EmotionScreenView: View {
                         .blur(radius: 4)
                         .clipped()
                         .transition(.opacity)
-                        .animation(.easeInOut(duration: 0.8), value: vm.currentArtistImage?.hash)
+                        .animation(.smooth, value: vm.currentArtistImage?.hash)
                 }
             }
 
             // Main content (matrix / line / static)
             mainContent
                 .blur(radius: showFullLyrics ? 8 : 0)
-                .animation(.easeInOut(duration: 0.3), value: showFullLyrics)
+                .animation(.smooth, value: showFullLyrics)
 
             // Full lyrics overlay (centered in 21:9)
             if showFullLyrics, let vm = viewModel {
@@ -165,7 +165,7 @@ struct EmotionScreenView: View {
                         insertion: .opacity.combined(with: .move(edge: .bottom)),
                         removal: .opacity.combined(with: .move(edge: .top))
                     ))
-                    .animation(.easeInOut(duration: 0.3), value: currentLyricLine)
+                    .animation(.smooth, value: currentLyricLine)
             }
         }
     }
@@ -239,7 +239,7 @@ struct EmotionScreenView: View {
             .frame(width: bw, height: 36)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(.snappy) {
                     if case .active = phase { isHoveringBar = true } else { isHoveringBar = false }
                 }
             }
@@ -258,7 +258,7 @@ struct EmotionScreenView: View {
                         }
                         isDragging = false
                         dragProgress = nil
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        withAnimation(.snappy) {
                             isHoveringBar = false
                         }
                     }

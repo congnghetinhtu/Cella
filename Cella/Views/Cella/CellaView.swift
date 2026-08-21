@@ -25,7 +25,7 @@ struct CellaView: View {
                 PlayerIndicatorView(statusText: viewModel.statusText)
 
                 Button {
-                    withAnimation(.easeInOut(duration: 0.3)) {
+                    withAnimation(.snappy) {
                         viewModel.lyricsMode.cycle()
                     }
                 } label: {
