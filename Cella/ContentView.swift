@@ -97,7 +97,8 @@ struct ContentView: View {
                 .animation(.easeInOut(duration: 0.25), value: viewModel.engineLog.count)
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: effectiveColorScheme)
+        .animation(.easeInOut(duration: 0.4), value: effectiveColorScheme)
+        .animation(.easeInOut(duration: 0.4), value: themeOverride)
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
         .focusable()

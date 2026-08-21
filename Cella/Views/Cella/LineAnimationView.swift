@@ -1,6 +1,5 @@
 import SwiftUI
 import Combine
-import CoreGraphics
 
 struct LineAnimationView: View {
     let viewModel: PlayerViewModel

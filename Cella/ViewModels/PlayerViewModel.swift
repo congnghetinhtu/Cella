@@ -18,8 +18,6 @@ class PlayerViewModel {
     var isAnimationPaused: Bool = false
     var importError: String?
     var analysisProgress: Double = 0
-    /// Buffered analysis results keyed by track URL — avoids per-callback COW copies.
-    var analysisBuffer: [URL: TrackAnalysis?] = [:]
     var analyzedTrackCount: Int = 0
     var totalTrackCount: Int = 0
 
@@ -48,18 +46,12 @@ class PlayerViewModel {
 
     private let openMixBridge = OpenMixBridge()
     private var streamEngine: StreamAudioEngine?
-    private var openMixAnalysisComplete = false
     private var openMixImportURL: URL?
 
     // MARK: - Engine Log
 
     var engineLog: [String] = []
     private let maxLogLines = 30
-
-    // MARK: - OpenMix Analysis (for line animation)
-
-    var currentTrackBPM: Double?
-    var currentTrackKey: String?
 
     // MARK: - Lyrics
 
@@ -78,7 +70,6 @@ class PlayerViewModel {
 
     var gifFrames: [NSImage] = []
     var gifFrameDurations: [Double] = []
-    var currentGifFrame: NSImage?
     var isGifPlaying: Bool = false
     private var gifFrameIndex: Int = 0
     private var gifDirection: Int = 1  // 1 = forward, -1 = backward
@@ -86,7 +77,6 @@ class PlayerViewModel {
 
     // MP4/MOV boomerang via AVPlayer
     var videoPlayer: AVPlayer?
-    var isVideoPlaying: Bool = false
     private var videoBoomerangForward = true
     private var videoObservation: Any?
 
@@ -141,10 +131,6 @@ class PlayerViewModel {
         default:
             return MatrixPatterns.smileyFace
         }
-    }
-
-    var isAnimating: Bool {
-        playerState == .playing
     }
 
     var currentEnergyValue: Float {
@@ -530,7 +516,6 @@ class PlayerViewModel {
 
         // Set initial image: prefer animated, fallback to static
         if !gifFrames.isEmpty {
-            currentGifFrame = gifFrames.first
             currentArtistImage = gifFrames.first
             startGifAnimation()
             print("[PlayerViewModel] Loaded animated GIF: \(gifFrames.count) frame(s)")
@@ -684,7 +669,6 @@ class PlayerViewModel {
 
     func startVideoPlayback() {
         guard let player = videoPlayer else { return }
-        isVideoPlaying = true
         if let queuePlayer = player as? AVQueuePlayer {
             queuePlayer.seek(to: .zero)
             queuePlayer.play()
@@ -697,7 +681,6 @@ class PlayerViewModel {
     func stopVideoPlayback() {
         // Just pause — keep the player alive for next track
         videoPlayer?.pause()
-        isVideoPlaying = false
     }
 
     func destroyVideoPlayback() {
@@ -708,7 +691,6 @@ class PlayerViewModel {
         }
         videoPlayer?.pause()
         videoPlayer = nil
-        isVideoPlaying = false
     }
 
     private func boomerangSeek() {
@@ -770,7 +752,6 @@ class PlayerViewModel {
         // Clamp safety
         gifFrameIndex = max(0, min(gifFrameIndex, gifFrames.count - 1))
 
-        currentGifFrame = gifFrames[gifFrameIndex]
         currentArtistImage = gifFrames[gifFrameIndex]
 
         scheduleNextGifFrame()
@@ -901,7 +882,6 @@ class PlayerViewModel {
 
         importError = nil
         analysisProgress = 0
-        analysisBuffer = [:]
         playlistFolderURL = url
         artistImages = []
         currentArtistImage = nil
@@ -1019,7 +999,6 @@ class PlayerViewModel {
 
                             // Buffer analysis results — avoid per-callback COW copy of MixQueue tracks array.
                             // Results are merged into the queue after all analysis completes.
-                            self.analysisBuffer[analyzedAsset.url] = analyzedAsset.analysis
 
                             // Apply mood transition for current track from buffered analysis
                             if let currentURL = self.mixQueue?.currentTrack?.url,
@@ -1342,9 +1321,6 @@ class PlayerViewModel {
         openMixBridge.stop()
         streamEngine?.stop()
         streamEngine = nil
-        openMixAnalysisComplete = false
-        currentTrackBPM = nil
-        currentTrackKey = nil
         playlistFolderURL = url
         artistImages = []
         currentArtistImage = nil
@@ -1439,7 +1415,6 @@ class PlayerViewModel {
         case .done(let duration):
             log("Mix done — \(String(format: "%.1f", duration))s")
             playerState = .playing
-            openMixAnalysisComplete = true
 
         case .error(let message):
             log("Error: \(message)")
@@ -1498,11 +1473,7 @@ class PlayerViewModel {
                 barTimestamps: [],
                 keySignature: TrackAnalysis.KeySignature(tonic: keyName, mode: "major"),
                 loudnessIntegrated: nil,
-                loudnessMomentary: [],
-                loudnessShortTerm: [],
-                loudnessPeak: nil,
                 structureSections: [],
-                instrumentActivity: [],
                 energyProfile: energyFloat,
                 hasVocals: false,
                 vocalActivity: [],
@@ -1523,12 +1494,6 @@ class PlayerViewModel {
         }
 
         mixQueue = queue
-
-        // Update current track BPM/Key for line animation
-        if let current = queue.currentTrack?.analysis {
-            currentTrackBPM = current.bpm
-            currentTrackKey = current.keySignature?.tonic
-        }
 
         log("Analysis synced to \(queue.tracks.filter { $0.analysis != nil }.count) tracks")
     }

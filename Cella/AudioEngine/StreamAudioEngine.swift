@@ -24,8 +24,6 @@ class StreamAudioEngine {
 
     private let minBufferAhead = 3
 
-    var onNeedMoreAudio: (() -> Void)?
-
     var currentTime: TimeInterval {
         bufferLock.lock()
         defer { bufferLock.unlock() }
@@ -134,12 +132,6 @@ class StreamAudioEngine {
         isPlaying = false
     }
 
-    func resume() {
-        guard isPlaying else { return }
-        playerNode.play()
-        playStartTime = Date()
-    }
-
     func stop() {
         playerNode.stop()
         engine.stop()
@@ -149,12 +141,6 @@ class StreamAudioEngine {
         totalSamplesReceived = 0
         samplesPlayed = 0
         playStartTime = nil
-        bufferLock.unlock()
-    }
-
-    func flush() {
-        bufferLock.lock()
-        scheduledBuffers.removeAll()
         bufferLock.unlock()
     }
 }

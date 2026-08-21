@@ -67,8 +67,8 @@ actor TrackAnalyzer {
         } else {
             return TrackAnalysis(
                 bpm: nil, beatTimestamps: [], barTimestamps: [], keySignature: nil,
-                loudnessIntegrated: nil, loudnessMomentary: [], loudnessShortTerm: [], loudnessPeak: nil,
-                structureSections: [], instrumentActivity: [], energyProfile: [], hasVocals: false,
+                loudnessIntegrated: nil,
+                structureSections: [], energyProfile: [], hasVocals: false,
                 vocalActivity: [], duration: 0,
                 spectralCentroid: 0, spectralRolloff: 0, spectralBandwidth: 0, spectralFlatness: 0,
                 averageRMS: 0, peakAmplitude: 0, introRegion: nil, outroRegion: nil,
@@ -96,10 +96,6 @@ actor TrackAnalyzer {
         let bpb = detectBarsPerBeat(beatTimestamps: beatTimestamps, bpm: bpm ?? 120)
         let barTimestamps = stride(from: 0, to: beatTimestamps.count, by: bpb).map { beatTimestamps[$0] }
 
-        // Estimate momentary/short-term loudness from energy profile
-        let energyProfileDB = energyProfile.map { Double($0) * 20.0 }
-        let loudnessShortTerm = smoothArray(energyProfileDB, windowSize: 30)
-
         // Compute spectral features in a single FFT pass
         let spectral = AudioHelpers.computeSpectralFeatures(buffer: buffer)
 
@@ -121,11 +117,7 @@ actor TrackAnalyzer {
             barTimestamps: barTimestamps,
             keySignature: keySignature,
             loudnessIntegrated: loudnessDesc?.loudnessIntegrated,
-            loudnessMomentary: energyProfileDB,
-            loudnessShortTerm: loudnessShortTerm,
-            loudnessPeak: loudnessDesc?.maxTruePeakLevel.map { Double($0) },
             structureSections: structureSections,
-            instrumentActivity: [],
             energyProfile: energyProfile,
             hasVocals: hasVocals,
             vocalActivity: vocalActivity,
@@ -167,10 +159,8 @@ actor TrackAnalyzer {
                         do {
                             let analysis = try await self.analyze(url: asset.url)
                             asset.analysis = analysis
-                            asset.analysisStatus = .complete
                             print("[Analyzer] ✓ \(asset.fileName) — bpm=\(String(describing: analysis.bpm)), spectral=\(String(format: "%.1f", analysis.spectralCentroid))Hz, vocals=\(analysis.hasVocals)")
                         } catch {
-                            asset.analysisStatus = .failed("Analysis failed")
                             print("[Analyzer] ✗ \(asset.fileName) — FAILED: \(error.localizedDescription)")
                         }
                         return (batchIndex, asset)

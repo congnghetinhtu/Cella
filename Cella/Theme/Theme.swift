@@ -3,7 +3,6 @@ import SwiftUI
 struct Theme {
     let dotInactive: Color
     let dotActive: Color
-    let dotActiveGlow: Color
     let dotInactiveDeep: Color
     let appBackground: Color
     let screenBackground: Color
@@ -17,7 +16,6 @@ struct Theme {
     static let dark = Theme(
         dotInactive: Color(hex: 0x3E2D24),
         dotActive: Color(hex: 0xFF8038),
-        dotActiveGlow: Color(hex: 0xFF5500),
         dotInactiveDeep: Color(hex: 0x231A16),
         appBackground: Color(hex: 0x0D0D0D),
         screenBackground: Color(hex: 0x231A16),
@@ -32,7 +30,6 @@ struct Theme {
     static let seafoam = Theme(
         dotInactive: Color(hex: 0x2D3A33),
         dotActive: Color(hex: 0x93E9BE),
-        dotActiveGlow: Color(hex: 0x71EEB8),
         dotInactiveDeep: Color(hex: 0x1A2420),
         appBackground: Color(hex: 0x0D1210),
         screenBackground: Color(hex: 0x1A2420),
@@ -47,7 +44,6 @@ struct Theme {
     static let light = Theme(
         dotInactive: Color(hex: 0xD4C5B8),
         dotActive: Color(hex: 0xFF8038),
-        dotActiveGlow: Color(hex: 0xFF5500),
         dotInactiveDeep: Color(hex: 0xF0EAE4),
         appBackground: Color(hex: 0xFFFFFF),
         screenBackground: Color(hex: 0xF5F0EB),
@@ -61,14 +57,13 @@ struct Theme {
 
     static let lightSeafoam = Theme(
         dotInactive: Color(hex: 0xC5D8CE),
-        dotActive: Color(hex: 0x3CB371),
-        dotActiveGlow: Color(hex: 0x2E8B57),
+        dotActive: Color(hex: 0x1A8A52),
         dotInactiveDeep: Color(hex: 0xE4EDE8),
         appBackground: Color(hex: 0xFFFFFF),
         screenBackground: Color(hex: 0xECF5F0),
         tabBarBackground: Color(hex: 0xECF5F0),
-        tabSelectedBackground: Color(hex: 0x3CB371, opacity: 0.15),
-        tabSelectedText: Color(hex: 0x3CB371),
+        tabSelectedBackground: Color(hex: 0x1A8A52, opacity: 0.15),
+        tabSelectedText: Color(hex: 0x1A8A52),
         tabUnselectedText: Color(hex: 0x5A7A6A),
         textPrimary: Color(hex: 0x1A2E24),
         textSecondary: Color(hex: 0x5A7A6A)

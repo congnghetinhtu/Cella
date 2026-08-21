@@ -26,20 +26,8 @@ struct TrackAnalysis: Sendable {
     /// Integrated loudness in LUFS (ITU-R BS.1770) via spfk-loudness.
     let loudnessIntegrated: Double?
 
-    /// Momentary loudness values (400ms window, sampled every 100ms).
-    let loudnessMomentary: [Double]
-
-    /// Short-term loudness values (3s window, sampled every 100ms).
-    let loudnessShortTerm: [Double]
-
-    /// Peak amplitude in decibels.
-    let loudnessPeak: Double?
-
     /// Song structure sections with time ranges and labels.
     let structureSections: [StructureSection]
-
-    /// Instrument activity levels over time.
-    let instrumentActivity: [InstrumentActivity]
 
     // MARK: - Computed Audio Features
 
@@ -154,24 +142,12 @@ struct TrackAnalysis: Sendable {
             return min(diff, 12 - diff)
         }
 
-        /// Whether this key is compatible with another (within ±2 semitones or Camelot adjacent).
-        func isCompatible(with other: KeySignature) -> Bool {
-            return semitoneDistance(to: other) <= 2 || camelotDistance(to: other) <= 1
-        }
     }
 
     struct StructureSection: Sendable {
         let startTime: Double
         let endTime: Double
         let label: String
-
-        var duration: Double { endTime - startTime }
-    }
-
-    struct InstrumentActivity: Sendable {
-        let startTime: Double
-        let endTime: Double
-        let activityLevel: Float
 
         var duration: Double { endTime - startTime }
     }

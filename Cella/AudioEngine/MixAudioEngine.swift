@@ -24,7 +24,6 @@ class MixAudioEngine {
     private let eqA = AVAudioUnitEQ(numberOfBands: 1)
     private let eqB = AVAudioUnitEQ(numberOfBands: 1)
     private let hallReverb = AVAudioUnitReverb()
-    private let spatialDelay = AVAudioUnitDelay()
     private let profileEq: AVAudioUnitEQ
     private let peakLimiter: AVAudioUnit = {
         let desc = AudioComponentDescription(
@@ -115,10 +114,6 @@ class MixAudioEngine {
 
         eqA.globalGain = 0
         eqB.globalGain = 0
-
-        spatialDelay.delayTime = 0
-        spatialDelay.feedback = 0
-        spatialDelay.wetDryMix = 0
 
         profileEq.globalGain = 0
 
@@ -246,7 +241,6 @@ class MixAudioEngine {
         engine.attach(timePitchB)
         engine.attach(eqA)
         engine.attach(eqB)
-        engine.attach(spatialDelay)
         engine.attach(profileEq)
         engine.attach(hallReverb)
         engine.attach(peakLimiter)
@@ -261,9 +255,7 @@ class MixAudioEngine {
         engine.connect(eqB, to: mixerNode, format: format)
 
         mixerNode.volume = 1.0
-        engine.connect(mixerNode, to: spatialDelay, format: format)
-        spatialDelay.wetDryMix = 0
-        engine.connect(spatialDelay, to: profileEq, format: format)
+        engine.connect(mixerNode, to: profileEq, format: format)
         profileEq.globalGain = 0
         engine.connect(profileEq, to: hallReverb, format: format)
         hallReverb.loadFactoryPreset(.largeHall)
@@ -292,9 +284,6 @@ class MixAudioEngine {
         timePitchB.rate = 1.0
         timePitchB.bypass = true
 
-        spatialDelay.delayTime = 0
-        spatialDelay.feedback = 0
-        spatialDelay.wetDryMix = 0
         for band in profileEq.bands { band.bypass = true }
         profileEq.globalGain = 0
 
@@ -397,10 +386,6 @@ class MixAudioEngine {
         currentPlayer.play()
         isPlaying = true
         restartTrackEndTimer()
-    }
-
-    func setMasterVolume(_ volume: Float) {
-        mixerNode.volume = min(2.0, max(0, volume))
     }
 
     func smoothVolume(to target: Float, duration: TimeInterval = 2.0) {
@@ -522,41 +507,6 @@ class MixAudioEngine {
         } catch {
             print("[Engine] Seek failed: \(error)")
         }
-    }
-
-    // MARK: - Streaming Chunk Support
-
-    /// Schedule an incoming audio chunk for streaming playback.
-    /// Used when OpenMix is streaming chunks instead of real-time crossfading.
-    func scheduleChunk(_ data: Data) {
-        let format = config.processingFormat
-        let ch = Int(format.channelCount)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                             frameCapacity: AVAudioFrameCount(data.count / (4 * ch))) else {
-            return
-        }
-
-        let sampleCount = data.count / (MemoryLayout<Float>.size * ch)
-        buffer.frameLength = AVAudioFrameCount(sampleCount)
-
-        data.withUnsafeBytes { rawBuffer in
-            guard let baseAddress = rawBuffer.baseAddress else { return }
-            if let channelData = buffer.floatChannelData {
-                let frameCount = Int(buffer.frameLength)
-                if ch == 2 {
-                    let src = baseAddress.assumingMemoryBound(to: Float.self)
-                    for frame in 0..<frameCount {
-                        channelData[0][frame] = src[frame * 2]
-                        channelData[1][frame] = src[frame * 2 + 1]
-                    }
-                } else {
-                    let src = baseAddress.assumingMemoryBound(to: Float.self)
-                    channelData[0].update(from: src, count: frameCount)
-                }
-            }
-        }
-
-        currentPlayer.scheduleBuffer(buffer, at: nil, options: [])
     }
 
     // MARK: - Automix Crossfade
@@ -843,8 +793,6 @@ class MixAudioEngine {
     }
 
     var duration: TimeInterval { currentDuration }
-
-    var activePlayerNode: AVAudioPlayerNode { currentPlayer }
 
     // MARK: - Track End Detection
 

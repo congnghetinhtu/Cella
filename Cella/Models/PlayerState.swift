@@ -90,17 +90,6 @@ enum PlayerState: Equatable {
     /// AutoMix state — shows automix pattern
     case autoMix
 
-    /// Returns the next state when spacebar is pressed.
-    /// Cycle: idle → playing → paused → playing → paused → ...
-    var nextState: PlayerState {
-        switch self {
-        case .idle:    return .playing
-        case .playing: return .paused
-        case .paused:  return .playing
-        case .analyzing, .loading, .autoMix: return self
-        }
-    }
-
     /// Whether the player is in an active playback state.
     var isPlaying: Bool { self == .playing }
 

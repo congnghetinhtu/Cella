@@ -35,10 +35,6 @@ struct ConfigView: View {
                     }
 
                     audioCard
-
-                    if viewModel.totalTrackCount > 0 {
-                        analysisCard
-                    }
                 } else {
                     HStack(alignment: .top, spacing: gridSpacing) {
                         statusCard
@@ -46,10 +42,6 @@ struct ConfigView: View {
                     }
 
                     audioCard
-
-                    if viewModel.totalTrackCount > 0 {
-                        analysisCard
-                    }
                 }
 
                 if let error = viewModel.importError {
@@ -92,21 +84,6 @@ struct ConfigView: View {
                         value: "\(viewModel.playlistCount)",
                         label: "tracks"
                     )
-
-                    if viewModel.totalTrackCount > 0 && viewModel.analyzedTrackCount >= viewModel.totalTrackCount {
-                        statPill(
-                            icon: "checkmark.circle.fill",
-                            value: "Done",
-                            label: "analyzed",
-                            accent: .green
-                        )
-                    } else if viewModel.totalTrackCount > 0 {
-                        statPill(
-                            icon: "waveform",
-                            value: "\(viewModel.analyzedTrackCount)/\(viewModel.totalTrackCount)",
-                            label: "analyzed"
-                        )
-                    }
 
                     Spacer()
                 }
@@ -222,12 +199,25 @@ struct ConfigView: View {
             .pickerStyle(.segmented)
             .labelsHidden()
 
-            Picker("Theme", selection: $themeOverride) {
-                Text("Default").tag("default")
-                Text("Seafoam").tag("seafoam")
+            HStack(spacing: 8) {
+                ForEach([("default", "Default"), ("seafoam", "Seafoam")], id: \.0) { id, label in
+                    let isSelected = themeOverride == id
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            themeOverride = id
+                        }
+                    } label: {
+                        Text(label)
+                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(isSelected ? .white : theme.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
 
             Spacer(minLength: 0)
         }
@@ -292,67 +282,6 @@ struct ConfigView: View {
         )
     }
 
-
-    // MARK: - Analysis Card
-
-    @ViewBuilder
-    private var analysisCard: some View {
-        if viewModel.analyzedTrackCount < viewModel.totalTrackCount {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
-                    Image(systemName: "waveform")
-                        .font(.system(size: 14))
-                        .foregroundStyle(theme.dotActive)
-                    Text("Analyzing")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                    Spacer()
-                    Text("\(Int(viewModel.analysisProgress * 100))%")
-                        .font(.system(size: 14, weight: .bold, design: .monospaced))
-                        .foregroundStyle(theme.dotActive)
-                }
-
-                ProgressView(value: viewModel.analysisProgress)
-                    .progressViewStyle(.linear)
-                    .tint(theme.dotActive)
-                    .frame(height: 5)
-                    .scaleEffect(y: 1.8, anchor: .center)
-
-                Text("\(viewModel.analyzedTrackCount) of \(viewModel.totalTrackCount) tracks")
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-            }
-            .padding(cardPadding)
-            .background(theme.screenBackground)
-            .clipShape(RoundedRectangle(cornerRadius: cardRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(cardBorder, lineWidth: 1)
-            )
-        } else {
-            HStack(spacing: 12) {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 20))
-                    .foregroundStyle(.green)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Ready")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                    Text("\(viewModel.totalTrackCount) tracks analyzed")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.green)
-                }
-                Spacer()
-            }
-            .padding(cardPadding)
-            .background(theme.screenBackground)
-            .clipShape(RoundedRectangle(cornerRadius: cardRadius))
-            .overlay(
-                RoundedRectangle(cornerRadius: cardRadius)
-                    .stroke(cardBorder, lineWidth: 1)
-            )
-        }
-    }
 
     // MARK: - Error Card
 
