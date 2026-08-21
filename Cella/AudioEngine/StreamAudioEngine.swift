@@ -11,6 +11,7 @@ import AVFoundation
 class StreamAudioEngine {
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
+
     private let format: AVAudioFormat
 
     private var isPlaying = false

@@ -49,11 +49,9 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top navigation bar
                 TopTabBar(selectedTab: $selectedTab)
                     .padding(.top, 20)
 
-                // Active tab content
                 Group {
                     switch selectedTab {
                     case .motions:
@@ -67,7 +65,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // Engine indicator + log — top-right corner
+            // Engine indicator — top-right
             if viewModel.playerState.isPlaying || viewModel.playerState == .autoMix {
                 VStack(alignment: .trailing, spacing: 4) {
                     Text(viewModel.activeEngine)
@@ -102,7 +100,6 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.3), value: effectiveColorScheme)
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)
-        // Keyboard handling
         .focusable()
         .focusEffectDisabled()
         .focused($isFocused)
@@ -139,7 +136,6 @@ struct ContentView: View {
             }
         }
         .onTapGesture {
-            // Re-focus when clicking the background so spacebar still works
             isFocused = true
         }
     }

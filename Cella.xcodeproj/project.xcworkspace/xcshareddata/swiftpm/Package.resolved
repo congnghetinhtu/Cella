@@ -1,24 +1,6 @@
 {
-  "originHash" : "8c062339629cb7d7807c2b3d685bae930151b0b2748c9892d6e2fe183e228473",
+  "originHash" : "eafcb32bfcc4bb611e2b38b94792e621fcc8b2ec443540ea28ea1fb99164e60e",
   "pins" : [
-    {
-      "identity" : "aexml",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/tadija/AEXML",
-      "state" : {
-        "revision" : "db806756c989760b35108146381535aec231092b",
-        "version" : "4.7.0"
-      }
-    },
-    {
-      "identity" : "epubkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/witekbobrowski/EPUBKit",
-      "state" : {
-        "revision" : "0dec82ec767c7b4bfee3fe36677b67013ba19ab5",
-        "version" : "0.5.0"
-      }
-    },
     {
       "identity" : "signalkit",
       "kind" : "remoteSourceControl",
@@ -116,15 +98,6 @@
       "state" : {
         "revision" : "0c0290ff6b24942dadb83a929ffaaa1481df04a2",
         "version" : "1.1.1"
-      }
-    },
-    {
-      "identity" : "zip",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/marmelroy/Zip",
-      "state" : {
-        "revision" : "67fa55813b9e7b3b9acee9c0ae501def28746d76",
-        "version" : "2.1.2"
       }
     }
   ],

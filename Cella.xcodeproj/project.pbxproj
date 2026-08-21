@@ -11,7 +11,6 @@
 		4A6C37472FFAAA33008412C5 /* SPFKMusicalAnalysis in Frameworks */ = {isa = PBXBuildFile; productRef = 4A6C37462FFAAA33008412C5 /* SPFKMusicalAnalysis */; };
 		4A6C374A2FFAAA47008412C5 /* SPFKLoudness in Frameworks */ = {isa = PBXBuildFile; productRef = 4A6C37492FFAAA47008412C5 /* SPFKLoudness */; };
 		4A6C374D2FFAAA56008412C5 /* SignalKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4A6C374C2FFAAA56008412C5 /* SignalKit */; };
-		4A6C37502FFAAA59008412C5 /* EPUBKit in Frameworks */ = {isa = PBXBuildFile; productRef = 4A6C374F2FFAAA58008412C5 /* EPUBKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,7 +34,6 @@
 				4A6C37442FFAAA1D008412C5 /* SPFKTempo in Frameworks */,
 				4A6C37472FFAAA33008412C5 /* SPFKMusicalAnalysis in Frameworks */,
 				4A6C374D2FFAAA56008412C5 /* SignalKit in Frameworks */,
-				4A6C37502FFAAA59008412C5 /* EPUBKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -82,7 +80,6 @@
 				4A6C37462FFAAA33008412C5 /* SPFKMusicalAnalysis */,
 				4A6C37492FFAAA47008412C5 /* SPFKLoudness */,
 				4A6C374C2FFAAA56008412C5 /* SignalKit */,
-				4A6C374F2FFAAA58008412C5 /* EPUBKit */,
 			);
 			productName = Cella;
 			productReference = 4A6C35692FF81CE3008412C5 /* Cella.app */;
@@ -117,7 +114,6 @@
 				4A6C37452FFAAA33008412C5 /* XCRemoteSwiftPackageReference "spfk-musical-analysis" */,
 				4A6C37482FFAAA47008412C5 /* XCRemoteSwiftPackageReference "spfk-loudness" */,
 				4A6C374B2FFAAA56008412C5 /* XCRemoteSwiftPackageReference "SignalKit" */,
-				4A6C374E2FFAAA57008412C5 /* XCRemoteSwiftPackageReference "EPUBKit" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4A6C356A2FF81CE3008412C5 /* Products */;
@@ -414,14 +410,6 @@
 				minimumVersion = 1.0.0;
 			};
 		};
-		4A6C374E2FFAAA57008412C5 /* XCRemoteSwiftPackageReference "EPUBKit" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/witekbobrowski/EPUBKit";
-			requirement = {
-				kind = upToNextMinorVersion;
-				minimumVersion = 0.5.0;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -444,11 +432,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 4A6C374B2FFAAA56008412C5 /* XCRemoteSwiftPackageReference "SignalKit" */;
 			productName = SignalKit;
-		};
-		4A6C374F2FFAAA58008412C5 /* EPUBKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 4A6C374E2FFAAA57008412C5 /* XCRemoteSwiftPackageReference "EPUBKit" */;
-			productName = EPUBKit;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

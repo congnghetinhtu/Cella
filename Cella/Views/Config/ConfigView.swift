@@ -293,7 +293,6 @@ struct ConfigView: View {
     }
 
 
-
     // MARK: - Analysis Card
 
     @ViewBuilder
@@ -409,13 +408,18 @@ struct ConfigView: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Choose Folder"
-        panel.message = "Select a folder containing audio files to play"
+        panel.prompt = "Choose .cella Playlist"
+        panel.message = "Select a .cella playlist folder"
 
         let result = panel.runModal()
         print("[ConfigView] Panel result: \(result.rawValue), url: \(panel.url?.path ?? "nil")")
 
         if result == .OK, let url = panel.url {
+            guard url.pathExtension.lowercased() == "cella" else {
+                viewModel.importError = "Not a .cella playlist. Rename folder with .cella extension."
+                print("[ConfigView] ERROR: Selected folder is not .cella: \(url.lastPathComponent)")
+                return
+            }
             viewModel.importViaOpenMix(url: url)
         }
     }

@@ -418,8 +418,8 @@ class PlayerViewModel {
             return
         }
 
-        let allExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp", "mp4", "mov"])
-        let animatedExtensions = Set(["gif", "mp4", "mov"])
+        let allExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp", "mp4", "mov", "cma"])
+        let animatedExtensions = Set(["gif", "mp4", "mov", "cma"])
         let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
 
         let contents = (try? FileManager.default.contentsOfDirectory(
@@ -438,10 +438,13 @@ class PlayerViewModel {
             guard let trackName = mixQueue?.currentTrack?.fileName else { return [] }
             var artists: [String] = []
             
-            // Main artist: before " - "
+            // Main artist: before " - ", split by " & "
             if let separatorIndex = trackName.range(of: " - ")?.lowerBound {
-                let mainArtist = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
-                if !mainArtist.isEmpty { artists.append(mainArtist) }
+                let mainPart = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
+                for name in mainPart.components(separatedBy: " & ") {
+                    let trimmed = name.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty { artists.append(trimmed) }
+                }
             }
             
             // Featured artists: (feat. ...) / (ft. ...) anywhere in filename
@@ -452,7 +455,6 @@ class PlayerViewModel {
                     let afterFeat = featRange.upperBound
                     guard let closeParen = trackName.range(of: ")", range: afterFeat..<trackName.endIndex) else { break }
                     let featPart = String(trackName[afterFeat..<closeParen.lowerBound])
-                    // Split featured artists by "&" or ","
                     for name in featPart.components(separatedBy: CharacterSet(charactersIn: "&,")) {
                         let trimmed = name.trimmingCharacters(in: .whitespaces)
                         if !trimmed.isEmpty { artists.append(trimmed) }
@@ -464,24 +466,43 @@ class PlayerViewModel {
             return artists.map { $0.lowercased() }.filter { !$0.isEmpty }
         }()
 
-        // Match artist names to video files (filename without extension)
+        // Match artist names to video files — check artist subfolders first, then flat files
         artistVideoURLs = []
         if !trackArtists.isEmpty {
-            for videoURL in animatedFiles where videoURL.pathExtension.lowercased() != "gif" {
-                let videoName = videoURL.deletingPathExtension().lastPathComponent
-                    .lowercased()
-                    .replacingOccurrences(of: "-", with: " ")
-                    .replacingOccurrences(of: "_", with: " ")
-                let matched = trackArtists.contains { artist in
-                    // Normalize: remove hyphens/underscores for comparison
-                    let normalized = artist.replacingOccurrences(of: "-", with: " ")
-                        .replacingOccurrences(of: "_", with: " ")
-                    return videoName == normalized
-                        || videoName.hasPrefix(normalized + " ")
-                        || normalized.hasPrefix(videoName + " ")
+            let videoExtensions = Set(["mp4", "mov", "cma"])
+
+            // 1. Check artist subfolders: artists/<Artist Name>/*.mp4
+            for artist in trackArtists {
+                let artistDir = artistsDir.appendingPathComponent(artist)
+                    .appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-"))
+                // Try both normalized forms
+                let candidates = [
+                    artistsDir.appendingPathComponent(artist),
+                    artistsDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-"))
+                ]
+                for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
+                    let contents = (try? FileManager.default.contentsOfDirectory(
+                        at: dir, includingPropertiesForKeys: nil
+                    )) ?? []
+                    let videos = contents.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
+                        .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+                    artistVideoURLs.append(contentsOf: videos)
                 }
-                if matched {
-                    artistVideoURLs.append(videoURL)
+            }
+
+            // 2. Fallback: flat files in artists/ matching artist name
+            if artistVideoURLs.isEmpty {
+                for videoURL in animatedFiles where videoURL.pathExtension.lowercased() != "gif" {
+                    let videoName = videoURL.deletingPathExtension().lastPathComponent
+                        .lowercased()
+                        .replacingOccurrences(of: "-", with: " ")
+                        .replacingOccurrences(of: "_", with: " ")
+                    let matched = trackArtists.contains { artist in
+                        let normalized = artist.replacingOccurrences(of: "-", with: " ")
+                            .replacingOccurrences(of: "_", with: " ")
+                        return videoName == normalized
+                    }
+                    if matched { artistVideoURLs.append(videoURL) }
                 }
             }
         }
@@ -589,14 +610,27 @@ class PlayerViewModel {
         return 0.1
     }
 
-    // MARK: - Video Playback (MP4/MOV via AVPlayer)
+    // MARK: - Video Playback (MP4/MOV/CMA via AVPlayer)
+
+    /// Resolve .cma files to temp .mp4 copies for AVPlayer compatibility
+    private func resolveForPlayer(_ url: URL) -> URL {
+        guard url.pathExtension.lowercased() == "cma" else { return url }
+        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpURL = tmpDir.appendingPathComponent("cella_\(url.lastPathComponent.replacingOccurrences(of: ".cma", with: ""))_\(url.hashValue).mp4")
+        if !FileManager.default.fileExists(atPath: tmpURL.path) {
+            try? FileManager.default.copyItem(at: url, to: tmpURL)
+        }
+        return tmpURL
+    }
 
     private func loadVideoPlayer(from url: URL) {
         stopVideoPlayback()
 
-        if artistVideoURLs.count > 1 {
+        let resolved = artistVideoURLs.map { resolveForPlayer($0) }
+
+        if resolved.count > 1 {
             // Multi-artist: use AVQueuePlayer for seamless transitions
-            let items = artistVideoURLs.map { AVPlayerItem(url: $0) }
+            let items = resolved.map { AVPlayerItem(url: $0) }
             let queuePlayer = AVQueuePlayer(items: items)
             queuePlayer.isMuted = true
             queuePlayer.preventsDisplaySleepDuringVideoPlayback = false
@@ -627,7 +661,8 @@ class PlayerViewModel {
             print("[PlayerViewModel] Loaded \(items.count) artist videos via queue player")
         } else {
             // Single video: simple AVPlayer with loop
-            let playerItem = AVPlayerItem(url: url)
+            let resolvedURL = resolved.first ?? url
+            let playerItem = AVPlayerItem(url: resolvedURL)
             let player = AVPlayer(playerItem: playerItem)
             player.isMuted = true
             player.preventsDisplaySleepDuringVideoPlayback = false
@@ -858,6 +893,12 @@ class PlayerViewModel {
     // MARK: - Import & Analysis
 
     func importFolder(url: URL) {
+        // Only accept .cella folders
+        guard url.pathExtension.lowercased() == "cella" else {
+            importError = "Not a .cella playlist. Rename folder with .cella extension."
+            return
+        }
+
         importError = nil
         analysisProgress = 0
         analysisBuffer = [:]
@@ -933,6 +974,7 @@ class PlayerViewModel {
                         url: tracks[0].url,
                         barTimestamps: tracks[0].analysis?.barTimestamps ?? []
                     )
+                    self.audioEngine.play()
                     self.playerState = .playing
                     self.startAnimationLoop()
                     print("[PlayerViewModel] Now playing: \(tracks[0].fileName)")
@@ -1287,6 +1329,12 @@ class PlayerViewModel {
     // MARK: - OpenMix Streaming Integration
 
     func importViaOpenMix(url: URL) {
+        // Only accept .cella folders
+        guard url.pathExtension.lowercased() == "cella" else {
+            importError = "Not a .cella playlist. Rename folder with .cella extension."
+            return
+        }
+
         // Stop any existing playback and clear old state
         cancelPendingMoodTransition()
         stopAnimationLoop()
@@ -1331,6 +1379,20 @@ class PlayerViewModel {
             tracks: tracks,
             transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))
         )
+
+        // Play first track immediately while OpenMix analyzes
+        do {
+            try loadTrackAndRestore(
+                url: tracks[0].url,
+                barTimestamps: tracks[0].analysis?.barTimestamps ?? []
+            )
+            audioEngine.play()
+            playerState = .playing
+            startAnimationLoop()
+            print("[PlayerViewModel] Now playing: \(tracks[0].fileName)")
+        } catch {
+            print("[PlayerViewModel] Failed to start playback: \(error)")
+        }
 
         openMixBridge.onStatus = { [weak self] status in
             self?.handleOpenMixStatus(status)
