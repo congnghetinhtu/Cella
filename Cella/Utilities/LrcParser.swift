@@ -1,11 +1,3 @@
-//
-//  LrcParser.swift
-//  Cella
-//
-//  Parses standard LRC format lyrics files.
-//  Format: [MM:SS.xx] Lyrics line text
-//
-
 import Foundation
 
 struct LrcLine: Identifiable {
@@ -14,14 +6,76 @@ struct LrcLine: Identifiable {
     let text: String
 }
 
+struct LrcMetadata {
+    var title: String = ""
+    var artist: String = ""
+    var album: String = ""
+    var author: String = ""
+    var length: String = ""
+    var by: String = ""
+    var offset: String = ""
+    var editor: String = ""
+    var version: String = ""
+
+    var isEmpty: Bool {
+        title.isEmpty && artist.isEmpty && album.isEmpty && author.isEmpty &&
+        length.isEmpty && by.isEmpty && offset.isEmpty && editor.isEmpty && version.isEmpty
+    }
+
+    mutating func set(key: String, value: String) {
+        switch key.lowercased() {
+        case "ti": title = value
+        case "ar": artist = value
+        case "al": album = value
+        case "au": author = value
+        case "length": length = value
+        case "by": by = value
+        case "offset": offset = value
+        case "re": editor = value
+        case "ve": version = value
+        default: break
+        }
+    }
+
+    func toLrcString() -> String {
+        var lines: [String] = []
+        if !title.isEmpty   { lines.append("[ti:\(title)]") }
+        if !artist.isEmpty { lines.append("[ar:\(artist)]") }
+        if !album.isEmpty  { lines.append("[al:\(album)]") }
+        if !author.isEmpty { lines.append("[au:\(author)]") }
+        if !length.isEmpty { lines.append("[length:\(length)]") }
+        if !by.isEmpty     { lines.append("[by:\(by)]") }
+        if !offset.isEmpty { lines.append("[offset:\(offset)]") }
+        if !editor.isEmpty { lines.append("[re:\(editor)]") }
+        if !version.isEmpty { lines.append("[ve:\(version)]") }
+        return lines.joined(separator: "\n")
+    }
+}
+
 struct LrcParser {
-    static func parse(_ content: String) -> [LrcLine] {
+    static func parse(_ content: String) -> (metadata: LrcMetadata, lines: [LrcLine]) {
+        var metadata = LrcMetadata()
         var lines: [LrcLine] = []
 
         for raw in content.components(separatedBy: .newlines) {
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty else { continue }
 
+            // Try metadata: [key:value]
+            if let metaMatch = firstMatch(
+                #"\[([a-zA-Z]+):(.*)\]"#,
+                in: trimmed
+            ), metaMatch.count >= 3 {
+                let key = metaMatch[1]
+                let value = metaMatch[2]
+                // Only treat as metadata if key is NOT a number (timestamp)
+                if Int(key) == nil {
+                    metadata.set(key: key, value: value)
+                    continue
+                }
+            }
+
+            // Try timestamp: [MM:SS.xx]
             let matches = matchesForPattern(
                 #"\[(\d{2}):(\d{2})\.?(\d{0,3})\](.*)"#,
                 in: trimmed
@@ -50,14 +104,26 @@ struct LrcParser {
             }
         }
 
-        return lines.sorted { $0.time < $1.time }
+        return (metadata, lines.sorted { $0.time < $1.time })
     }
 
-    static func load(from url: URL) -> [LrcLine] {
+    static func load(from url: URL) -> (metadata: LrcMetadata, lines: [LrcLine]) {
         guard let content = try? String(contentsOf: url, encoding: .utf8) else {
-            return []
+            return (LrcMetadata(), [])
         }
         return parse(content)
+    }
+
+    private static func firstMatch(_ pattern: String, in text: String) -> [String]? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let m = regex.firstMatch(in: text, range: range) else { return nil }
+        return (0..<m.numberOfRanges).map { i in
+            if let r = Range(m.range(at: i), in: text) {
+                return String(text[r])
+            }
+            return ""
+        }
     }
 
     private static func matchesForPattern(_ pattern: String, in text: String) -> [[String]] {

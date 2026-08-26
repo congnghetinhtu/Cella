@@ -58,6 +58,8 @@ struct ContentView: View {
                         CellaMotionsView()
                     case .cella:
                         CellaView(viewModel: viewModel)
+                    case .enhancedLRC:
+                        EnhancedLRCView()
                     case .config:
                         ConfigView(viewModel: viewModel)
                     }
@@ -105,14 +107,23 @@ struct ContentView: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onKeyPress(.space) {
+            if selectedTab == .enhancedLRC {
+                return .ignored
+            }
             viewModel.togglePlayPause()
             return .handled
         }
         .onKeyPress(.leftArrow) {
+            if selectedTab == .enhancedLRC {
+                return .ignored
+            }
             viewModel.skipBackward()
             return .handled
         }
         .onKeyPress(.rightArrow) {
+            if selectedTab == .enhancedLRC {
+                return .ignored
+            }
             viewModel.skipForward()
             return .handled
         }

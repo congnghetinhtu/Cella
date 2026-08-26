@@ -59,6 +59,9 @@ class PlayerViewModel {
     var nextLyrics: [LrcLine] = []
     var lyricsMode: LyricsMode = .off
     private var playlistFolderURL: URL?
+    private var cueSheet: CueSheet?
+    private var caPlaylist: CaPlaylist?
+    private var albumCueArtists: [String: String] = [:]
 
     // MARK: - Artist Images
 
@@ -89,8 +92,13 @@ class PlayerViewModel {
         guard let url = mixQueue?.currentTrack?.url,
               let folder = playlistFolderURL else { return false }
         let lrcName = url.deletingPathExtension().lastPathComponent + ".lrc"
-        let lrcURL = folder.appendingPathComponent(lrcName)
-        return FileManager.default.fileExists(atPath: lrcURL.path)
+        let albumDir = url.deletingLastPathComponent()
+        let candidates = [
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent(lrcName)
+        ]
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     var isTransitioning: Bool {
@@ -376,24 +384,43 @@ class PlayerViewModel {
         }
 
         let lrcName = trackURL.deletingPathExtension().lastPathComponent + ".lrc"
-        let lrcURL = folder.appendingPathComponent(lrcName)
 
-        if FileManager.default.fileExists(atPath: lrcURL.path) {
-            currentLyrics = LrcParser.load(from: lrcURL)
-            print("[PlayerViewModel] Loaded lyrics: \(currentLyrics.count) lines from \(lrcName)")
-        } else {
+        // Find lrc file: try album's lrc/ subfolder first, then root lrc/, then legacy (same dir)
+        let albumDir = trackURL.deletingLastPathComponent()
+        let candidates = [
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent(lrcName)
+        ]
+
+        var found = false
+        for lrcURL in candidates where FileManager.default.fileExists(atPath: lrcURL.path) {
+            let result = LrcParser.load(from: lrcURL)
+            currentLyrics = result.lines
+            print("[PlayerViewModel] Loaded lyrics: \(currentLyrics.count) lines from \(lrcURL.lastPathComponent)")
+            found = true
+            break
+        }
+        if !found {
             currentLyrics = []
         }
 
         // Preload next track lyrics for transition fusion
         if let nextTrack = mixQueue?.nextTrack {
             let nextLrcName = nextTrack.url.deletingPathExtension().lastPathComponent + ".lrc"
-            let nextLrcURL = folder.appendingPathComponent(nextLrcName)
-            if FileManager.default.fileExists(atPath: nextLrcURL.path) {
-                nextLyrics = LrcParser.load(from: nextLrcURL)
-            } else {
-                nextLyrics = []
+            let nextAlbumDir = nextTrack.url.deletingLastPathComponent()
+            let nextCandidates = [
+                nextAlbumDir.appendingPathComponent("lrc").appendingPathComponent(nextLrcName),
+                folder.appendingPathComponent("lrc").appendingPathComponent(nextLrcName),
+                folder.appendingPathComponent(nextLrcName)
+            ]
+            var nextFound = false
+            for lrcURL in nextCandidates where FileManager.default.fileExists(atPath: lrcURL.path) {
+                nextLyrics = LrcParser.load(from: lrcURL).lines
+                nextFound = true
+                break
             }
+            if !nextFound { nextLyrics = [] }
         } else {
             nextLyrics = []
         }
@@ -407,8 +434,8 @@ class PlayerViewModel {
     // MARK: - Artist Images
 
     private func loadArtistImages(from folder: URL) {
-        let artistsDir = folder.appendingPathComponent("artists")
-        guard FileManager.default.fileExists(atPath: artistsDir.path) else {
+        let cmaDir = folder.appendingPathComponent("cma")
+        guard FileManager.default.fileExists(atPath: cmaDir.path) else {
             artistImages = []
             currentArtistImage = nil
             artistVideoURLs = []
@@ -420,8 +447,32 @@ class PlayerViewModel {
         let animatedExtensions = Set(["gif", "mp4", "mov", "cma"])
         let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
 
+        // Get artist names from album CUE files first, fallback to filename parsing
+        var trackArtists: [String] = []
+
+        if let trackURL = mixQueue?.currentTrack?.url {
+            let fileName = trackURL.lastPathComponent
+            if let artist = albumCueArtists[fileName], !artist.isEmpty {
+                trackArtists.append(artist)
+            }
+        }
+
+        // Fallback: parse from filename
+        if trackArtists.isEmpty, let trackName = mixQueue?.currentTrack?.fileName {
+            if let separatorIndex = trackName.range(of: " - ")?.lowerBound {
+                let mainPart = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
+                for name in mainPart.components(separatedBy: " & ") {
+                    let trimmed = name.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty { trackArtists.append(trimmed.lowercased()) }
+                }
+            }
+        }
+
+        print("[PlayerViewModel] CMA artists: \(trackArtists)")
+
+        // Scan cma/ directory
         let contents = (try? FileManager.default.contentsOfDirectory(
-            at: artistsDir, includingPropertiesForKeys: nil
+            at: cmaDir, includingPropertiesForKeys: nil
         )) ?? []
 
         let allFiles = contents.filter {
@@ -431,87 +482,61 @@ class PlayerViewModel {
         let animatedFiles = allFiles.filter { animatedExtensions.contains($0.pathExtension.lowercased()) }
         let staticFiles = allFiles.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
 
-        // Parse artist names from current track filename
-        let trackArtists: [String] = {
-            guard let trackName = mixQueue?.currentTrack?.fileName else { return [] }
-            var artists: [String] = []
-            
-            // Main artist: before " - ", split by " & "
-            if let separatorIndex = trackName.range(of: " - ")?.lowerBound {
-                let mainPart = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
-                for name in mainPart.components(separatedBy: " & ") {
-                    let trimmed = name.trimmingCharacters(in: .whitespaces)
-                    if !trimmed.isEmpty { artists.append(trimmed) }
-                }
-            }
-            
-            // Featured artists: (feat. ...) / (ft. ...) anywhere in filename
-            let patterns = ["feat.", "ft.", "featuring"]
-            for pattern in patterns {
-                var searchRange = trackName.startIndex..<trackName.endIndex
-                while let featRange = trackName.range(of: "(\(pattern) ", options: .caseInsensitive, range: searchRange) {
-                    let afterFeat = featRange.upperBound
-                    guard let closeParen = trackName.range(of: ")", range: afterFeat..<trackName.endIndex) else { break }
-                    let featPart = String(trackName[afterFeat..<closeParen.lowerBound])
-                    for name in featPart.components(separatedBy: CharacterSet(charactersIn: "&,")) {
-                        let trimmed = name.trimmingCharacters(in: .whitespaces)
-                        if !trimmed.isEmpty { artists.append(trimmed) }
-                    }
-                    searchRange = closeParen.upperBound..<trackName.endIndex
-                }
-            }
-            
-            return artists.map { $0.lowercased() }.filter { !$0.isEmpty }
-        }()
-
-        // Match artist names to video files — check artist subfolders first, then flat files
+        // Match artist names to video/image files in cma/<artist>/ subfolders
         artistVideoURLs = []
-        if !trackArtists.isEmpty {
-            let videoExtensions = Set(["mp4", "mov", "cma"])
+        let videoExtensions = Set(["mp4", "mov", "cma"])
 
-            // 1. Check artist subfolders: artists/<Artist Name>/*.mp4
-            for artist in trackArtists {
-                let artistDir = artistsDir.appendingPathComponent(artist)
-                    .appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-"))
-                // Try both normalized forms
-                let candidates = [
-                    artistsDir.appendingPathComponent(artist),
-                    artistsDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-"))
-                ]
-                for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
-                    let contents = (try? FileManager.default.contentsOfDirectory(
-                        at: dir, includingPropertiesForKeys: nil
-                    )) ?? []
-                    let videos = contents.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
-                        .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-                    artistVideoURLs.append(contentsOf: videos)
-                }
-            }
+        for artist in trackArtists {
+            // Try various folder name formats: "artist", "Artist", "artist-name"
+            let candidates = [
+                cmaDir.appendingPathComponent(artist),
+                cmaDir.appendingPathComponent(artist.split(separator: " ").map(\.capitalized).joined(separator: " ")),
+                cmaDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-")),
+                cmaDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "_"))
+            ]
+            for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
+                let subContents = (try? FileManager.default.contentsOfDirectory(
+                    at: dir, includingPropertiesForKeys: nil
+                )) ?? []
+                let videos = subContents.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
+                    .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+                artistVideoURLs.append(contentsOf: videos)
 
-            // 2. Fallback: flat files in artists/ matching artist name
-            if artistVideoURLs.isEmpty {
-                for videoURL in animatedFiles where videoURL.pathExtension.lowercased() != "gif" {
-                    let videoName = videoURL.deletingPathExtension().lastPathComponent
-                        .lowercased()
-                        .replacingOccurrences(of: "-", with: " ")
-                        .replacingOccurrences(of: "_", with: " ")
-                    let matched = trackArtists.contains { artist in
-                        let normalized = artist.replacingOccurrences(of: "-", with: " ")
-                            .replacingOccurrences(of: "_", with: " ")
-                        return videoName == normalized
-                    }
-                    if matched { artistVideoURLs.append(videoURL) }
+                // Also grab static images from artist subfolder
+                let images = subContents.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
+                    .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+                if !images.isEmpty {
+                    artistImages = images.compactMap { NSImage(contentsOf: $0) }
                 }
             }
         }
+
+        // Fallback: flat files in cma/ matching artist name
+        if artistVideoURLs.isEmpty {
+            for videoURL in animatedFiles where videoURL.pathExtension.lowercased() != "gif" {
+                let videoName = videoURL.deletingPathExtension().lastPathComponent
+                    .lowercased()
+                    .replacingOccurrences(of: "-", with: " ")
+                    .replacingOccurrences(of: "_", with: " ")
+                let matched = trackArtists.contains { artist in
+                    let normalized = artist.replacingOccurrences(of: "-", with: " ")
+                        .replacingOccurrences(of: "_", with: " ")
+                    return videoName == normalized
+                }
+                if matched { artistVideoURLs.append(videoURL) }
+            }
+        }
+
         // Fallback: if no match, use all videos
         if artistVideoURLs.isEmpty {
             artistVideoURLs = animatedFiles.filter { $0.pathExtension.lowercased() != "gif" }
         }
         artistVideoIndex = 0
 
-        // Load static images
-        artistImages = staticFiles.compactMap { NSImage(contentsOf: $0) }
+        // Load static images (if not already loaded from subfolder)
+        if artistImages.isEmpty {
+            artistImages = staticFiles.compactMap { NSImage(contentsOf: $0) }
+        }
         artistImageIndex = 0
 
         // Load animated frames (priority: first matching GIF, then first video)
@@ -911,13 +936,74 @@ class PlayerViewModel {
                 at: url, includingPropertiesForKeys: nil
             )) ?? []
 
-            let audioFiles = contents.filter {
-                audioExtensions.contains($0.pathExtension.lowercased())
-            }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+            // Read .ca file for album structure
+            let caFiles = contents.filter { $0.pathExtension.lowercased() == "ca" }
+            var parsedCa: CaPlaylist?
+            if let caURL = caFiles.first, let playlist = CaParser.load(from: caURL) {
+                print("[PlayerViewModel] .ca playlist: \(playlist.name ?? "?"), \(playlist.albums.count) albums")
+                parsedCa = playlist
+            }
 
-            print("[PlayerViewModel] Audio files found: \(audioFiles.count)")
+            // Collect audio files
+            var audioFiles: [URL] = []
 
-            guard !audioFiles.isEmpty else {
+            if let playlist = parsedCa {
+                audioFiles = CaParser.audioFiles(from: playlist, in: url)
+            }
+
+            if audioFiles.isEmpty {
+                audioFiles = contents.filter {
+                    audioExtensions.contains($0.pathExtension.lowercased())
+                }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+
+                if audioFiles.isEmpty {
+                    let subfolders = contents.filter { $0.hasDirectoryPath }
+                    for subfolder in subfolders {
+                        let subContents = (try? fileManager.contentsOfDirectory(
+                            at: subfolder, includingPropertiesForKeys: nil
+                        )) ?? []
+                        let subAudio = subContents.filter {
+                            audioExtensions.contains($0.pathExtension.lowercased())
+                        }
+                        audioFiles.append(contentsOf: subAudio)
+                    }
+                }
+            }
+
+            // Scan album subfolders for CUE files and build artist mapping
+            var parsedAlbumCueArtists: [String: String] = [:]
+            let subfolders = contents.filter { $0.hasDirectoryPath }
+            for subfolder in subfolders {
+                let subContents = (try? fileManager.contentsOfDirectory(
+                    at: subfolder, includingPropertiesForKeys: nil
+                )) ?? []
+                let subCueFiles = subContents.filter { $0.pathExtension.lowercased() == "cue" }
+                for cueURL in subCueFiles {
+                    if let sheet = CueParser.load(from: cueURL) {
+                        for track in sheet.tracks {
+                            parsedAlbumCueArtists[track.fileName] = track.performer.lowercased()
+                        }
+                    }
+                }
+            }
+            print("[PlayerViewModel] Album CUE artists: \(parsedAlbumCueArtists)")
+
+            // Also check root CUE
+            let cueFiles = contents.filter { $0.pathExtension.lowercased() == "cue" }
+            var orderedFiles = audioFiles
+            var parsedCue: CueSheet?
+            if let cueURL = cueFiles.first, let sheet = CueParser.load(from: cueURL) {
+                print("[PlayerViewModel] CUE sheet: \(sheet.trackCount) tracks")
+                parsedCue = sheet
+                for track in sheet.tracks {
+                    parsedAlbumCueArtists[track.fileName] = track.performer.lowercased()
+                }
+                orderedFiles = sheet.trackOrder(for: audioFiles)
+            }
+
+            print("[PlayerViewModel] Audio files found: \(orderedFiles.count)")
+
+            guard !orderedFiles.isEmpty else {
                 await MainActor.run {
                     self.importError = "No audio files found in folder"
                     print("[PlayerViewModel] ERROR: No audio files found")
@@ -927,7 +1013,7 @@ class PlayerViewModel {
 
             // Validate off main thread — reads audio headers, not full files
             var validTracks: [TrackAsset] = []
-            for rawTrack in audioFiles.map({ TrackAsset(url: $0) }) {
+            for rawTrack in orderedFiles.map({ TrackAsset(url: $0) }) {
                 do {
                     _ = try AudioHelpers.readAudio(url: rawTrack.url)
                     validTracks.append(rawTrack)
@@ -948,6 +1034,9 @@ class PlayerViewModel {
 
             // Switch back to main actor for state updates and playback
             await MainActor.run {
+                self.cueSheet = parsedCue
+                self.caPlaylist = parsedCa
+                self.albumCueArtists = parsedAlbumCueArtists
                 self.totalTrackCount = tracks.count
                 self.analyzedTrackCount = 0
 
@@ -1350,19 +1439,102 @@ class PlayerViewModel {
             at: url, includingPropertiesForKeys: nil
         )) ?? []
 
-        let audioFiles = contents.filter {
-            audioExtensions.contains($0.pathExtension.lowercased())
-        }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        // Read .ca file for album structure
+        let caFiles = contents.filter { $0.pathExtension.lowercased() == "ca" }
+        if let caURL = caFiles.first, let playlist = CaParser.load(from: caURL) {
+            print("[PlayerViewModel] .ca playlist: \(playlist.name ?? "?"), \(playlist.albums.count) albums")
+            caPlaylist = playlist
+        } else {
+            caPlaylist = nil
+        }
 
-        guard audioFiles.count >= 2 else {
+        // Collect audio files: from .ca album folders, or scan subfolders, or root
+        var audioFiles: [URL] = []
+
+        if let playlist = caPlaylist {
+            // Use .ca structure: scan each album subfolder
+            audioFiles = CaParser.audioFiles(from: playlist, in: url)
+            print("[PlayerViewModel] Found \(audioFiles.count) tracks from .ca albums")
+        }
+
+        if audioFiles.isEmpty {
+            // Fallback: scan root for audio files (flat structure)
+            audioFiles = contents.filter {
+                audioExtensions.contains($0.pathExtension.lowercased())
+            }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+
+            // Also scan one-level-deep subfolders for audio (album folders)
+            if audioFiles.isEmpty {
+                let subfolders = contents.filter { $0.hasDirectoryPath }
+                for subfolder in subfolders {
+                    let subContents = (try? fileManager.contentsOfDirectory(
+                        at: subfolder, includingPropertiesForKeys: nil
+                    )) ?? []
+                    let subAudio = subContents.filter {
+                        audioExtensions.contains($0.pathExtension.lowercased())
+                    }
+                    audioFiles.append(contentsOf: subAudio)
+                }
+            }
+        }
+
+        // Scan album subfolders for CUE files and build artist mapping
+        albumCueArtists = [:]
+
+        // Use .ca to know which albums exist, otherwise scan all subfolders
+        var albumFolders: [URL] = []
+        if let playlist = caPlaylist {
+            for album in playlist.albums {
+                let albumDir = url.appendingPathComponent(album.folder)
+                if FileManager.default.fileExists(atPath: albumDir.path) {
+                    albumFolders.append(albumDir)
+                }
+            }
+        } else {
+            albumFolders = contents.filter { $0.hasDirectoryPath }.map { url.appendingPathComponent($0.lastPathComponent) }
+        }
+
+        for albumDir in albumFolders {
+            let subContents = (try? fileManager.contentsOfDirectory(
+                at: albumDir, includingPropertiesForKeys: nil
+            )) ?? []
+            let cueFiles = subContents.filter { $0.pathExtension.lowercased() == "cue" }
+            for cueURL in cueFiles {
+                if let sheet = CueParser.load(from: cueURL) {
+                    for track in sheet.tracks {
+                        albumCueArtists[track.fileName] = track.performer.lowercased()
+                    }
+                }
+            }
+        }
+        print("[PlayerViewModel] Album CUE artists: \(albumCueArtists)")
+
+        // Also check root CUE
+        let rootCueFiles = contents.filter { $0.pathExtension.lowercased() == "cue" }
+        if let cueURL = rootCueFiles.first, let sheet = CueParser.load(from: cueURL) {
+            cueSheet = sheet
+            for track in sheet.tracks {
+                albumCueArtists[track.fileName] = track.performer.lowercased()
+            }
+        } else {
+            cueSheet = nil
+        }
+
+        // Order tracks using root CUE if available
+        var orderedFiles = audioFiles
+        if let sheet = cueSheet {
+            orderedFiles = sheet.trackOrder(for: audioFiles)
+        }
+
+        guard orderedFiles.count >= 2 else {
             importError = "Need at least 2 audio files"
             return
         }
 
-        totalTrackCount = audioFiles.count
+        totalTrackCount = orderedFiles.count
         analyzedTrackCount = 0
 
-        let tracks = audioFiles.map { TrackAsset(url: $0) }
+        let tracks = orderedFiles.map { TrackAsset(url: $0) }
         mixQueue = MixQueue(
             tracks: tracks,
             transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))
