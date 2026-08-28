@@ -233,10 +233,17 @@ struct NowPlayingBar: View {
     @State private var gradientTimer: Timer?
     @State private var isVolumeAdjusting = false
     @State private var volumeGlowTimer: Timer?
+    @State private var lyricBadgeVisible = false
+    @State private var lyricBadgeTask: Task<Void, Never>?
 
     private var currentTrack: TrackAsset? { viewModel.mixQueue?.currentTrack }
     private var isPlaying: Bool { viewModel.playerState == .playing || viewModel.playerState == .autoMix }
     private var isAutoMixing: Bool { viewModel.playerState == .autoMix }
+    private var hasLyricSupported: Bool {
+        guard let track = viewModel.mixQueue?.currentTrack else { return !viewModel.currentLyrics.isEmpty }
+        return viewModel.hasLyric(for: track)
+    }
+    private var shouldAnimateGradient: Bool { isAutoMixing || lyricBadgeVisible }
 
     var body: some View {
         let currentText: String? = {
@@ -251,6 +258,27 @@ struct NowPlayingBar: View {
 
         normalPill(track: currentTrack, lyrics: currentText)
             .animation(.smooth(duration: 0.5), value: isAutoMixing)
+            .animation(.smooth(duration: 0.5), value: lyricBadgeVisible)
+            .onAppear {
+                updateGradientTimer()
+                // First song after import — view may have appeared after track already set
+                if hasLyricSupported && isPlaying { triggerLyricBadgeIfNeeded() }
+            }
+            .onChange(of: shouldAnimateGradient) { _, _ in updateGradientTimer() }
+            .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
+                // During OpenMix, wait until crossfade finishes (state -> playing) to show
+                if viewModel.playerState == .autoMix { return }
+                if hasLyricSupported { triggerLyricBadgeIfNeeded() } else { hideLyricBadge() }
+            }
+            .onChange(of: hasLyricSupported) { _, hasLyric in
+                // Covers first import where lyrics load after track assignment
+                if hasLyric && isPlaying { triggerLyricBadgeIfNeeded() }
+            }
+            .onChange(of: viewModel.playerState) { old, new in
+                if new == .playing && old != .paused && hasLyricSupported { triggerLyricBadgeIfNeeded() }
+                if new == .autoMix { hideLyricBadge() }
+            }
+            .onDisappear { stopGradientTimer() }
         .onChange(of: viewModel.currentVolume) { _, _ in
             isVolumeAdjusting = true
             volumeGlowTimer?.invalidate()
@@ -313,6 +341,11 @@ struct NowPlayingBar: View {
 
                 volumeIndicator(small: true)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
+
+                if lyricBadgeVisible {
+                    lyricSupportedBadge
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
 
                 Image(systemName: viewModel.lyricsMode.iconName)
                     .font(.system(size: 12))
@@ -394,18 +427,94 @@ struct NowPlayingBar: View {
         )
         .clipShape(Capsule())
         .shadow(color: .green.opacity(0.5), radius: 6)
-        .onAppear {
+    }
+
+    // MARK: - Lyric Supported Badge
+
+    private var lyricSupportedBadge: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "text.bubble.fill")
+                .font(.system(size: 8))
+                .foregroundStyle(.white)
+            Text("Lyric Supported")
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [.green, .mint, .green.opacity(0.85)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .overlay(
+                    AngularGradient(
+                        colors: [
+                            .clear, .clear,
+                            .white.opacity(0.3),
+                            .clear, .clear,
+                            .white.opacity(0.2),
+                            .clear, .clear
+                        ],
+                        center: .center,
+                        angle: .degrees(gradientAngle)
+                    )
+                    .blendMode(.overlay)
+                )
+        )
+        .clipShape(Capsule())
+        .shadow(color: .green.opacity(0.5), radius: 6)
+    }
+
+    private func updateGradientTimer() {
+        if shouldAnimateGradient {
+            guard gradientTimer == nil else { return }
             gradientTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { _ in
                 withAnimation(.linear(duration: 0.05)) {
                     gradientAngle += 3
                     if gradientAngle >= 360 { gradientAngle = 0 }
                 }
             }
+        } else {
+            stopGradientTimer()
         }
-        .onDisappear {
-            gradientTimer?.invalidate()
-            gradientTimer = nil
+    }
+
+    private func stopGradientTimer() {
+        gradientTimer?.invalidate()
+        gradientTimer = nil
+    }
+
+    private func triggerLyricBadgeIfNeeded() {
+        guard hasLyricSupported else { return }
+        lyricBadgeTask?.cancel()
+        withAnimation(.smooth(duration: 0.5)) {
+            lyricBadgeVisible = true
         }
+        updateGradientTimer()
+        lyricBadgeTask = Task {
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.smooth(duration: 0.5)) {
+                    lyricBadgeVisible = false
+                }
+                updateGradientTimer()
+            }
+        }
+    }
+
+    private func hideLyricBadge() {
+        lyricBadgeTask?.cancel()
+        lyricBadgeTask = nil
+        withAnimation(.smooth(duration: 0.5)) {
+            lyricBadgeVisible = false
+        }
+        updateGradientTimer()
     }
 
     // MARK: - Volume Indicator (Apple-style animated)

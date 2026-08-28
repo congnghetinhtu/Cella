@@ -414,6 +414,13 @@ class MixAudioEngine {
         }
     }
 
+    /// Immediate volume without timer — for scroll wheel scrubbing (no runloop churn, no stutter)
+    func setVolumeImmediate(_ volume: Float) {
+        volumeRampTimer?.invalidate()
+        volumeRampTimer = nil
+        mixerNode.volume = min(2.0, max(0, volume))
+    }
+
     func pause() {
         guard isPlaying else { return }
         currentPlayer.pause()

@@ -19,7 +19,38 @@ struct VideoBackgroundView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: AVPlayerView, context: Context) {
-        nsView.player = player
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+}
+
+/// Isolated background container — only re-renders when video identity changes,
+/// not on volume / currentTime ticks. Prevents scroll from stuttering video.
+private struct CmaBackgroundLayer: View {
+    let videoPlayer: AVPlayer?
+    let artistImage: NSImage?
+    let isActive: Bool
+
+    var body: some View {
+        Group {
+            if isActive {
+                if let player = videoPlayer {
+                    VideoBackgroundView(player: player)
+                        .opacity(0.35)
+                        .blur(radius: 4)
+                        .transition(.opacity)
+                } else if let image = artistImage {
+                    Image(nsImage: image)
+                        .resizable()
+                        .aspectRatio(21.0 / 9.0, contentMode: .fill)
+                        .opacity(0.35)
+                        .blur(radius: 4)
+                        .clipped()
+                        .transition(.opacity)
+                }
+            }
+        }
     }
 }
 
@@ -36,8 +67,10 @@ struct EmotionScreenView: View {
     @State private var frozenLyricIndex = -1
     @State private var isHoveringScreen = false
     @State private var scrollMonitor: Any?
-    @State private var lastActiveLine = ""
-    @State private var borderPulseStart: Date = .distantPast
+    @State private var lyricPulseActive = false
+    @State private var lyricPulseTask: Task<Void, Never>?
+    @State private var prevLyricIndex = -1
+    @State private var lastVolumeScroll = CFAbsoluteTime(0) // kept for compat, now throttled in viewModel
 
     private static let barWidth: CGFloat =
         CGFloat(MatrixPatterns.columns) * 36 + CGFloat(MatrixPatterns.columns - 1) * 24
@@ -72,7 +105,6 @@ struct EmotionScreenView: View {
         return vm.currentLyrics.first?.text ?? ""
     }
 
-    /// Index of the currently active lyric line, or -1 when none.
     private var currentLyricIndex: Int {
         guard let vm = viewModel, !vm.currentLyrics.isEmpty else { return -1 }
         for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
@@ -80,14 +112,51 @@ struct EmotionScreenView: View {
                 return i
             }
         }
-        return vm.currentLyrics.isEmpty ? -1 : 0
+        return -1
     }
 
-    /// True if given text is a pure "..." placeholder (not inline line-ending).
-    private func isEllipsisPlaceholder(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return false }
-        return trimmed == "..." || trimmed.allSatisfy { $0 == "." }
+    private var isBorderPulsing: Bool {
+        lyricPulseActive || viewModel?.playerState == .autoMix
+    }
+
+    private func isPlaceholderLyric(_ text: String) -> Bool {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t == "..." || t == "…" || t == ".." || t.isEmpty
+    }
+
+    private func checkLyricTransition() {
+        let idx = currentLyricIndex
+        guard idx != prevLyricIndex else { return }
+        defer { prevLyricIndex = idx }
+
+        // Need both indices valid
+        guard idx >= 0, prevLyricIndex >= 0,
+              let vm = viewModel,
+              idx < vm.currentLyrics.count,
+              prevLyricIndex < vm.currentLyrics.count else { return }
+
+        let prevText = vm.currentLyrics[prevLyricIndex].text
+        let newText = vm.currentLyrics[idx].text
+
+        if isPlaceholderLyric(prevText) && !isPlaceholderLyric(newText) {
+            triggerLyricPulse()
+        }
+    }
+
+    private func triggerLyricPulse() {
+        lyricPulseTask?.cancel()
+        withAnimation(.smooth(duration: 0.6)) {
+            lyricPulseActive = true
+        }
+        lyricPulseTask = Task {
+            try? await Task.sleep(nanoseconds: 1_800_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.smooth(duration: 0.6)) {
+                    lyricPulseActive = false
+                }
+            }
+        }
     }
 
     var body: some View {
@@ -95,27 +164,13 @@ struct EmotionScreenView: View {
             RoundedRectangle(cornerRadius: 16)
                 .fill(theme.dotInactiveDeep)
 
-            // Artist image background — only when playing
-            if let vm = viewModel,
-               vm.playerState.isPlaying || vm.playerState == .autoMix {
-                if let player = vm.videoPlayer {
-                    // Video boomerang background
-                    VideoBackgroundView(player: player)
-                        .opacity(0.35)
-                        .blur(radius: 4)
-                        .transition(.opacity)
-                } else if let image = vm.currentArtistImage {
-                    // Static/GIF image background
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(21.0 / 9.0, contentMode: .fill)
-                        .opacity(0.35)
-                        .blur(radius: 4)
-                        .clipped()
-                        .transition(.opacity)
-                        .animation(.smooth, value: vm.currentArtistImage?.hash)
-                }
-            }
+            // Artist image background — only when playing (isolated so volume scrub doesn't re-render video)
+            CmaBackgroundLayer(
+                videoPlayer: viewModel?.videoPlayer,
+                artistImage: viewModel?.currentArtistImage,
+                isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix
+            )
+            .animation(.smooth, value: viewModel?.currentArtistImage?.hash)
 
             // Main content (matrix / line / static)
             mainContent
@@ -167,34 +222,42 @@ struct EmotionScreenView: View {
             }
         }
         .overlay(
-            TimelineView(.animation) { timeline in
-                let pulse = pulseAmount(at: timeline.date)
-                let isAutoMix = (viewModel?.playerState == .autoMix)
-                let base = isAutoMix ? 1.0 : 0.0
-                let glow = min(1.0, base + pulse)
-
-                RoundedRectangle(cornerRadius: 18)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                .green.opacity(0.0),
-                                .green.opacity(0.6 * glow),
-                                .mint.opacity(0.8 * glow),
-                                .green.opacity(0.6 * glow),
-                                .green.opacity(0.0)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 2
-                    )
-                    .shadow(color: .green.opacity(0.6 * glow), radius: 12)
-                    .shadow(color: .mint.opacity(0.4 * glow), radius: 20)
-                    .opacity(glow)
-            }
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            .green.opacity(0.0),
+                            .green.opacity(0.6),
+                            .mint.opacity(0.8),
+                            .green.opacity(0.6),
+                            .green.opacity(0.0)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 2
+                )
+                .shadow(color: .green.opacity(isBorderPulsing ? 0.6 : 0), radius: 12)
+                .shadow(color: .mint.opacity(isBorderPulsing ? 0.4 : 0), radius: 20)
+                .opacity(isBorderPulsing ? 1 : 0)
+                .animation(.smooth(duration: 0.6), value: isBorderPulsing)
         )
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
+        .onChange(of: viewModel?.currentTime ?? 0) { _, _ in
+            checkLyricTransition()
+        }
+        .onChange(of: viewModel?.currentLyrics.count ?? 0) { _, _ in
+            // New song / new lyrics loaded — reset
+            prevLyricIndex = currentLyricIndex
+            lyricPulseTask?.cancel()
+            lyricPulseActive = false
+        }
+        .onChange(of: viewModel?.mixQueue?.currentTrack?.url) { _, _ in
+            prevLyricIndex = currentLyricIndex
+            lyricPulseTask?.cancel()
+            lyricPulseActive = false
+        }
         .onContinuousHover { phase in
             switch phase {
             case .active:
@@ -205,47 +268,6 @@ struct EmotionScreenView: View {
                 stopScrollMonitor()
             }
         }
-        .onChange(of: currentLyricIndex) { _, newIndex in
-            detectLyricTransition(to: newIndex)
-        }
-        .onChange(of: viewModel?.currentLyrics ?? []) { _, _ in
-            lastActiveLine = ""
-        }
-    }
-
-    // MARK: - Lyric Transition Pulse
-
-    /// Pulse envelope (0..1) based on time since last lyric-triggered pulse.
-    private func pulseAmount(at date: Date) -> Double {
-        let elapsed = date.timeIntervalSince(borderPulseStart)
-        // No pulse yet
-        guard borderPulseStart != .distantPast else { return 0 }
-        // Rise fast (0.12s), hold, fall over total ~1.0s
-        let total: TimeInterval = 1.0
-        guard elapsed >= 0 && elapsed <= total else { return 0 }
-        let rise: TimeInterval = 0.15
-        if elapsed < rise {
-            let t = elapsed / rise
-            return t * t * (3 - 2 * t)   // easeInOut
-        }
-        let fall = total - rise
-        let t = (elapsed - rise) / fall
-        return 1.0 - t * t                 // easeOut fall
-    }
-
-    private func detectLyricTransition(to index: Int) {
-        guard let vm = viewModel, index >= 0, index < vm.currentLyrics.count else { return }
-        let currentText = vm.currentLyrics[index].text
-        // Only pulse when the line BEFORE was a pure "..." placeholder
-        // and the current line is a real lyric.
-        if isEllipsisPlaceholder(lastActiveLine) && !isEllipsisPlaceholder(currentText) {
-            borderPulseStart = Date()
-        }
-        // Update running "previous line" — but ignore repeated identical lines
-        // (keep the ellipsis marker until a genuinely different anchor arrives).
-        if currentText != lastActiveLine {
-            lastActiveLine = currentText
-        }
     }
 
     // MARK: - Volume Scroll Monitor
@@ -253,8 +275,9 @@ struct EmotionScreenView: View {
     private func startScrollMonitor() {
         guard scrollMonitor == nil else { return }
         scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            self.handleScrollWheel(event)
-            return event
+            let handled = self.handleScrollWheel(event)
+            // Swallow event when we handle volume so AVPlayerView doesn't scrub/pause
+            return handled ? nil : event
         }
     }
 
@@ -265,11 +288,15 @@ struct EmotionScreenView: View {
         }
     }
 
-    private func handleScrollWheel(_ event: NSEvent) {
-        guard let vm = viewModel else { return }
+    @discardableResult
+    private func handleScrollWheel(_ event: NSEvent) -> Bool {
+        guard let vm = viewModel else { return false }
+        // Only handle vertical scroll with meaningful delta
         let raw = event.scrollingDeltaY
+        guard abs(raw) > 0.1 else { return false }
         let newVolume = max(0, min(1, vm.currentVolume + Float(raw) * 0.001))
-        vm.setVolumeImmediate(newVolume)
+        vm.setVolumeForScroll(newVolume)
+        return true
     }
 
     // MARK: - Slim Lyrics (single line above progress bar)

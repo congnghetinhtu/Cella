@@ -89,8 +89,12 @@ class PlayerViewModel {
     private var profileSoundPlayer: AVAudioPlayer?
 
     var currentTrackHasLrc: Bool {
-        guard let url = mixQueue?.currentTrack?.url,
-              let folder = playlistFolderURL else { return false }
+        guard let url = mixQueue?.currentTrack?.url else { return false }
+        return hasLyric(for: url)
+    }
+
+    func hasLyric(for url: URL) -> Bool {
+        guard let folder = playlistFolderURL else { return false }
         let lrcName = url.deletingPathExtension().lastPathComponent + ".lrc"
         let albumDir = url.deletingLastPathComponent()
         let candidates = [
@@ -99,6 +103,10 @@ class PlayerViewModel {
             folder.appendingPathComponent(lrcName)
         ]
         return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    func hasLyric(for track: TrackAsset) -> Bool {
+        hasLyric(for: track.url)
     }
 
     var isTransitioning: Bool {
@@ -353,7 +361,33 @@ class PlayerViewModel {
 
     func setVolumeImmediate(_ volume: Float) {
         currentVolume = volume
-        audioEngine.smoothVolume(to: volume, duration: 0.1)
+        audioEngine.setVolumeImmediate(volume)
+    }
+
+    /// Scroll-driven volume: engine updates immediately, UI throttled to 60Hz to avoid stuttering video
+    private var pendingScrollVolume: Float?
+    private var lastScrollVolumeTime: CFAbsoluteTime = 0
+
+    func setVolumeForScroll(_ volume: Float) {
+        let v = min(1, max(0, volume))
+        audioEngine.setVolumeImmediate(v)
+        let now = CFAbsoluteTimeGetCurrent()
+        // Coalesce UI updates to ~30Hz so SwiftUI doesn't thrash every scroll delta
+        if now - lastScrollVolumeTime > 0.033 {
+            lastScrollVolumeTime = now
+            currentVolume = v
+            pendingScrollVolume = nil
+        } else {
+            pendingScrollVolume = v
+            // Flush pending on next frame
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 33_000_000)
+                guard let self, let pending = self.pendingScrollVolume else { return }
+                self.pendingScrollVolume = nil
+                self.lastScrollVolumeTime = CFAbsoluteTimeGetCurrent()
+                self.currentVolume = pending
+            }
+        }
     }
 
     func setHallReverb(_ enabled: Bool) {
