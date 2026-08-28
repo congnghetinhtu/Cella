@@ -34,6 +34,10 @@ struct EmotionScreenView: View {
     @State private var isDragging = false
     @State private var dragProgress: CGFloat?
     @State private var frozenLyricIndex = -1
+    @State private var isHoveringScreen = false
+    @State private var scrollMonitor: Any?
+    @State private var lastActiveLine = ""
+    @State private var borderPulseStart: Date = .distantPast
 
     private static let barWidth: CGFloat =
         CGFloat(MatrixPatterns.columns) * 36 + CGFloat(MatrixPatterns.columns - 1) * 24
@@ -66,6 +70,24 @@ struct EmotionScreenView: View {
             }
         }
         return vm.currentLyrics.first?.text ?? ""
+    }
+
+    /// Index of the currently active lyric line, or -1 when none.
+    private var currentLyricIndex: Int {
+        guard let vm = viewModel, !vm.currentLyrics.isEmpty else { return -1 }
+        for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
+            if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
+                return i
+            }
+        }
+        return vm.currentLyrics.isEmpty ? -1 : 0
+    }
+
+    /// True if given text is a pure "..." placeholder (not inline line-ending).
+    private func isEllipsisPlaceholder(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        return trimmed == "..." || trimmed.allSatisfy { $0 == "." }
     }
 
     var body: some View {
@@ -145,28 +167,109 @@ struct EmotionScreenView: View {
             }
         }
         .overlay(
-            RoundedRectangle(cornerRadius: 18)
-                .stroke(
-                    LinearGradient(
-                        colors: [
-                            .green.opacity(0.0),
-                            .green.opacity(0.6),
-                            .mint.opacity(0.8),
-                            .green.opacity(0.6),
-                            .green.opacity(0.0)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 2
-                )
-                .shadow(color: .green.opacity(viewModel?.playerState == .autoMix ? 0.6 : 0), radius: 12)
-                .shadow(color: .mint.opacity(viewModel?.playerState == .autoMix ? 0.4 : 0), radius: 20)
-                .opacity(viewModel?.playerState == .autoMix ? 1 : 0)
-                .animation(.smooth(duration: 0.6), value: viewModel?.playerState == .autoMix)
+            TimelineView(.animation) { timeline in
+                let pulse = pulseAmount(at: timeline.date)
+                let isAutoMix = (viewModel?.playerState == .autoMix)
+                let base = isAutoMix ? 1.0 : 0.0
+                let glow = min(1.0, base + pulse)
+
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                .green.opacity(0.0),
+                                .green.opacity(0.6 * glow),
+                                .mint.opacity(0.8 * glow),
+                                .green.opacity(0.6 * glow),
+                                .green.opacity(0.0)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 2
+                    )
+                    .shadow(color: .green.opacity(0.6 * glow), radius: 12)
+                    .shadow(color: .mint.opacity(0.4 * glow), radius: 20)
+                    .opacity(glow)
+            }
         )
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
+        .onContinuousHover { phase in
+            switch phase {
+            case .active:
+                isHoveringScreen = true
+                startScrollMonitor()
+            case .ended:
+                isHoveringScreen = false
+                stopScrollMonitor()
+            }
+        }
+        .onChange(of: currentLyricIndex) { _, newIndex in
+            detectLyricTransition(to: newIndex)
+        }
+        .onChange(of: viewModel?.currentLyrics ?? []) { _, _ in
+            lastActiveLine = ""
+        }
+    }
+
+    // MARK: - Lyric Transition Pulse
+
+    /// Pulse envelope (0..1) based on time since last lyric-triggered pulse.
+    private func pulseAmount(at date: Date) -> Double {
+        let elapsed = date.timeIntervalSince(borderPulseStart)
+        // No pulse yet
+        guard borderPulseStart != .distantPast else { return 0 }
+        // Rise fast (0.12s), hold, fall over total ~1.0s
+        let total: TimeInterval = 1.0
+        guard elapsed >= 0 && elapsed <= total else { return 0 }
+        let rise: TimeInterval = 0.15
+        if elapsed < rise {
+            let t = elapsed / rise
+            return t * t * (3 - 2 * t)   // easeInOut
+        }
+        let fall = total - rise
+        let t = (elapsed - rise) / fall
+        return 1.0 - t * t                 // easeOut fall
+    }
+
+    private func detectLyricTransition(to index: Int) {
+        guard let vm = viewModel, index >= 0, index < vm.currentLyrics.count else { return }
+        let currentText = vm.currentLyrics[index].text
+        // Only pulse when the line BEFORE was a pure "..." placeholder
+        // and the current line is a real lyric.
+        if isEllipsisPlaceholder(lastActiveLine) && !isEllipsisPlaceholder(currentText) {
+            borderPulseStart = Date()
+        }
+        // Update running "previous line" — but ignore repeated identical lines
+        // (keep the ellipsis marker until a genuinely different anchor arrives).
+        if currentText != lastActiveLine {
+            lastActiveLine = currentText
+        }
+    }
+
+    // MARK: - Volume Scroll Monitor
+
+    private func startScrollMonitor() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            self.handleScrollWheel(event)
+            return event
+        }
+    }
+
+    private func stopScrollMonitor() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
+    }
+
+    private func handleScrollWheel(_ event: NSEvent) {
+        guard let vm = viewModel else { return }
+        let raw = event.scrollingDeltaY
+        let newVolume = max(0, min(1, vm.currentVolume + Float(raw) * 0.001))
+        vm.setVolumeImmediate(newVolume)
     }
 
     // MARK: - Slim Lyrics (single line above progress bar)

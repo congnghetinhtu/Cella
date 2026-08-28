@@ -266,7 +266,7 @@ struct NowPlayingBar: View {
 
     @ViewBuilder
     private func normalPill(track: TrackAsset?, lyrics: String?) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             // OpenMix badge — left of track info
             if isAutoMixing {
                 openMixBadge
@@ -275,32 +275,32 @@ struct NowPlayingBar: View {
 
             if let track = track {
                 Image(systemName: isPlaying ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                    .font(.system(size: 10))
+                    .font(.system(size: 12))
                     .foregroundStyle(isPlaying ? theme.dotActive : theme.textSecondary)
-                    .frame(width: 14)
+                    .frame(width: 16)
 
                 if let lyricsLine = lyrics {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(track.trackTitle)
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
                             .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                         Text(lyricsLine)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                     }
                     .id(lyricsLine)
                     .transition(.opacity)
                 } else {
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(track.trackTitle)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
                         if let artist = track.artistName {
                             Text(artist)
-                                .font(.system(size: 9, weight: .medium, design: .rounded))
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
                         }
@@ -308,16 +308,16 @@ struct NowPlayingBar: View {
                 }
 
                 Text("\(formatTime(viewModel.currentTime))/\(formatTime(viewModel.currentDuration))")
-                    .font(.system(size: 9, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
 
                 volumeIndicator(small: true)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
 
                 Image(systemName: viewModel.lyricsMode.iconName)
-                    .font(.system(size: 10))
+                    .font(.system(size: 12))
                     .foregroundStyle(viewModel.lyricsMode != .off ? theme.dotActive : theme.textSecondary)
-                    .frame(width: 14)
+                    .frame(width: 16)
                     .contentTransition(.symbolEffect(.replace))
                     .onTapGesture {
                         withAnimation(.snappy) {
@@ -327,19 +327,19 @@ struct NowPlayingBar: View {
             } else {
                 // Empty state — bigger pill
                 Image(systemName: "music.note")
-                    .font(.system(size: 14))
+                    .font(.system(size: 16))
                     .foregroundStyle(theme.textSecondary)
 
                 Text("Cella")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(theme.textSecondary)
 
                 volumeIndicator(small: false)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
         .background(Capsule().fill(theme.tabBarBackground))
         .clipShape(Capsule())
         .contentShape(Rectangle())

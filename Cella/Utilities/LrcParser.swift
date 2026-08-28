@@ -1,6 +1,6 @@
 import Foundation
 
-struct LrcLine: Identifiable {
+struct LrcLine: Identifiable, Equatable {
     let id = UUID()
     let time: TimeInterval
     let text: String

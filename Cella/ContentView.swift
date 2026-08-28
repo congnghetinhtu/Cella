@@ -10,10 +10,9 @@ import SwiftUI
 struct ContentView: View {
     @State private var selectedTab: AppTab = .cella
     @State private var savedVolume: Float = 1.0
+    @State private var cellaVolume: Float = 1.0
     @State private var viewModel = PlayerViewModel()
     @FocusState private var isFocused: Bool
-    @State private var isHoveringContent = false
-    @State private var scrollMonitor: Any?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearanceMode") private var appearanceMode: String = "system"
@@ -72,16 +71,6 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .onContinuousHover { phase in
-                    switch phase {
-                    case .active:
-                        isHoveringContent = true
-                        startScrollMonitor()
-                    case .ended:
-                        isHoveringContent = false
-                        stopScrollMonitor()
-                    }
-                }
             }
         }
         .animation(.smooth, value: effectiveColorScheme)
@@ -126,10 +115,10 @@ struct ContentView: View {
         }
         .onChange(of: selectedTab) { _, tab in
             if tab == .motions {
-                savedVolume = viewModel.currentVolume
+                cellaVolume = viewModel.currentVolume
                 viewModel.setVolume(0.1)
             } else {
-                viewModel.setVolume(savedVolume)
+                viewModel.setVolume(cellaVolume)
             }
             viewModel.setHallReverb(tab == .motions)
             if tab != .cella {
@@ -144,30 +133,6 @@ struct ContentView: View {
         .onTapGesture {
             isFocused = true
         }
-    }
-
-    // MARK: - Volume Scroll
-
-    private func startScrollMonitor() {
-        guard scrollMonitor == nil else { return }
-        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
-            self.handleScrollWheel(event)
-            return event
-        }
-    }
-
-    private func stopScrollMonitor() {
-        if let monitor = scrollMonitor {
-            NSEvent.removeMonitor(monitor)
-            scrollMonitor = nil
-        }
-    }
-
-    private func handleScrollWheel(_ event: NSEvent) {
-        guard selectedTab != .enhancedLRC, selectedTab != .cluster else { return }
-        let raw = event.scrollingDeltaY
-        let newVolume = max(0, min(1, viewModel.currentVolume + Float(raw) * 0.001))
-        viewModel.setVolumeImmediate(newVolume)
     }
 }
 

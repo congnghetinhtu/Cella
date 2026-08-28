@@ -3,72 +3,73 @@ import AppKit
 
 enum FilmstripGenerator {
 
+    /// Generate thumbnails by seeking directly to target timestamps.
+    /// Uses AVAssetImageGenerator (random access) — far faster than sequential
+    /// full-video decode. Only decodes the frames we actually show.
     static func generateThumbnails(
         from url: URL,
         count: Int = 20,
-        height: CGFloat = 60
+        height: CGFloat = 60,
+        start: Double = 0,
+        end: Double? = nil
     ) async -> [NSImage] {
         let asset = AVURLAsset(url: url)
-
-        guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first else {
-            return []
-        }
 
         let duration = try? await asset.load(.duration)
         guard let duration = duration else { return [] }
         let totalSeconds = CMTimeGetSeconds(duration)
         guard totalSeconds > 0 else { return [] }
 
-        let width = height * (videoTrack.naturalSize.width / videoTrack.naturalSize.height)
+        let windowStart = max(0, start)
+        let windowEnd = min(totalSeconds, end ?? totalSeconds)
+        let windowDuration = max(0.05, windowEnd - windowStart)
 
-        guard let reader = try? AVAssetReader(asset: asset) else { return [] }
+        // Compute target times evenly across the window
+        var times: [CMTime] = []
+        times.reserveCapacity(count)
+        for i in 0..<count {
+            let t = windowStart + Double(i) * (windowDuration / Double(count))
+            times.append(CMTime(seconds: t, preferredTimescale: 60000))
+        }
 
-        let outputSettings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferHeightKey as String: Int(height),
-            kCVPixelBufferWidthKey as String: Int(width)
-        ]
-        let trackOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
-        reader.add(trackOutput)
-        reader.startReading()
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        generator.maximumSize = CGSize(
+            width: height * 16 / 9 * UIScale,
+            height: height * UIScale
+        )
 
-        var images: [NSImage] = []
-        let frameInterval = totalSeconds / Double(count)
-        var nextTime: Double = 0
-        var frameIndex = 0
+        return await withCheckedContinuation { continuation in
+            var images: [NSImage?] = Array(repeating: nil, count: times.count)
+            var pending = times.count
+            let lock = NSLock()
 
-        while reader.status == .reading {
-            guard let sampleBuffer = trackOutput.copyNextSampleBuffer() else { continue }
-
-            let currentTime = CMTimeGetSeconds(CMSampleBufferGetOutputPresentationTimeStamp(sampleBuffer))
-
-            if currentTime >= nextTime && frameIndex < count {
-                if let image = sampleBufferToNSImage(sampleBuffer) {
-                    images.append(image)
+            for (idx, time) in times.enumerated() {
+                generator.generateCGImageAsynchronously(for: time) { cgImage, _, _ in
+                    var result: NSImage? = nil
+                    if let cgImage = cgImage {
+                        result = NSImage(
+                            cgImage: cgImage,
+                            size: CGSize(width: cgImage.width, height: cgImage.height)
+                        )
+                    }
+                    lock.lock()
+                    images[idx] = result
+                    pending -= 1
+                    lock.unlock()
+                    if pending == 0 {
+                        let flat = images.compactMap { $0 }
+                        continuation.resume(returning: flat)
+                    }
                 }
-                frameIndex += 1
-                nextTime = Double(frameIndex) * frameInterval
             }
-
-            CMSampleBufferInvalidate(sampleBuffer)
         }
-
-        // Pad with last frame if we didn't get enough
-        while images.count < count, let last = images.last {
-            images.append(last)
-        }
-
-        return Array(images.prefix(count))
     }
 
-    private static func sampleBufferToNSImage(_ sampleBuffer: CMSampleBuffer) -> NSImage? {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let context = CIContext()
-        let rect = CGRect(x: 0, y: 0, width: CVPixelBufferGetWidth(pixelBuffer), height: CVPixelBufferGetHeight(pixelBuffer))
-
-        guard let cgImage = context.createCGImage(ciImage, from: rect) else { return nil }
-        return NSImage(cgImage: cgImage, size: NSSize(width: rect.width, height: rect.height))
+    /// Retina-aware scale factor.
+    private static var UIScale: CGFloat {
+        NSScreen.main?.backingScaleFactor ?? 2.0
     }
 }
