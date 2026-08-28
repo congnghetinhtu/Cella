@@ -230,20 +230,27 @@ class PlayerViewModel {
 
     private func startNowPlayingTimer() {
         nowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.syncPlaybackTime()
             self?.updateNowPlayingInfo()
         }
     }
 
+    private func syncPlaybackTime() {
+        currentTime = audioEngine.currentTime
+        currentDuration = audioEngine.duration
+    }
+
     // MARK: - Playback Info
 
-    var currentTime: TimeInterval { audioEngine.currentTime }
-    var currentDuration: TimeInterval { audioEngine.duration }
+    var currentTime: TimeInterval = 0
+    var currentDuration: TimeInterval = 0
 
     func seekTo(time: TimeInterval) {
         guard playerState == .playing || playerState == .paused else { return }
         guard let queue = mixQueue, !queue.isEmpty else { return }
         let clamped = max(0, min(time, audioEngine.duration))
         audioEngine.seek(to: clamped)
+        syncPlaybackTime()
         updateNowPlayingInfo()
     }
 
@@ -342,6 +349,11 @@ class PlayerViewModel {
     func setVolume(_ volume: Float) {
         currentVolume = volume
         audioEngine.smoothVolume(to: volume)
+    }
+
+    func setVolumeImmediate(_ volume: Float) {
+        currentVolume = volume
+        audioEngine.smoothVolume(to: volume, duration: 0.1)
     }
 
     func setHallReverb(_ enabled: Bool) {
@@ -800,11 +812,13 @@ class PlayerViewModel {
             playerState = .paused
             audioEngine.pause()
             stopAnimationLoop()
+            syncPlaybackTime()
 
         case .paused:
             guard let queue = mixQueue, !queue.isEmpty else { return }
             playerState = .playing
             audioEngine.play()
+            syncPlaybackTime()
             // Apply any pending mood immediately on resume
             if pendingMood != nil {
                 applyPendingMood()

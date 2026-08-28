@@ -21,30 +21,7 @@ struct CellaView: View {
             )
             .padding(.horizontal, 80)
 
-            HStack(spacing: 16) {
-                PlayerIndicatorView(statusText: viewModel.statusText)
-
-                Button {
-                    withAnimation(.snappy) {
-                        viewModel.lyricsMode.cycle()
-                    }
-                } label: {
-                    Image(systemName: viewModel.lyricsMode.iconName)
-                        .font(.system(size: 14))
-                        .foregroundStyle(
-                            viewModel.lyricsMode != .off
-                                ? theme.dotActive
-                                : viewModel.currentTrackHasLrc
-                                    ? theme.textPrimary
-                                    : theme.textSecondary
-                        )
-                }
-                .buttonStyle(.plain)
-                .help(viewModel.currentTrackHasLrc
-                    ? viewModel.lyricsMode.label
-                    : "No lyrics for this track")
-                .keyboardShortcut("l", modifiers: [])
-            }
+            NowPlayingBar(viewModel: viewModel, selectedTab: .constant(.cella))
 
             Spacer()
         }

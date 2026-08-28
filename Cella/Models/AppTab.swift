@@ -8,9 +8,10 @@
 import Foundation
 
 enum AppTab: String, CaseIterable, Identifiable {
-    case motions = "Cella Motions"
+    case cluster = "Cluster"
+    case motions = "Motion"
     case cella = "Cella"
-    case enhancedLRC = "Enhanced LRC"
+    case enhancedLRC = "LRC Editor"
     case config = "Config"
 
     var id: String { rawValue }

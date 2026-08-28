@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var savedVolume: Float = 1.0
     @State private var viewModel = PlayerViewModel()
     @FocusState private var isFocused: Bool
+    @State private var isHoveringContent = false
+    @State private var scrollMonitor: Any?
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearanceMode") private var appearanceMode: String = "system"
@@ -49,11 +51,16 @@ struct ContentView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                TopTabBar(selectedTab: $selectedTab)
+                // Top: Nav bar
+                BottomTabBar(selectedTab: $selectedTab)
+                    .padding(.horizontal, 48)
                     .padding(.top, 20)
 
+                // Content
                 Group {
                     switch selectedTab {
+                    case .cluster:
+                        ClusterView()
                     case .motions:
                         CellaMotionsView()
                     case .cella:
@@ -65,38 +72,16 @@ struct ContentView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-
-            // Engine indicator — top-right
-            if viewModel.playerState.isPlaying || viewModel.playerState == .autoMix {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Text(viewModel.activeEngine)
-                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(viewModel.activeEngine == "OpenMix" ? .green : .orange)
-
-                    if !viewModel.engineLog.isEmpty {
-                        VStack(alignment: .trailing, spacing: 1) {
-                            ForEach(Array(viewModel.engineLog.suffix(8).enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.system(size: 8, weight: .regular, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-                        .transition(.opacity)
+                .onContinuousHover { phase in
+                    switch phase {
+                    case .active:
+                        isHoveringContent = true
+                        startScrollMonitor()
+                    case .ended:
+                        isHoveringContent = false
+                        stopScrollMonitor()
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.ultraThinMaterial)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .padding(.trailing, 16)
-                .padding(.top, 50)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                .allowsHitTesting(false)
-                .animation(.snappy, value: viewModel.activeEngine)
-                .animation(.snappy, value: viewModel.playerState.isPlaying)
-                .animation(.snappy, value: viewModel.engineLog.count)
             }
         }
         .animation(.smooth, value: effectiveColorScheme)
@@ -107,24 +92,33 @@ struct ContentView: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onKeyPress(.space) {
-            if selectedTab == .enhancedLRC {
+            if selectedTab == .enhancedLRC || selectedTab == .cluster {
                 return .ignored
             }
             viewModel.togglePlayPause()
             return .handled
         }
         .onKeyPress(.leftArrow) {
-            if selectedTab == .enhancedLRC {
+            if selectedTab == .enhancedLRC || selectedTab == .cluster {
                 return .ignored
             }
             viewModel.skipBackward()
             return .handled
         }
         .onKeyPress(.rightArrow) {
-            if selectedTab == .enhancedLRC {
+            if selectedTab == .enhancedLRC || selectedTab == .cluster {
                 return .ignored
             }
             viewModel.skipForward()
+            return .handled
+        }
+        .onKeyPress(.init("l")) {
+            if selectedTab == .enhancedLRC || selectedTab == .cluster {
+                return .ignored
+            }
+            withAnimation(.snappy) {
+                viewModel.lyricsMode.cycle()
+            }
             return .handled
         }
         .onAppear {
@@ -150,6 +144,30 @@ struct ContentView: View {
         .onTapGesture {
             isFocused = true
         }
+    }
+
+    // MARK: - Volume Scroll
+
+    private func startScrollMonitor() {
+        guard scrollMonitor == nil else { return }
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            self.handleScrollWheel(event)
+            return event
+        }
+    }
+
+    private func stopScrollMonitor() {
+        if let monitor = scrollMonitor {
+            NSEvent.removeMonitor(monitor)
+            scrollMonitor = nil
+        }
+    }
+
+    private func handleScrollWheel(_ event: NSEvent) {
+        guard selectedTab != .enhancedLRC, selectedTab != .cluster else { return }
+        let raw = event.scrollingDeltaY
+        let newVolume = max(0, min(1, viewModel.currentVolume + Float(raw) * 0.001))
+        viewModel.setVolumeImmediate(newVolume)
     }
 }
 

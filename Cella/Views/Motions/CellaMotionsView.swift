@@ -22,6 +22,9 @@ struct CellaMotionsView: View {
     @State private var trimEnd: Double = 0
     @State private var isPlaying = false
     @State private var loopCount: Int = 3
+    @State private var filmstripImages: [NSImage] = []
+    @State private var currentTime: Double = 0
+    @State private var playbackTimer: Timer?
 
     var body: some View {
         VStack(spacing: 24) {
@@ -46,8 +49,10 @@ struct CellaMotionsView: View {
                         sourceURL = nil
                         outputURL = nil
                         player = nil
+                        filmstripImages = []
                         errorMessage = nil
                         successMessage = nil
+                        stopPlaybackTimer()
                     }
                     .buttonStyle(.bordered)
                     .tint(theme.textSecondary)
@@ -111,52 +116,78 @@ struct CellaMotionsView: View {
                 .onAppear {
                     player.play()
                     isPlaying = true
+                    startPlaybackTimer()
                 }
                 .onDisappear {
                     player.seek(to: .zero)
                     isPlaying = false
+                    stopPlaybackTimer()
                 }
 
             if videoDuration > 0 {
-                // Time labels
-                HStack {
-                    Text(formatTime(trimStart))
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(width: 50, alignment: .leading)
-                    Spacer()
-                    Text("\(formatTime(trimEnd - trimStart))")
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundStyle(theme.textPrimary)
-                    Spacer()
-                    Text(formatTime(trimEnd))
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(width: 50, alignment: .trailing)
-                }
-                .frame(maxWidth: 500)
-
-                // Trim bar
-                VideoTrimBar(
+                // Trim bar with filmstrip
+                FilmstripTrimBar(
                     duration: videoDuration,
                     trimStart: $trimStart,
                     trimEnd: $trimEnd,
+                    currentTime: currentTime,
+                    thumbnails: filmstripImages,
                     theme: theme,
-                    onTrimChanged: { position in
+                    onSeek: { position in
                         let time = CMTime(seconds: position, preferredTimescale: 60000)
                         $player.wrappedValue?.seek(to: time)
+                        currentTime = position
                     }
                 )
                 .frame(maxWidth: 500)
-                .frame(height: videoDuration > 30 ? 110 : 80)
-                .onChange(of: trimStart) { _, val in
-                    let time = CMTime(seconds: val, preferredTimescale: 60000)
-                    $player.wrappedValue?.seek(to: time)
+                .frame(height: 80)
+
+                // Time info + preset buttons
+                HStack {
+                    // Current / selected time
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text("Selection:")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundStyle(theme.textSecondary)
+                            Text("\(formatTime(trimStart)) → \(formatTime(trimEnd))")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundStyle(theme.textPrimary)
+                        }
+                        HStack(spacing: 4) {
+                            Text("Duration:")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundStyle(theme.textSecondary)
+                            Text(formatTime(trimEnd - trimStart))
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundStyle(theme.dotActive)
+                            Text("  |  Output:")
+                                .font(.system(size: 11, design: .rounded))
+                                .foregroundStyle(theme.textSecondary)
+                            Text("\(formatTime((trimEnd - trimStart) * Double(loopCount * 2)))")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundStyle(theme.textPrimary)
+                        }
+                    }
+
+                    Spacer()
+
+                    // Preset duration buttons
+                    HStack(spacing: 6) {
+                        Text("Quick:")
+                            .font(.system(size: 11, design: .rounded))
+                            .foregroundStyle(theme.textSecondary)
+                        ForEach([1.0, 2.0, 3.0, 5.0], id: \.self) { secs in
+                            Button("\(Int(secs))s") {
+                                applyPreset(secs)
+                            }
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .buttonStyle(.bordered)
+                            .tint(abs((trimEnd - trimStart) - secs) < 0.05 ? theme.dotActive : theme.textSecondary)
+                        }
+                    }
                 }
-                .onChange(of: trimEnd) { _, val in
-                    let time = CMTime(seconds: val, preferredTimescale: 60000)
-                    $player.wrappedValue?.seek(to: time)
-                }
+                .frame(maxWidth: 500)
 
                 // Loop count selector
                 HStack(spacing: 12) {
@@ -174,10 +205,6 @@ struct CellaMotionsView: View {
                     }
 
                     Spacer()
-
-                    Text("\(formatTime(trimEnd - trimStart) ) × \(loopCount) = \(formatTime((trimEnd - trimStart) * Double(loopCount * 2)))")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(theme.textSecondary)
                 }
                 .frame(maxWidth: 500)
 
@@ -200,6 +227,25 @@ struct CellaMotionsView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(theme.textPrimary)
+
+                    // Frame step buttons
+                    Button {
+                        stepFrame(by: -1)
+                    } label: {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(theme.textSecondary)
+
+                    Button {
+                        stepFrame(by: 1)
+                    } label: {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .bold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(theme.textSecondary)
                 }
             }
         }
@@ -242,6 +288,7 @@ struct CellaMotionsView: View {
         outputURL = nil
         errorMessage = nil
         successMessage = nil
+        filmstripImages = []
 
         let asset = AVURLAsset(url: url)
         Task {
@@ -250,6 +297,10 @@ struct CellaMotionsView: View {
             videoDuration = secs
             trimStart = 0
             trimEnd = secs
+
+            // Generate filmstrip
+            let images = await FilmstripGenerator.generateThumbnails(from: url, count: 30, height: 60)
+            await MainActor.run { filmstripImages = images }
         }
         player = AVPlayer(url: url)
     }
@@ -259,17 +310,20 @@ struct CellaMotionsView: View {
         if isPlaying {
             player.pause()
             isPlaying = false
+            stopPlaybackTimer()
         } else {
             let start = CMTime(seconds: trimStart, preferredTimescale: 60000)
             player.seek(to: start)
             player.play()
             isPlaying = true
+            startPlaybackTimer()
 
             // Auto-pause at trim end
             let remaining = trimEnd - trimStart
             DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [player] in
                 player.pause()
                 isPlaying = false
+                stopPlaybackTimer()
             }
         }
     }
@@ -278,8 +332,55 @@ struct CellaMotionsView: View {
         guard let player = player else { return }
         player.pause()
         isPlaying = false
+        stopPlaybackTimer()
         let start = CMTime(seconds: trimStart, preferredTimescale: 60000)
         player.seek(to: start)
+        currentTime = trimStart
+    }
+
+    private func stepFrame(by direction: Int) {
+        guard let player = player else { return }
+        player.pause()
+        isPlaying = false
+        stopPlaybackTimer()
+        let frameDuration = 1.0 / 30.0
+        let newTime = max(0, min(videoDuration, currentTime + frameDuration * Double(direction)))
+        let time = CMTime(seconds: newTime, preferredTimescale: 60000)
+        player.seek(to: time)
+        currentTime = newTime
+    }
+
+    private func applyPreset(_ seconds: Double) {
+        let center = (trimStart + trimEnd) / 2
+        let half = seconds / 2
+        trimStart = max(0, center - half)
+        trimEnd = min(videoDuration, center + half)
+        if trimEnd - trimStart < seconds {
+            if trimStart == 0 { trimEnd = min(seconds, videoDuration) }
+            else { trimStart = max(0, videoDuration - seconds) }
+        }
+        let time = CMTime(seconds: trimStart, preferredTimescale: 60000)
+        player?.seek(to: time)
+        currentTime = trimStart
+    }
+
+    private func startPlaybackTimer() {
+        stopPlaybackTimer()
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
+            guard let player = player else { return }
+            let time = CMTimeGetSeconds(player.currentTime())
+            currentTime = time
+            if time >= trimEnd {
+                player.pause()
+                isPlaying = false
+                stopPlaybackTimer()
+            }
+        }
+    }
+
+    private func stopPlaybackTimer() {
+        playbackTimer?.invalidate()
+        playbackTimer = nil
     }
 
     private func createBoomerang() {
@@ -303,7 +404,6 @@ struct CellaMotionsView: View {
                 case .success(let url):
                     outputURL = url
                     successMessage = "Saved: \(url.lastPathComponent)"
-                    // Preview via temp .mp4 copy (AVPlayer doesn't recognize .cma)
                     let tmpPreview = FileManager.default.temporaryDirectory
                         .appendingPathComponent(UUID().uuidString + "_preview.mp4")
                     try? FileManager.default.copyItem(at: url, to: tmpPreview)
@@ -323,272 +423,225 @@ struct CellaMotionsView: View {
     }
 }
 
-// MARK: - Trim Bar (zoom + pan)
+// MARK: - Filmstrip Trim Bar
 
-struct VideoTrimBar: View {
+struct FilmstripTrimBar: View {
     let duration: Double
     @Binding var trimStart: Double
     @Binding var trimEnd: Double
+    let currentTime: Double
+    let thumbnails: [NSImage]
     let theme: Theme
-    var onTrimChanged: ((Double) -> Void)?
+    var onSeek: ((Double) -> Void)?
 
     @State private var dragMode: DragMode = .none
-    @State private var dragStartTime: Double = 0
     @State private var dragStartValue: Double = 0
-
-    @State private var zoomLevel: Double = 1.0
-    @State private var panOffset: Double = 0.0
+    @State private var dragStartTime: Double = 0
 
     private enum DragMode {
-        case none, move, resizeLeft, resizeRight, pan
+        case none, resizeLeft, resizeRight, move
     }
 
-    private let edgeThreshold: CGFloat = 30
-    private let minZoom: Double = 1.0
-    private let maxZoom: Double = 200.0
-
-    private var visibleDuration: Double {
-        guard zoomLevel > 1.0 else { return duration }
-        return duration / zoomLevel
-    }
-
-    private var visibleStart: Double {
-        guard zoomLevel > 1.0 else { return 0 }
-        let maxPan = max(0, duration - visibleDuration)
-        return panOffset * maxPan
-    }
-
-    private var visibleEnd: Double {
-        visibleStart + visibleDuration
-    }
+    private let handleWidth: CGFloat = 12
+    private let minTrimDuration: Double = 0.1
 
     var body: some View {
-        VStack(spacing: 4) {
-            // Zoom slider
-            if duration > 30 {
-                HStack(spacing: 8) {
-                    Image(systemName: "minus.magnifyingglass")
-                        .font(.system(size: 10))
-                        .foregroundStyle(theme.textSecondary)
+        VStack(spacing: 0) {
+            // Timestamp markers
+            timestampBar
+                .frame(height: 14)
 
-                    Slider(value: $zoomLevel, in: minZoom...maxZoom)
-                        .controlSize(.small)
-
-                    Image(systemName: "plus.magnifyingglass")
-                        .font(.system(size: 10))
-                        .foregroundStyle(theme.textSecondary)
-
-                    Text("\(Int(zoomLevel))x")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(theme.textSecondary)
-                        .frame(width: 28, alignment: .trailing)
-                }
-                .frame(maxWidth: 300)
-            }
-
-            // Trim bar
+            // Filmstrip + trim area
             GeometryReader { geo in
                 let w = geo.size.width
                 let h = geo.size.height
-                let trackY = h / 2
                 let sx = timeToPixel(trimStart, width: w)
                 let ex = timeToPixel(trimEnd, width: w)
-                let selW = max(2, ex - sx)
-                let midX = (sx + ex) / 2
+                let px = timeToPixel(currentTime, width: w)
 
-                ZStack {
-                    // Full track bar
-                    Capsule()
-                        .fill(theme.dotInactive.opacity(0.3))
-                        .frame(height: 6)
-                        .position(x: w / 2, y: trackY)
+                ZStack(alignment: .leading) {
+                    // Filmstrip thumbnails
+                    if thumbnails.isEmpty {
+                        // No thumbnails — solid bar
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(theme.dotInactive.opacity(0.3))
+                    } else {
+                        HStack(spacing: 0) {
+                            ForEach(thumbnails.indices, id: \.self) { i in
+                                Image(nsImage: thumbnails[i])
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: max(1, w / CGFloat(thumbnails.count)), height: h)
+                                    .clipped()
+                            }
+                        }
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
 
-                    // Left dim (visible outside range)
-                    if visibleStart > 0 {
+                    // Dim outside selection — left
+                    if sx > 0 {
                         Rectangle()
-                            .fill(.black.opacity(0.5))
+                            .fill(.black.opacity(0.55))
                             .frame(width: max(0, sx), height: h)
                     }
 
-                    // Right dim (visible outside range)
-                    if visibleEnd < duration {
-                        let rightDimW = max(0, w - ex)
+                    // Dim outside selection — right
+                    if ex < w {
+                        let rightW = max(0, w - ex)
                         Rectangle()
-                            .fill(.black.opacity(0.5))
-                            .frame(width: rightDimW, height: h)
-                            .offset(x: w - rightDimW)
+                            .fill(.black.opacity(0.55))
+                            .frame(width: rightW, height: h)
+                            .offset(x: w - rightW)
                     }
-
-                    // Dim outside visible range (when zoomed)
-                    if zoomLevel > 1.0 {
-                        // Left edge dim for pan area
-                        let leftEdge = max(0, -CGFloat(visibleStart / duration) * w)
-                        if leftEdge > 0 {
-                            Rectangle()
-                                .fill(.black.opacity(0.6))
-                                .frame(width: leftEdge, height: h)
-                        }
-                        // Right edge dim for pan area
-                        let rightEdgeStart = CGFloat((duration - visibleStart - visibleDuration) / duration) * w + CGFloat(visibleDuration / duration) * w
-                        if rightEdgeStart < w {
-                            Rectangle()
-                                .fill(.black.opacity(0.6))
-                                .frame(width: max(0, w - rightEdgeStart), height: h)
-                                .offset(x: rightEdgeStart - w + max(0, w - rightEdgeStart))
-                        }
-                    }
-
-                    // Selected region
-                    Capsule()
-                        .fill(theme.dotActive.opacity(0.35))
-                        .frame(width: selW, height: 6)
-                        .position(x: midX, y: trackY)
 
                     // Selection border
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(theme.dotActive, lineWidth: 2)
-                        .frame(width: selW, height: h)
-                        .position(x: midX, y: trackY)
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(theme.dotActive, lineWidth: 2.5)
+                        .frame(width: max(4, ex - sx), height: h)
+                        .position(x: (sx + ex) / 2, y: h / 2)
 
                     // Left handle
-                    Capsule()
-                        .fill(theme.dotActive)
-                        .frame(width: 10, height: h - 4)
-                        .position(x: sx, y: trackY)
+                    dragHandle(side: .left, x: sx, height: h)
+                        .gesture(handleDrag(side: .left, width: w, height: h))
 
                     // Right handle
-                    Capsule()
-                        .fill(theme.dotActive)
-                        .frame(width: 10, height: h - 4)
-                        .position(x: ex, y: trackY)
+                    dragHandle(side: .right, x: ex, height: h)
+                        .gesture(handleDrag(side: .right, width: w, height: h))
 
-                    // Center time marker when zoomed
-                    if zoomLevel > 2.0 {
-                        Text(formatTime((visibleStart + visibleEnd) / 2))
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundStyle(theme.textSecondary.opacity(0.6))
-                            .position(x: w / 2, y: h - 8)
+                    // Move area (middle of selection)
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(width: max(0, ex - sx - handleWidth * 2), height: h)
+                        .position(x: (sx + ex) / 2, y: h / 2)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    if dragMode == .none {
+                                        dragMode = .move
+                                        dragStartValue = trimStart
+                                    }
+                                    guard dragMode == .move else { return }
+                                    let secsPerPx = duration / max(Double(w), 1)
+                                    let delta = Double(value.translation.width) * secsPerPx
+                                    let selDur = trimEnd - trimStart
+                                    let newStart = dragStartValue + delta
+                                    let clamped = max(0, min(newStart, duration - selDur))
+                                    trimStart = clamped
+                                    trimEnd = clamped + selDur
+                                    onSeek?(trimStart)
+                                }
+                                .onEnded { _ in dragMode = .none }
+                        )
+
+                    // Playhead
+                    if currentTime >= 0 && currentTime <= duration {
+                        Rectangle()
+                            .fill(.white)
+                            .frame(width: 2, height: h + 8)
+                            .position(x: px, y: h / 2)
+                            .shadow(color: .black.opacity(0.6), radius: 2)
                     }
                 }
                 .frame(width: w, height: h)
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            let loc = value.location.x
-
-                            if dragMode == .none {
-                                if abs(loc - sx) < edgeThreshold {
-                                    dragMode = .resizeLeft
-                                    dragStartTime = trimStart
-                                } else if abs(loc - ex) < edgeThreshold {
-                                    dragMode = .resizeRight
-                                    dragStartTime = trimEnd
-                                } else if zoomLevel > 1.0 {
-                                    dragMode = .pan
-                                    dragStartValue = panOffset
-                                } else {
-                                    dragMode = .move
-                                    dragStartTime = trimStart
-                                    dragStartValue = trimStart
-                                }
-                            }
-
-                            let secsPerPx = visibleDuration / max(Double(w), 1)
-                            let delta = Double(value.translation.width) * secsPerPx
-
-                            switch dragMode {
-                            case .resizeLeft:
-                                let newStart = dragStartTime + delta
-                                trimStart = max(0, min(newStart, trimEnd - 0.1))
-                                onTrimChanged?(trimStart)
-                            case .resizeRight:
-                                let newEnd = dragStartTime + delta
-                                trimEnd = min(duration, max(newEnd, trimStart + 0.1))
-                                onTrimChanged?(trimEnd)
-                            case .move:
-                                let selDur = trimEnd - trimStart
-                                let newStart = dragStartTime + delta
-                                let clamped = max(0, min(newStart, duration - selDur))
-                                trimStart = clamped
-                                trimEnd = clamped + selDur
-                                onTrimChanged?(trimStart)
-                            case .pan:
-                                let maxPan = max(0, duration - visibleDuration)
-                                let panDelta = Double(value.translation.width) / max(Double(w), 1)
-                                let newPan = dragStartValue - panDelta
-                                panOffset = max(0, min(1.0, newPan))
-                            case .none:
-                                break
-                            }
-                        }
-                        .onEnded { _ in
-                            dragMode = .none
-                        }
-                )
-                .onTapGesture(count: 2) {
-                    zoomToSelection()
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .onTapGesture { location in
+                    let tappedTime = Double(location.x / w) * duration
+                    let clamped = max(0, min(tappedTime, duration))
+                    onSeek?(clamped)
                 }
             }
+            .frame(height: 66)
         }
-        .onChange(of: trimStart) { _, _ in
-            clampPanToSelection()
-        }
-        .onChange(of: trimEnd) { _, _ in
-            clampPanToSelection()
+    }
+
+    // MARK: - Handle View
+
+    private func dragHandle(side: Side, x: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(theme.dotActive)
+            .frame(width: handleWidth, height: height)
+            .overlay(
+                // Grab bars
+                VStack(spacing: 3) {
+                    ForEach(0..<3, id: \.self) { _ in
+                        Capsule()
+                            .fill(.white.opacity(0.7))
+                            .frame(width: 4, height: 2)
+                    }
+                }
+            )
+            .position(x: x, y: height / 2)
+            .shadow(color: .black.opacity(0.3), radius: 2)
+    }
+
+    // MARK: - Handle Drag
+
+    private func handleDrag(side: Side, width: CGFloat, height: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if dragMode == .none {
+                    dragMode = side == .left ? .resizeLeft : .resizeRight
+                    dragStartTime = side == .left ? trimStart : trimEnd
+                }
+                guard dragMode == (side == .left ? DragMode.resizeLeft : DragMode.resizeRight) else { return }
+                let secsPerPx = duration / max(Double(width), 1)
+                let delta = Double(value.translation.width) * secsPerPx
+
+                if side == .left {
+                    let newStart = dragStartTime + delta
+                    trimStart = max(0, min(newStart, trimEnd - minTrimDuration))
+                    onSeek?(trimStart)
+                } else {
+                    let newEnd = dragStartTime + delta
+                    trimEnd = min(duration, max(newEnd, trimStart + minTrimDuration))
+                    onSeek?(trimEnd)
+                }
+            }
+            .onEnded { _ in dragMode = .none }
+    }
+
+    // MARK: - Timestamp Bar
+
+    private var timestampBar: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let markerCount = max(2, Int(w / 60))
+            let interval = duration / Double(markerCount)
+
+            ZStack {
+                ForEach(0...markerCount, id: \.self) { i in
+                    let time = Double(i) * interval
+                    let x = CGFloat(Double(i) / Double(markerCount)) * w
+
+                    Text(formatTimeShort(time))
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary.opacity(0.7))
+                        .position(x: x, y: 7)
+
+                    if i > 0 {
+                        Rectangle()
+                            .fill(theme.textSecondary.opacity(0.2))
+                            .frame(width: 1, height: 4)
+                            .position(x: x, y: 12)
+                        }
+                }
+            }
         }
     }
 
     // MARK: - Helpers
 
     private func timeToPixel(_ time: Double, width: CGFloat) -> CGFloat {
-        guard visibleDuration > 0 else { return 0 }
-        return CGFloat((time - visibleStart) / visibleDuration) * width
+        guard duration > 0 else { return 0 }
+        return CGFloat(time / duration) * width
     }
 
-    private func zoomToSelection() {
-        let selDur = trimEnd - trimStart
-        guard selDur > 0, duration > 0 else { return }
-
-        if zoomLevel > 1.5 {
-            // Already zoomed — zoom out to full
-            withAnimation(.smooth) {
-                zoomLevel = 1.0
-                panOffset = 0.0
-            }
-        } else {
-            // Zoom to show selection + 20% padding on each side
-            let paddedDur = selDur * 1.4
-            let newZoom = min(maxZoom, max(minZoom, duration / max(paddedDur, 0.5)))
-            let center = (trimStart + trimEnd) / 2
-            let newVisDur = duration / newZoom
-            let maxPan = max(0, duration - newVisDur)
-            let targetPan = maxPan > 0 ? (center - newVisDur / 2) / maxPan : 0
-
-            withAnimation(.smooth) {
-                zoomLevel = newZoom
-                panOffset = max(0, min(1.0, targetPan))
-            }
-        }
-    }
-
-    private func clampPanToSelection() {
-        guard zoomLevel > 1.0 else { return }
-        if trimStart < visibleStart || trimEnd > visibleEnd {
-            let center = (trimStart + trimEnd) / 2
-            let newVisDur = duration / zoomLevel
-            let maxPan = max(0, duration - newVisDur)
-            let targetPan = maxPan > 0 ? (center - newVisDur / 2) / maxPan : 0
-            withAnimation(.snappy) {
-                panOffset = max(0, min(1.0, targetPan))
-            }
-        }
-    }
-
-    private func formatTime(_ s: Double) -> String {
+    private func formatTimeShort(_ s: Double) -> String {
         let m = Int(s) / 60
         let sec = Int(s) % 60
-        let ms = Int((s - Double(Int(s))) * 10)
-        return String(format: "%d:%02d.%d", m, sec, ms)
+        return String(format: "%d:%02d", m, sec)
     }
+
+    private enum Side { case left, right }
 }

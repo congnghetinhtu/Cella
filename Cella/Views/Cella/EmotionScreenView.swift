@@ -144,6 +144,27 @@ struct EmotionScreenView: View {
                 ambientBar
             }
         }
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(
+                    LinearGradient(
+                        colors: [
+                            .green.opacity(0.0),
+                            .green.opacity(0.6),
+                            .mint.opacity(0.8),
+                            .green.opacity(0.6),
+                            .green.opacity(0.0)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 2
+                )
+                .shadow(color: .green.opacity(viewModel?.playerState == .autoMix ? 0.6 : 0), radius: 12)
+                .shadow(color: .mint.opacity(viewModel?.playerState == .autoMix ? 0.4 : 0), radius: 20)
+                .opacity(viewModel?.playerState == .autoMix ? 1 : 0)
+                .animation(.smooth(duration: 0.6), value: viewModel?.playerState == .autoMix)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .aspectRatio(21.0 / 9.0, contentMode: .fit)
     }
