@@ -240,8 +240,13 @@ struct NowPlayingBar: View {
     private var isPlaying: Bool { viewModel.playerState == .playing || viewModel.playerState == .autoMix }
     private var isAutoMixing: Bool { viewModel.playerState == .autoMix }
     private var hasLyricSupported: Bool {
-        guard let track = viewModel.mixQueue?.currentTrack else { return !viewModel.currentLyrics.isEmpty }
-        return viewModel.hasLyric(for: track)
+        guard let track = viewModel.mixQueue?.currentTrack else { return false }
+        if viewModel.hasLyric(for: track) { return true }
+        // Fallback: lyrics loaded for this exact track (covers edge where file check misses)
+        if let url = viewModel.currentLyricsTrackURL, url == track.url, !viewModel.currentLyrics.isEmpty {
+            return true
+        }
+        return false
     }
     private var shouldAnimateGradient: Bool { isAutoMixing || lyricBadgeVisible }
 
@@ -268,14 +273,13 @@ struct NowPlayingBar: View {
             .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
                 // During OpenMix, wait until crossfade finishes (state -> playing) to show
                 if viewModel.playerState == .autoMix { return }
-                if hasLyricSupported { triggerLyricBadgeIfNeeded() } else { hideLyricBadge() }
+                if hasLyricSupported { triggerLyricBadgeIfNeeded(force: true) } else { hideLyricBadge() }
             }
-            .onChange(of: hasLyricSupported) { _, hasLyric in
-                // Covers first import where lyrics load after track assignment
-                if hasLyric && isPlaying { triggerLyricBadgeIfNeeded() }
+            .onChange(of: viewModel.currentLyricsTrackURL) { _, _ in
+                if hasLyricSupported && isPlaying { triggerLyricBadgeIfNeeded(force: true) }
             }
             .onChange(of: viewModel.playerState) { old, new in
-                if new == .playing && old != .paused && hasLyricSupported { triggerLyricBadgeIfNeeded() }
+                if new == .playing && old != .paused && hasLyricSupported { triggerLyricBadgeIfNeeded(force: true) }
                 if new == .autoMix { hideLyricBadge() }
             }
             .onDisappear { stopGradientTimer() }
@@ -489,8 +493,12 @@ struct NowPlayingBar: View {
         gradientTimer = nil
     }
 
-    private func triggerLyricBadgeIfNeeded() {
+    private func triggerLyricBadgeIfNeeded(force: Bool = false) {
         guard hasLyricSupported else { return }
+        let trackID = viewModel.mixQueue?.currentTrack?.id.uuidString ?? viewModel.mixQueue?.currentTrack?.url.absoluteString ?? "none"
+        // Don't re-trigger on tab switch / re-appear for same track (persisted in viewModel)
+        if !force, viewModel.lastLyricBadgeTrackID == trackID { return }
+        viewModel.lastLyricBadgeTrackID = trackID
         lyricBadgeTask?.cancel()
         withAnimation(.smooth(duration: 0.5)) {
             lyricBadgeVisible = true

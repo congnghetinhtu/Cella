@@ -58,6 +58,8 @@ class PlayerViewModel {
     var currentLyrics: [LrcLine] = []
     var nextLyrics: [LrcLine] = []
     var lyricsMode: LyricsMode = .off
+    var currentLyricsTrackURL: URL?
+    var lastLyricBadgeTrackID: String?
     private var playlistFolderURL: URL?
     private var cueSheet: CueSheet?
     private var caPlaylist: CaPlaylist?
@@ -443,12 +445,14 @@ class PlayerViewModel {
         for lrcURL in candidates where FileManager.default.fileExists(atPath: lrcURL.path) {
             let result = LrcParser.load(from: lrcURL)
             currentLyrics = result.lines
+            currentLyricsTrackURL = trackURL
             print("[PlayerViewModel] Loaded lyrics: \(currentLyrics.count) lines from \(lrcURL.lastPathComponent)")
             found = true
             break
         }
         if !found {
             currentLyrics = []
+            currentLyricsTrackURL = nil
         }
 
         // Preload next track lyrics for transition fusion
