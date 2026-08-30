@@ -44,6 +44,7 @@ struct QueueView: View {
                                     viewModel: viewModel
                                 ))
                                 .onTapGesture {
+                                    viewModel.requestAlbumPillDelayedReveal()
                                     viewModel.jumpToTrack(at: index)
                                 }
                         }

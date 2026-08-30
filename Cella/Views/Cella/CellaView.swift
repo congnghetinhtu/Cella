@@ -21,7 +21,10 @@ struct CellaView: View {
             )
             .padding(.horizontal, 80)
 
-            NowPlayingBar(viewModel: viewModel, selectedTab: .constant(.cella))
+            HStack(spacing: 14) {
+                NowPlayingBar(viewModel: viewModel, selectedTab: .constant(.cella))
+                AlbumPill(viewModel: viewModel)
+            }
 
             Spacer()
         }

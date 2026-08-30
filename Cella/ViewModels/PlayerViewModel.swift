@@ -60,6 +60,13 @@ class PlayerViewModel {
     var lyricsMode: LyricsMode = .off
     var currentLyricsTrackURL: URL?
     var lastLyricBadgeTrackID: String?
+
+    // Album pill state — owned by the view model so it survives tab switches.
+    var albumPillVisible: Bool = false
+    var albumPillTitle: String = ""
+    var albumPillCover: NSImage?
+    var albumPillRevealTick: Int = 0
+    private var albumPillDelayTask: Task<Void, Never>?
     private var playlistFolderURL: URL?
     private var cueSheet: CueSheet?
     private var caPlaylist: CaPlaylist?
@@ -354,6 +361,68 @@ class PlayerViewModel {
         updateNowPlayingInfo()
     }
 
+    // MARK: - Album Pill
+
+    /// Called when a track is chosen from the Config queue. Hides the album pill
+    /// and schedules its reveal 1s later, so it slides in left-to-right once the
+    /// user returns to the Cella tab.
+    func requestAlbumPillDelayedReveal() {
+        albumPillDelayTask?.cancel()
+        withAnimation(.smooth(duration: 0.5)) {
+            albumPillVisible = false
+        }
+        albumPillDelayTask = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { albumPillRevealTick += 1 }
+        }
+    }
+
+    /// Recomputes album pill visibility from current playback state.
+    /// Hidden while OpenMix is mid-crossfade or no track is loaded.
+    func syncAlbumPillState() {
+        albumPillDelayTask?.cancel()
+        albumPillDelayTask = nil
+        guard playerState != .autoMix, let track = mixQueue?.currentTrack else {
+            withAnimation(.smooth(duration: 0.5)) {
+                albumPillVisible = false
+            }
+            return
+        }
+        albumPillTitle = track.albumName ?? track.url.deletingLastPathComponent().lastPathComponent
+        albumPillCover = Self.albumPillCover(for: track.url.deletingLastPathComponent())
+        withAnimation(.smooth(duration: 0.5)) {
+            albumPillVisible = true
+        }
+    }
+
+    /// Locates the album folder image (cover.jpg, folder.jpg, or first image).
+    static func albumPillCover(for albumDir: URL) -> NSImage? {
+        let names = ["cover", "folder", "front", "album", "art", "default", "small"]
+        let exts = ["jpg", "jpeg", "png", "webp", "tiff", "bmp"]
+        let capNames = names.map { $0.capitalized }
+
+        var candidates: [URL] = []
+        for n in names + capNames {
+            for e in exts {
+                candidates.append(albumDir.appendingPathComponent("\(n).\(e)"))
+            }
+        }
+        for c in candidates where FileManager.default.fileExists(atPath: c.path) {
+            if let img = NSImage(contentsOf: c) { return img }
+        }
+
+        guard let contents = try? FileManager.default.contentsOfDirectory(
+            at: albumDir, includingPropertiesForKeys: nil
+        ) else { return nil }
+        let images = contents.filter { exts.contains($0.pathExtension.lowercased()) }
+            .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+        for f in images {
+            if let img = NSImage(contentsOf: f) { return img }
+        }
+        return nil
+    }
+
     // MARK: - Actions
 
     func setVolume(_ volume: Float) {
@@ -497,10 +566,13 @@ class PlayerViewModel {
         let animatedExtensions = Set(["gif", "mp4", "mov", "cma"])
         let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
 
-        // Get artist names from album CUE files first, fallback to filename parsing
+        // Get artist names from .ca metadata, then album CUE files, then filename parsing
         var trackArtists: [String] = []
 
-        if let trackURL = mixQueue?.currentTrack?.url {
+        // .ca is authoritative — split "Artist 1 & Artist 2" into separate names
+        if let track = mixQueue?.currentTrack, !track.artists.isEmpty {
+            trackArtists = track.artists.map { $0.lowercased() }
+        } else if let trackURL = mixQueue?.currentTrack?.url {
             let fileName = trackURL.lastPathComponent
             if let artist = albumCueArtists[fileName], !artist.isEmpty {
                 trackArtists.append(artist)
@@ -962,6 +1034,21 @@ class PlayerViewModel {
 
     // MARK: - Import & Analysis
 
+    /// Builds a TrackAsset, attaching title / artist / album name from the .ca playlist
+    /// when the audio file has a matching entry. Falls back to filename parsing otherwise.
+    private func makeTrackAsset(from url: URL, playlist: CaPlaylist?) -> TrackAsset {
+        var track = TrackAsset(url: url)
+        guard let playlist else { return track }
+        if let album = CaParser.albumInfo(for: url, playlist: playlist) {
+            track.albumName = album.name
+        }
+        if let info = CaParser.trackInfo(for: url, playlist: playlist) {
+            track.title = info.title
+            track.artist = info.artist
+        }
+        return track
+    }
+
     func importFolder(url: URL) {
         // Only accept .cella folders
         guard url.pathExtension.lowercased() == "cella" else {
@@ -1065,7 +1152,8 @@ class PlayerViewModel {
 
             // Validate off main thread — reads audio headers, not full files
             var validTracks: [TrackAsset] = []
-            for rawTrack in orderedFiles.map({ TrackAsset(url: $0) }) {
+            for rawURL in orderedFiles {
+                let rawTrack = self.makeTrackAsset(from: rawURL, playlist: parsedCa)
                 do {
                     _ = try AudioHelpers.readAudio(url: rawTrack.url)
                     validTracks.append(rawTrack)
@@ -1586,7 +1674,7 @@ class PlayerViewModel {
         totalTrackCount = orderedFiles.count
         analyzedTrackCount = 0
 
-        let tracks = orderedFiles.map { TrackAsset(url: $0) }
+        let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlist: caPlaylist) }
         mixQueue = MixQueue(
             tracks: tracks,
             transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))

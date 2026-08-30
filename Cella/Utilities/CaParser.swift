@@ -79,4 +79,12 @@ struct CaParser {
         let albumFolder = audioURL.deletingLastPathComponent().lastPathComponent
         return playlist.albums.first { $0.folder == albumFolder }
     }
+
+    /// Finds the matching track entry for an audio file inside its album.
+    static func trackInfo(for audioURL: URL, playlist: CaPlaylist) -> CaTrack? {
+        guard let album = albumInfo(for: audioURL, playlist: playlist),
+              let tracks = album.tracks else { return nil }
+        let fileName = audioURL.lastPathComponent
+        return tracks.first { $0.file == fileName }
+    }
 }

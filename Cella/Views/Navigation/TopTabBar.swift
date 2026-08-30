@@ -223,6 +223,72 @@ struct BottomTabBar: View {
     }
 }
 
+// MARK: - AlbumPill (album pill, clone of the playing-info pill)
+
+/// Shows which album the playing track is from, with its folder cover image.
+/// Slides in from the left (leading) next to the playing-info pill, mimicking
+/// the OpenMix / Lyric-Supported badge motion.
+struct AlbumPill: View {
+    var viewModel: PlayerViewModel
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        Group {
+            if viewModel.albumPillVisible {
+                content
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+        }
+        .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
+        .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
+            viewModel.syncAlbumPillState()
+        }
+        .onChange(of: viewModel.playerState) { _, _ in
+            viewModel.syncAlbumPillState()
+        }
+        .onChange(of: viewModel.albumPillRevealTick) { _, _ in
+            viewModel.syncAlbumPillState()
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(theme.dotInactiveDeep)
+                if let cover = viewModel.albumPillCover {
+                    Image(nsImage: cover)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                } else {
+                    Image(systemName: "square.stack")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.dotActive.opacity(0.8))
+                }
+            }
+            .frame(width: 26, height: 26)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Album")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                Text(viewModel.albumPillTitle)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 200, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Capsule().fill(theme.tabBarBackground))
+        .clipShape(Capsule())
+        .contentShape(Capsule())
+    }
+}
+
 // MARK: - NowPlayingBar (top center pill + OpenMix badge)
 
 struct NowPlayingBar: View {
