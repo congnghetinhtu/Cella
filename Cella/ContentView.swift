@@ -16,7 +16,7 @@ struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("appearanceMode") private var appearanceMode: String = "system"
-    @AppStorage("themeOverride") private var themeOverride: String = "default"
+    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
     private var effectiveColorScheme: ColorScheme {
         switch appearanceMode {
@@ -112,6 +112,11 @@ struct ContentView: View {
         }
         .onAppear {
             isFocused = true
+            #if DEBUG
+            if let path = ProcessInfo.processInfo.environment["CELLA_TEST_PLAYLIST"] {
+                viewModel.importViaOpenMix(url: URL(fileURLWithPath: path))
+            }
+            #endif
         }
         .onChange(of: selectedTab) { _, tab in
             if tab == .motions {

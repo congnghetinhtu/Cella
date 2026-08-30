@@ -66,6 +66,7 @@ class PlayerViewModel {
     var albumPillTitle: String = ""
     var albumPillCover: NSImage?
     var albumPillRevealTick: Int = 0
+    private(set) var albumPillDelayPending: Bool = false
     private var albumPillDelayTask: Task<Void, Never>?
     private var playlistFolderURL: URL?
     private var cueSheet: CueSheet?
@@ -221,6 +222,7 @@ class PlayerViewModel {
         setupRemoteCommandCenter()
         setupTrackEndHandler()
         startNowPlayingTimer()
+        startAlbumPillObservation()
     }
 
     deinit {
@@ -363,27 +365,59 @@ class PlayerViewModel {
 
     // MARK: - Album Pill
 
+    /// Observation-based auto-sync: recomputes the pill whenever playback state
+    /// or the current track changes, regardless of which view is mounted. This
+    /// covers imports that set the track while the Cella tab isn't visible.
+    private func registerAlbumPillObservation() {
+        withObservationTracking(
+            { _ = self.playerState; _ = self.mixQueue?.currentTrack?.url },
+            onChange: { [weak self] in
+                Task { @MainActor in
+                    self?.handleAlbumPillDependencyChange()
+                }
+            }
+        )
+    }
+
+    @MainActor
+    private func handleAlbumPillDependencyChange() {
+        print("[AlbumPill] observation fired: state=\(playerState) track=\(mixQueue?.currentTrack?.fileName ?? "nil") pending=\(albumPillDelayPending)")
+        registerAlbumPillObservation()
+        syncAlbumPillState()
+    }
+
+    func startAlbumPillObservation() {
+        registerAlbumPillObservation()
+    }
+
     /// Called when a track is chosen from the Config queue. Hides the album pill
     /// and schedules its reveal 1s later, so it slides in left-to-right once the
     /// user returns to the Cella tab.
     func requestAlbumPillDelayedReveal() {
         albumPillDelayTask?.cancel()
+        albumPillDelayPending = true
         withAnimation(.smooth(duration: 0.5)) {
             albumPillVisible = false
         }
         albumPillDelayTask = Task {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             guard !Task.isCancelled else { return }
-            await MainActor.run { albumPillRevealTick += 1 }
+            await MainActor.run {
+                albumPillDelayPending = false
+                albumPillDelayTask = nil
+                albumPillRevealTick += 1
+            }
         }
     }
 
     /// Recomputes album pill visibility from current playback state.
     /// Hidden while OpenMix is mid-crossfade or no track is loaded.
     func syncAlbumPillState() {
-        albumPillDelayTask?.cancel()
-        albumPillDelayTask = nil
+        // A config-queue delayed reveal is in flight — let its tick finish
+        // instead of overriding it with an immediate recompute.
+        guard albumPillDelayTask == nil else { return }
         guard playerState != .autoMix, let track = mixQueue?.currentTrack else {
+            print("[AlbumPill] sync HIDE: state=\(playerState) track=\(mixQueue?.currentTrack?.fileName ?? "nil")")
             withAnimation(.smooth(duration: 0.5)) {
                 albumPillVisible = false
             }
@@ -391,6 +425,7 @@ class PlayerViewModel {
         }
         albumPillTitle = track.albumName ?? track.url.deletingLastPathComponent().lastPathComponent
         albumPillCover = Self.albumPillCover(for: track.url.deletingLastPathComponent())
+        print("[AlbumPill] sync SHOW: title=\(albumPillTitle)")
         withAnimation(.smooth(duration: 0.5)) {
             albumPillVisible = true
         }

@@ -5,7 +5,7 @@ struct ConfigView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
     @AppStorage("appearanceMode") private var appearanceMode: String = "system"
-    @AppStorage("themeOverride") private var themeOverride: String = "default"
+    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
     @AppStorage("displayMode") private var displayMode: String = "matrix"
 
     private let cardRadius: CGFloat = 18

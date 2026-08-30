@@ -240,6 +240,13 @@ struct AlbumPill: View {
             }
         }
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
+        .onAppear {
+            // Show first-song album info on entry; skip while a config-delayed
+            // reveal is pending so it still waits its 1s.
+            if !viewModel.albumPillDelayPending {
+                viewModel.syncAlbumPillState()
+            }
+        }
         .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
             viewModel.syncAlbumPillState()
         }
@@ -270,15 +277,13 @@ struct AlbumPill: View {
             .frame(width: 26, height: 26)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Album")
+                Text("Playing from")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
                 Text(viewModel.albumPillTitle)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: 200, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
         .padding(.horizontal, 12)
