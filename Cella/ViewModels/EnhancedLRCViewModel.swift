@@ -13,6 +13,8 @@ final class EnhancedLRCViewModel: ObservableObject {
     @Published var hasUnsavedChanges = false
     @Published var trackName: String = ""
     @Published var playbackSpeed: Float = 1.0
+    @Published var isRecording = false
+    @Published var recordingCursorIndex: Int = 0
 
     private var audioPlayer: AVAudioPlayer?
     private var timer: Timer?
@@ -174,6 +176,33 @@ final class EnhancedLRCViewModel: ObservableObject {
     }
 
     // MARK: - Line Operations
+
+    func toggleRecording() {
+        isRecording.toggle()
+        if isRecording {
+            // Start filling from the first untimed line.
+            recordingCursorIndex = lines.firstIndex { $0.time <= 0 } ?? 0
+        }
+    }
+
+    /// While recording, stamp the current live position into the next untimed
+    /// lyric line, then advance the cursor so the following M fills the next one.
+    func recordLine() {
+        guard currentTrackURL != nil, isRecording, !lines.isEmpty else { return }
+        pushUndo()
+        // Read live time straight from the player — timer may lag behind.
+        let liveTime = audioPlayer?.currentTime ?? currentTime
+        currentTime = liveTime
+        recordLine(in: &lines, at: &recordingCursorIndex, time: liveTime)
+        hasUnsavedChanges = true
+        autoSave()
+    }
+
+    private func recordLine(in lines: inout [EditableLrcLine], at cursor: inout Int, time: TimeInterval) {
+        guard cursor >= 0, cursor < lines.count else { return }
+        lines[cursor].time = time
+        cursor += 1
+    }
 
     func addLine(at index: Int? = nil) {
         pushUndo()

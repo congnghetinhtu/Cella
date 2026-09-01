@@ -5,6 +5,7 @@ import AVFoundation
 struct EnhancedLRCView: View {
     @StateObject private var viewModel = EnhancedLRCViewModel()
     @Environment(\.theme) private var theme
+    @State private var keyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,6 +34,26 @@ struct EnhancedLRCView: View {
             bottomBar
         }
         .background(theme.appBackground)
+        .onAppear {
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
+                guard let viewModel, viewModel.currentTrackURL != nil else { return event }
+                if event.keyCode == 15 { // "R" — toggle recording
+                    viewModel.toggleRecording()
+                    return nil
+                }
+                if viewModel.isRecording, event.keyCode == 46 { // "M" — mark line at current time
+                    viewModel.recordLine()
+                    return nil
+                }
+                return event
+            }
+        }
+        .onDisappear {
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+            }
+            keyMonitor = nil
+        }
     }
 
     // MARK: - Header
@@ -55,6 +76,19 @@ struct EnhancedLRCView: View {
             }
 
             Spacer()
+
+            Button {
+                viewModel.toggleRecording()
+            } label: {
+                Label(
+                    viewModel.isRecording ? "Recording — M to mark (R to stop)" : "Record LRC (R)",
+                    systemImage: viewModel.isRecording ? "record.circle.fill" : "record.circle"
+                )
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(viewModel.isRecording ? .red : theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .disabled(viewModel.currentTrackURL == nil)
 
             Button {
                 viewModel.saveLrc()
@@ -248,6 +282,7 @@ struct EnhancedLRCView: View {
                         line: line,
                         index: index,
                         isCurrent: index == viewModel.currentLineIndex,
+                        isRecordingTarget: viewModel.isRecording && index == viewModel.recordingCursorIndex,
                         onTimestampTap: {
                             viewModel.setTimestampForLine(at: index)
                         },
@@ -349,6 +384,7 @@ struct LrcLineRow: View {
     let line: EditableLrcLine
     let index: Int
     let isCurrent: Bool
+    let isRecordingTarget: Bool
     let onTimestampTap: () -> Void
     let onTextChange: (String) -> Void
     let onDelete: () -> Void
@@ -369,13 +405,15 @@ struct LrcLineRow: View {
             } label: {
                 Text(line.timestampString)
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(isCurrent ? .white : theme.dotActive)
+                    .foregroundStyle(isRecordingTarget || isCurrent ? .white : theme.dotActive)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
                     .background(
-                        isCurrent
-                            ? theme.dotActive.opacity(0.3)
-                            : theme.textSecondary.opacity(0.1)
+                        isRecordingTarget
+                            ? Color.red.opacity(0.5)
+                            : isCurrent
+                                ? theme.dotActive.opacity(0.3)
+                                : theme.textSecondary.opacity(0.1)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 4))
             }

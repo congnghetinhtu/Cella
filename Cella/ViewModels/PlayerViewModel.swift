@@ -60,14 +60,24 @@ class PlayerViewModel {
     var lyricsMode: LyricsMode = .off
     var currentLyricsTrackURL: URL?
     var lastLyricBadgeTrackID: String?
+    var lastQualityTrackID: String?
 
     // Album pill state — owned by the view model so it survives tab switches.
     var albumPillVisible: Bool = false
     var albumPillTitle: String = ""
     var albumPillCover: NSImage?
+    var albumPillHiRes: Bool = false
+    var albumPillHiSoVisible: Bool = false
+    var albumPillHiSoAlbumDir: String?
+    var albumPillAlbumDir: String?
     var albumPillRevealTick: Int = 0
     private(set) var albumPillDelayPending: Bool = false
     private var albumPillDelayTask: Task<Void, Never>?
+
+    // Quality / bitrate pill state — survives tab switches.
+    var qualityPillsVisible: Bool = false
+    var currentAudioMetadata: AudioFileMetadata?
+    var currentAudioMetadataURL: URL?
     private var playlistFolderURL: URL?
     private var cueSheet: CueSheet?
     private var caPlaylist: CaPlaylist?
@@ -406,6 +416,7 @@ class PlayerViewModel {
                 albumPillDelayPending = false
                 albumPillDelayTask = nil
                 albumPillRevealTick += 1
+                self.syncAlbumPillState()
             }
         }
     }
@@ -425,10 +436,31 @@ class PlayerViewModel {
         }
         albumPillTitle = track.albumName ?? track.url.deletingLastPathComponent().lastPathComponent
         albumPillCover = Self.albumPillCover(for: track.url.deletingLastPathComponent())
-        print("[AlbumPill] sync SHOW: title=\(albumPillTitle)")
+        albumPillHiRes = Self.isAllWavAlbum(for: track.url.deletingLastPathComponent())
+        let albumDir = track.url.deletingLastPathComponent().path
+        if albumPillAlbumDir != albumDir {
+            // New album — reset Hi-So reveal so it waits its 5s again
+            albumPillAlbumDir = albumDir
+            albumPillHiSoVisible = false
+            albumPillHiSoAlbumDir = nil
+        }
+        print("[AlbumPill] sync SHOW: title=\(albumPillTitle) hiRes=\(albumPillHiRes)")
         withAnimation(.smooth(duration: 0.5)) {
             albumPillVisible = true
         }
+    }
+
+    /// Whether every audio file in the album folder is WAV (Hi-Res badge).
+    static func isAllWavAlbum(for albumDir: URL) -> Bool {
+        let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: albumDir, includingPropertiesForKeys: nil
+        )) ?? []
+        let audioFiles = contents.filter {
+            audioExtensions.contains($0.pathExtension.lowercased())
+        }
+        guard !audioFiles.isEmpty else { return false }
+        return audioFiles.allSatisfy { $0.pathExtension.lowercased() == "wav" }
     }
 
     /// Locates the album folder image (cover.jpg, folder.jpg, or first image).

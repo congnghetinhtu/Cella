@@ -231,6 +231,8 @@ struct BottomTabBar: View {
 struct AlbumPill: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
+    @State private var hiSoTask: Task<Void, Never>?
+    @State private var crossfadeRevealPending = false
 
     var body: some View {
         Group {
@@ -240,21 +242,87 @@ struct AlbumPill: View {
             }
         }
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
+        .animation(.smooth(duration: 0.5), value: viewModel.albumPillHiSoVisible)
         .onAppear {
             // Show first-song album info on entry; skip while a config-delayed
             // reveal is pending so it still waits its 1s.
             if !viewModel.albumPillDelayPending {
                 viewModel.syncAlbumPillState()
             }
+            syncHiSo()
         }
         .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
             viewModel.syncAlbumPillState()
+            syncHiSo()
         }
-        .onChange(of: viewModel.playerState) { _, _ in
+        .onChange(of: viewModel.playerState) { _, newState in
             viewModel.syncAlbumPillState()
+            if newState == .autoMix {
+                // Crossfade began — next same-album reveal must re-delay 5s.
+                crossfadeRevealPending = true
+            }
+            syncHiSo()
         }
         .onChange(of: viewModel.albumPillRevealTick) { _, _ in
             viewModel.syncAlbumPillState()
+            syncHiSo()
+        }
+        .onChange(of: viewModel.albumPillVisible) { _, visible in
+            if !visible { hideHiSo() } else { syncHiSo() }
+        }
+        .onChange(of: viewModel.albumPillHiRes) { _, hiRes in
+            if hiRes { scheduleHiSo() } else { hideHiSo() }
+        }
+        .onDisappear {
+            // Keep Hi-So visible state persisted in viewModel across tab switches;
+            // only cancel the pending reveal timer here.
+            hiSoTask?.cancel()
+            hiSoTask = nil
+        }
+    }
+
+    private func syncHiSo() {
+        guard viewModel.albumPillVisible, viewModel.albumPillHiRes else {
+            hideHiSo()
+            return
+        }
+        // Same album already revealed. On tab re-appear show instantly (no re-delay),
+        // but after a crossfade re-delay the 5s reveal.
+        if viewModel.albumPillHiSoAlbumDir != nil,
+           viewModel.albumPillHiSoAlbumDir == viewModel.albumPillAlbumDir {
+            if crossfadeRevealPending {
+                crossfadeRevealPending = false
+                viewModel.albumPillHiSoAlbumDir = nil
+                scheduleHiSo()
+            } else if !viewModel.albumPillHiSoVisible {
+                withAnimation(.smooth(duration: 0.5)) {
+                    viewModel.albumPillHiSoVisible = true
+                }
+            }
+            return
+        }
+        scheduleHiSo()
+    }
+
+    private func scheduleHiSo() {
+        hiSoTask?.cancel()
+        hiSoTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                viewModel.albumPillHiSoAlbumDir = viewModel.albumPillAlbumDir
+                withAnimation(.smooth(duration: 0.5)) {
+                    viewModel.albumPillHiSoVisible = true
+                }
+            }
+        }
+    }
+
+    private func hideHiSo() {
+        hiSoTask?.cancel()
+        hiSoTask = nil
+        withAnimation(.smooth(duration: 0.5)) {
+            viewModel.albumPillHiSoVisible = false
         }
     }
 
@@ -285,6 +353,23 @@ struct AlbumPill: View {
                     .foregroundStyle(theme.textPrimary)
                     .fixedSize(horizontal: true, vertical: false)
             }
+
+            if viewModel.albumPillHiSoVisible {
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(.white)
+                        .frame(width: 4, height: 4)
+                        .shadow(color: .yellow, radius: 2)
+                    Text("Hi-So")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(LinearGradient(colors: [.yellow, .orange, .yellow.opacity(0.85)], startPoint: .leading, endPoint: .trailing)))
+                .clipShape(Capsule())
+                .shadow(color: .yellow.opacity(0.4), radius: 4)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -306,6 +391,7 @@ struct NowPlayingBar: View {
     @State private var volumeGlowTimer: Timer?
     @State private var lyricBadgeVisible = false
     @State private var lyricBadgeTask: Task<Void, Never>?
+    @State private var qualityPillsTask: Task<Void, Never>?
 
     private var currentTrack: TrackAsset? { viewModel.mixQueue?.currentTrack }
     private var isPlaying: Bool { viewModel.playerState == .playing || viewModel.playerState == .autoMix }
@@ -319,7 +405,15 @@ struct NowPlayingBar: View {
         }
         return false
     }
-    private var shouldAnimateGradient: Bool { isAutoMixing || lyricBadgeVisible }
+    private var hasQualityPills: Bool {
+        viewModel.qualityPillsVisible && (viewModel.currentAudioMetadata?.hasData == true)
+    }
+    private var qualityTrackID: String {
+        viewModel.mixQueue?.currentTrack?.id.uuidString
+            ?? viewModel.mixQueue?.currentTrack?.url.absoluteString
+            ?? "none"
+    }
+    private var shouldAnimateGradient: Bool { isAutoMixing || lyricBadgeVisible || hasQualityPills }
 
     var body: some View {
         let currentText: String? = {
@@ -337,20 +431,43 @@ struct NowPlayingBar: View {
             .animation(.smooth(duration: 0.5), value: lyricBadgeVisible)
             .onAppear {
                 updateGradientTimer()
-                // First song after import — view may have appeared after track already set
-                if hasLyricSupported && isPlaying { triggerLyricBadgeIfNeeded() }
+                // View may have appeared after track already playing on Cella
+                if viewModel.playerState == .playing {
+                    if hasLyricSupported {
+                        // Badge already shown for this track (tab re-appear) — restore pills
+                        // directly instead of hiding them and waiting on a dedup'd badge.
+                        if viewModel.lastLyricBadgeTrackID == qualityTrackID {
+                            showQualityPills(force: true)
+                        } else {
+                            hideQualityPills(); triggerLyricBadgeIfNeeded()
+                        }
+                    } else {
+                        showQualityPills(force: true)
+                    }
+                }
             }
             .onChange(of: shouldAnimateGradient) { _, _ in updateGradientTimer() }
             .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
                 // During OpenMix, wait until crossfade finishes (state -> playing) to show
                 if viewModel.playerState == .autoMix { return }
-                if hasLyricSupported { triggerLyricBadgeIfNeeded(force: true) } else { hideLyricBadge() }
+                if hasLyricSupported { hideQualityPills(); triggerLyricBadgeIfNeeded() }
+                else { hideLyricBadge(); scheduleQualityPills() }
             }
             .onChange(of: viewModel.currentLyricsTrackURL) { _, _ in
-                if hasLyricSupported && isPlaying { triggerLyricBadgeIfNeeded(force: true) }
+                if hasLyricSupported && viewModel.playerState == .playing { triggerLyricBadgeIfNeeded() }
             }
             .onChange(of: viewModel.playerState) { old, new in
-                if new == .playing && old != .paused && hasLyricSupported { triggerLyricBadgeIfNeeded(force: true) }
+                if new == .playing && old == .autoMix {
+                    // OpenMix crossfade landed on this song — show badge/pills again
+                    if hasLyricSupported { triggerLyricBadgeIfNeeded(force: true, forcePillsAfter: true) }
+                    else { showQualityPills(force: true) }
+                } else if new == .playing && old != .paused && hasLyricSupported {
+                    hideQualityPills(); triggerLyricBadgeIfNeeded()
+                } else if new == .playing && old != .paused && !hasLyricSupported {
+                    // Non-lyric: appear right after the OpenMixing badge (autoMix -> playing)
+                    showQualityPills()
+                }
+                if new == .paused { hideLyricBadgeKeepPills() }
                 if new == .autoMix { hideLyricBadge() }
             }
             .onDisappear { stopGradientTimer() }
@@ -361,6 +478,25 @@ struct NowPlayingBar: View {
                 withAnimation(.easeOut(duration: 0.4)) {
                     isVolumeAdjusting = false
                 }
+            }
+        }
+        .task(id: viewModel.mixQueue?.currentTrack?.url) {
+            guard let url = viewModel.mixQueue?.currentTrack?.url else {
+                viewModel.currentAudioMetadata = nil
+                viewModel.currentAudioMetadataURL = nil
+                return
+            }
+            // Reload metadata only for a new track; keep cached across tab switches.
+            if viewModel.currentAudioMetadataURL != url {
+                viewModel.currentAudioMetadataURL = url
+                viewModel.currentAudioMetadata = await AudioFileMetadataLoader.load(for: url)
+            }
+            // Metadata loaded async — reveal quality pills now if relevant,
+            // but let a url-change lyric badge trigger first so pills never preempt it.
+            if viewModel.currentAudioMetadata?.hasData == true, viewModel.playerState == .playing {
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled, viewModel.playerState == .playing, !hasLyricSupported else { return }
+                showQualityPills()
             }
         }
     }
@@ -420,6 +556,15 @@ struct NowPlayingBar: View {
                 if lyricBadgeVisible {
                     lyricSupportedBadge
                         .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
+
+                if hasQualityPills, let metadata = viewModel.currentAudioMetadata {
+                    metadataPill(label: "Quality", value: metadata.qualityLabel)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                    if let performance = metadata.bitrateLabel ?? metadata.sampleRateLabel {
+                        metadataPill(label: "Bitrate", value: performance)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                 }
 
                 Image(systemName: viewModel.lyricsMode.iconName)
@@ -545,6 +690,29 @@ struct NowPlayingBar: View {
         .shadow(color: .green.opacity(0.5), radius: 6)
     }
 
+    // MARK: - Metadata Pill (Quality / Bitrate)
+
+    private func metadataPill(label: String, value: String) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(theme.dotActive)
+                .frame(width: 5, height: 5)
+            Text(label.uppercased())
+                .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.textSecondary)
+            Text(value)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundStyle(theme.textPrimary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(theme.screenBackground))
+        .clipShape(Capsule())
+        .overlay(
+            Capsule().stroke(theme.dotInactive.opacity(0.4), lineWidth: 1)
+        )
+    }
+
     private func updateGradientTimer() {
         if shouldAnimateGradient {
             guard gradientTimer == nil else { return }
@@ -564,7 +732,7 @@ struct NowPlayingBar: View {
         gradientTimer = nil
     }
 
-    private func triggerLyricBadgeIfNeeded(force: Bool = false) {
+    private func triggerLyricBadgeIfNeeded(force: Bool = false, showPillsAfter: Bool = true, forcePillsAfter: Bool = false) {
         guard hasLyricSupported else { return }
         let trackID = viewModel.mixQueue?.currentTrack?.id.uuidString ?? viewModel.mixQueue?.currentTrack?.url.absoluteString ?? "none"
         // Don't re-trigger on tab switch / re-appear for same track (persisted in viewModel)
@@ -583,11 +751,57 @@ struct NowPlayingBar: View {
                     lyricBadgeVisible = false
                 }
                 updateGradientTimer()
+                if showPillsAfter {
+                    showQualityPills(force: forcePillsAfter)
+                }
             }
         }
     }
 
+    private func scheduleQualityPills() {
+        guard viewModel.currentAudioMetadata?.hasData == true else { return }
+        qualityPillsTask?.cancel()
+        qualityPillsTask = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                showQualityPills()
+            }
+        }
+    }
+
+    private func showQualityPills(force: Bool = false) {
+        guard viewModel.currentAudioMetadata?.hasData == true else { return }
+        // Never overlap with a showing lyric badge — its tail reveals pills after it hides
+        if lyricBadgeVisible { return }
+        let trackID = qualityTrackID
+        // One-time show per track unless forced (crossfade landing re-shows)
+        if !force, viewModel.lastQualityTrackID == trackID { return }
+        viewModel.lastQualityTrackID = trackID
+        withAnimation(.smooth(duration: 0.5)) {
+            viewModel.qualityPillsVisible = true
+        }
+    }
+
+    private func hideQualityPills() {
+        qualityPillsTask?.cancel()
+        qualityPillsTask = nil
+        withAnimation(.smooth(duration: 0.5)) {
+            viewModel.qualityPillsVisible = false
+        }
+    }
+
     private func hideLyricBadge() {
+        lyricBadgeTask?.cancel()
+        lyricBadgeTask = nil
+        withAnimation(.smooth(duration: 0.5)) {
+            lyricBadgeVisible = false
+        }
+        updateGradientTimer()
+        hideQualityPills()
+    }
+
+    private func hideLyricBadgeKeepPills() {
         lyricBadgeTask?.cancel()
         lyricBadgeTask = nil
         withAnimation(.smooth(duration: 0.5)) {
