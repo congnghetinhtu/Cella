@@ -105,6 +105,84 @@ final class ScrollCoordinator: ObservableObject {
     enum Direction { case next, previous }
 }
 
+// MARK: - Album Pill Scroll Coordinator
+
+final class AlbumPillScrollCoordinator: ObservableObject {
+    @MainActor @Published var openSignal = 0
+
+    private var monitor: Any?
+    private var accumulator: CGFloat = 0
+    private var gestureActive = false
+
+    var isHovering = false
+
+    func start() {
+        guard monitor == nil else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            self?.handle(event)
+            return event
+        }
+    }
+
+    func stop() {
+        if let monitor {
+            NSEvent.removeMonitor(monitor)
+            self.monitor = nil
+        }
+        accumulator = 0
+        gestureActive = false
+    }
+
+    private func handle(_ event: NSEvent) {
+        guard isHovering else { return }
+
+        // Only trigger on a completed, deliberate scroll gesture (trackpad).
+        let isTrackpad = event.phase != [] || event.momentumPhase != []
+
+        if isTrackpad {
+            if event.phase.contains(.began) {
+                accumulator = 0
+                gestureActive = true
+            }
+            guard gestureActive else { return }
+
+            accumulator += event.scrollingDeltaY
+
+            // Fire once a clear directional intent builds up, then wait for
+            // the gesture to end before allowing another toggle.
+            let threshold: CGFloat = 24
+            if abs(accumulator) >= threshold {
+                gestureActive = false
+                accumulator = 0
+                fire()
+            }
+
+            if event.phase.contains(.ended) || event.phase.contains(.cancelled) {
+                gestureActive = false
+                accumulator = 0
+            }
+        } else {
+            // Mouse wheel — needs more turns to avoid over-triggering.
+            accumulator += event.scrollingDeltaY
+            if abs(accumulator) >= 6 {
+                accumulator = 0
+                fire()
+            }
+        }
+    }
+
+    private func fire() {
+        let value = openSignal + 1
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { openSignal = value }
+        } else {
+            Task { @MainActor [weak self] in
+                self?.openSignal = value
+            }
+        }
+    }
+}
+
 // MARK: - BottomTabBar (single nav, bottom)
 
 struct BottomTabBar: View {
@@ -234,8 +312,51 @@ struct AlbumPill: View {
     @State private var hiSoTask: Task<Void, Never>?
     @State private var crossfadeRevealPending = false
     @State private var showAlbumSongs = false
+    @StateObject private var scrollCoordinator = AlbumPillScrollCoordinator()
 
     var body: some View {
+        pillContent
+            .onAppear {
+                // Show first-song album info on entry; skip while a config-delayed
+                // reveal is pending so it still waits its 1s.
+                if !viewModel.albumPillDelayPending {
+                    viewModel.syncAlbumPillState()
+                }
+                syncHiSo()
+                scrollCoordinator.start()
+            }
+            .onDisappear {
+                scrollCoordinator.stop()
+                // Keep Hi-So visible state persisted in viewModel across tab switches;
+                // only cancel the pending reveal timer here.
+                hiSoTask?.cancel()
+                hiSoTask = nil
+            }
+            .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
+                viewModel.syncAlbumPillState()
+                syncHiSo()
+            }
+            .onChange(of: viewModel.playerState) { _, newState in
+                viewModel.syncAlbumPillState()
+                if newState == .autoMix {
+                    // Crossfade began — next same-album reveal must re-delay 5s.
+                    crossfadeRevealPending = true
+                }
+                syncHiSo()
+            }
+            .onChange(of: viewModel.albumPillRevealTick) { _, _ in
+                viewModel.syncAlbumPillState()
+                syncHiSo()
+            }
+            .onChange(of: viewModel.albumPillVisible) { _, visible in
+                if !visible { hideHiSo() } else { syncHiSo() }
+            }
+            .onChange(of: viewModel.albumPillHiRes) { _, hiRes in
+                if hiRes { scheduleHiSo() } else { hideHiSo() }
+            }
+    }
+
+    private var pillContent: some View {
         Group {
             if viewModel.albumPillVisible {
                 content
@@ -243,10 +364,27 @@ struct AlbumPill: View {
             }
         }
         .contentShape(RoundedRectangle(cornerRadius: 18))
+        .onContinuousHover { phase in
+            if case .active = phase {
+                scrollCoordinator.isHovering = true
+            } else {
+                scrollCoordinator.isHovering = false
+            }
+        }
         .onTapGesture {
             // Open the album→song picker when there are albums to choose.
             guard !viewModel.albums.isEmpty else { return }
             showAlbumSongs.toggle()
+        }
+        .onChange(of: scrollCoordinator.openSignal) { _, _ in
+            withAnimation(.snappy) {
+                if showAlbumSongs {
+                    showAlbumSongs = false
+                } else {
+                    guard viewModel.albumPillVisible, !viewModel.albums.isEmpty else { return }
+                    showAlbumSongs = true
+                }
+            }
         }
         .popover(isPresented: $showAlbumSongs, arrowEdge: .bottom) {
             AlbumSongsPopover(
@@ -261,42 +399,6 @@ struct AlbumPill: View {
         }
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillHiSoVisible)
-        .onAppear {
-            // Show first-song album info on entry; skip while a config-delayed
-            // reveal is pending so it still waits its 1s.
-            if !viewModel.albumPillDelayPending {
-                viewModel.syncAlbumPillState()
-            }
-            syncHiSo()
-        }
-        .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
-            viewModel.syncAlbumPillState()
-            syncHiSo()
-        }
-        .onChange(of: viewModel.playerState) { _, newState in
-            viewModel.syncAlbumPillState()
-            if newState == .autoMix {
-                // Crossfade began — next same-album reveal must re-delay 5s.
-                crossfadeRevealPending = true
-            }
-            syncHiSo()
-        }
-        .onChange(of: viewModel.albumPillRevealTick) { _, _ in
-            viewModel.syncAlbumPillState()
-            syncHiSo()
-        }
-        .onChange(of: viewModel.albumPillVisible) { _, visible in
-            if !visible { hideHiSo() } else { syncHiSo() }
-        }
-        .onChange(of: viewModel.albumPillHiRes) { _, hiRes in
-            if hiRes { scheduleHiSo() } else { hideHiSo() }
-        }
-        .onDisappear {
-            // Keep Hi-So visible state persisted in viewModel across tab switches;
-            // only cancel the pending reveal timer here.
-            hiSoTask?.cancel()
-            hiSoTask = nil
-        }
     }
 
     private func syncHiSo() {
