@@ -373,6 +373,68 @@ class PlayerViewModel {
         updateNowPlayingInfo()
     }
 
+    /// Tracks in the same album folder as the currently playing track.
+    var albumSongs: [TrackAsset] {
+        guard let dir = albumPillAlbumDir, let queue = mixQueue else { return [] }
+        return queue.tracks.filter { $0.url.deletingLastPathComponent().path == dir }
+    }
+
+    /// All albums present in the loaded queue, each with its songs.
+    var albums: [AlbumGroup] {
+        guard let queue = mixQueue else { return [] }
+        var order: [String] = []
+        var groups: [String: [TrackAsset]] = [:]
+        for track in queue.tracks {
+            let dir = track.url.deletingLastPathComponent().path
+            if groups[dir] == nil { order.append(dir) }
+            groups[dir, default: []].append(track)
+        }
+        return order.map { dir in
+            let songs = groups[dir] ?? []
+            let name = songs.first?.albumName ?? URL(fileURLWithPath: dir).lastPathComponent
+            return AlbumGroup(name: name, dir: dir, songs: songs)
+        }
+    }
+
+    /// Crossfade (OpenMix) from the current track straight to a chosen album song.
+    func crossfadeToTrack(at index: Int) {
+        guard var queue = mixQueue, index >= 0, index < queue.tracks.count else { return }
+        guard index != queue.currentIndex, let outgoing = queue.currentTrack else { return }
+        cancelPendingMoodTransition()
+
+        let incoming = queue.tracks[index]
+        playerState = .autoMix
+
+        let params = crossfader.computeCrossfadeParams(
+            outgoing: outgoing,
+            incoming: incoming
+        )
+
+        let started = audioEngine.crossfadeToNext(
+            outgoingURL: outgoing.url,
+            incomingURL: incoming.url,
+            crossfader: crossfader,
+            params: params,
+            outgoingAnalysis: outgoing.analysis,
+            incomingAnalysis: incoming.analysis
+        )
+        guard started else { return }
+
+        queue.currentIndex = index
+        mixQueue = queue
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+            if self?.playerState == .autoMix {
+                self?.playerState = .playing
+                self?.stopAnimationLoop()
+                self?.startAnimationLoop()
+                self?.loadLyrics(for: queue.currentTrack?.url ?? incoming.url)
+            }
+        }
+
+        updateNowPlayingInfo()
+    }
+
     // MARK: - Album Pill
 
     /// Observation-based auto-sync: recomputes the pill whenever playback state

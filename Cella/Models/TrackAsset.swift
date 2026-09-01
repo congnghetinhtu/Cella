@@ -54,3 +54,11 @@ struct TrackAsset: Identifiable {
         return String(name[separatorIndex...]).trimmingCharacters(in: .whitespaces)
     }
 }
+
+/// A group of tracks sharing the same album folder.
+struct AlbumGroup: Identifiable {
+    let id = UUID()
+    let name: String
+    let dir: String
+    let songs: [TrackAsset]
+}

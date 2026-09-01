@@ -233,12 +233,30 @@ struct AlbumPill: View {
     @Environment(\.theme) private var theme
     @State private var hiSoTask: Task<Void, Never>?
     @State private var crossfadeRevealPending = false
+    @State private var showAlbumSongs = false
 
     var body: some View {
         Group {
             if viewModel.albumPillVisible {
                 content
                     .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 18))
+        .onTapGesture {
+            // Open the album→song picker when there are albums to choose.
+            guard !viewModel.albums.isEmpty else { return }
+            showAlbumSongs.toggle()
+        }
+        .popover(isPresented: $showAlbumSongs, arrowEdge: .bottom) {
+            AlbumSongsPopover(
+                viewModel: viewModel,
+                initialAlbum: viewModel.albums.first { $0.dir == viewModel.albumPillAlbumDir }
+            ) { track in
+                showAlbumSongs = false
+                guard let queue = viewModel.mixQueue,
+                      let index = queue.tracks.firstIndex(where: { $0.url == track.url }) else { return }
+                viewModel.crossfadeToTrack(at: index)
             }
         }
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
@@ -376,6 +394,183 @@ struct AlbumPill: View {
         .background(Capsule().fill(theme.tabBarBackground))
         .clipShape(Capsule())
         .contentShape(Capsule())
+    }
+}
+
+// MARK: - Album Songs Popover
+
+struct AlbumSongsPopover: View {
+    var viewModel: PlayerViewModel
+    var initialAlbum: AlbumGroup?
+    var onSelect: (TrackAsset) -> Void
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedAlbum: AlbumGroup?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Header
+            HStack(spacing: 10) {
+                if selectedAlbum != nil {
+                    Button {
+                        withAnimation(.snappy) {
+                            selectedAlbum = nil
+                        }
+                    } label: {
+                        Label("Albums", systemImage: "chevron.left")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(theme.dotActive)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text(selectedAlbum?.name ?? "Albums")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 6)
+
+            Divider().background(theme.textSecondary.opacity(0.12))
+
+            if let selectedAlbum {
+                songList(for: selectedAlbum)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            } else {
+                albumList
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: selectedAlbum?.id)
+        .background(theme.screenBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke(theme.textSecondary.opacity(0.15), lineWidth: 1)
+        )
+        .onAppear {
+            // Open on the current album's songs first.
+            if selectedAlbum == nil {
+                selectedAlbum = initialAlbum
+            }
+        }
+    }
+
+    // MARK: - Album List
+
+    private var albumList: some View {
+        ScrollView {
+            VStack(spacing: 2) {
+                ForEach(viewModel.albums) { album in
+                    let isCurrentAlbum = album.dir == viewModel.albumPillAlbumDir
+                    PickerRow(highlighted: isCurrentAlbum) {
+                        withAnimation(.snappy) {
+                            selectedAlbum = album
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: isCurrentAlbum ? "speaker.wave.2.fill" : "square.stack")
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.dotActive.opacity(0.8))
+                            Text(album.name)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(isCurrentAlbum ? theme.dotActive : theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer()
+                            Text("\(album.songs.count)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.textSecondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(theme.textSecondary.opacity(0.1))
+                                .clipShape(Capsule())
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(theme.textSecondary.opacity(0.6))
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .frame(width: 272, height: min(CGFloat(viewModel.albums.count) * 36 + 12, 320))
+    }
+
+    // MARK: - Song List (for a chosen album)
+
+    @ViewBuilder
+    private func songList(for album: AlbumGroup) -> some View {
+        ScrollView {
+            VStack(spacing: 2) {
+                ForEach(Array(album.songs.enumerated()), id: \.element.id) { index, track in
+                    let isCurrent = track.url == viewModel.mixQueue?.currentTrack?.url
+                    PickerRow(highlighted: isCurrent) {
+                        onSelect(track)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.textSecondary)
+                                .frame(width: 18, alignment: .trailing)
+                            Text(track.fileName)
+                                .font(.system(size: 12))
+                                .foregroundStyle(isCurrent ? theme.dotActive : theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            Spacer()
+                            if isCurrent {
+                                Image(systemName: "speaker.wave.2.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(theme.dotActive)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .frame(width: 272, height: min(CGFloat(album.songs.count) * 34 + 12, 272))
+    }
+}
+
+// Themed tappable row with hover highlight, matching app list style.
+private struct PickerRow<Content: View>: View {
+    var highlighted: Bool = false
+    var action: () -> Void
+    @ViewBuilder var label: Content
+    @Environment(\.theme) private var theme
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            label
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(
+                            highlighted
+                                ? theme.tabSelectedBackground
+                                : (isHovering ? theme.dotActive.opacity(0.12) : Color.clear)
+                        )
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            withAnimation(.smooth(duration: 0.15)) {
+                isHovering = hovering
+            }
+        }
     }
 }
 
