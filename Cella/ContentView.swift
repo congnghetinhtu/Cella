@@ -35,10 +35,9 @@ struct ContentView: View {
     }
 
     private var theme: Theme {
-        let isDark = effectiveColorScheme == .dark
         switch themeOverride {
-        case "seafoam": return isDark ? .seafoam : .lightSeafoam
-        default: return isDark ? .dark : .light
+        case "seafoam": return .seafoam
+        default: return .dark
         }
     }
 

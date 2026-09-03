@@ -191,7 +191,7 @@ struct ConfigView: View {
             }
 
             HStack(spacing: 6) {
-                ForEach([("system", "System"), ("dark", "Dark"), ("light", "Light")], id: \.0) { id, label in
+                ForEach([("system", "System"), ("dark", "Dark")], id: \.0) { id, label in
                     let isSelected = appearanceMode == id
                     Button {
                         withAnimation(.smooth) {

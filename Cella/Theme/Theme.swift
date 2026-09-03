@@ -40,34 +40,6 @@ struct Theme {
         textPrimary: Color(hex: 0xD9E8E0),
         textSecondary: Color(hex: 0x668878)
     )
-
-    static let light = Theme(
-        dotInactive: Color(hex: 0xD4C5B8),
-        dotActive: Color(hex: 0xFF8038),
-        dotInactiveDeep: Color(hex: 0xF0EAE4),
-        appBackground: Color(hex: 0xFFFFFF),
-        screenBackground: Color(hex: 0xF5F0EB),
-        tabBarBackground: Color(hex: 0xF5F0EB),
-        tabSelectedBackground: Color(hex: 0xFF8038, opacity: 0.15),
-        tabSelectedText: Color(hex: 0xFF8038),
-        tabUnselectedText: Color(hex: 0x8B7355),
-        textPrimary: Color(hex: 0x2D1F17),
-        textSecondary: Color(hex: 0x7A6B5D)
-    )
-
-    static let lightSeafoam = Theme(
-        dotInactive: Color(hex: 0xC5D8CE),
-        dotActive: Color(hex: 0x1A8A52),
-        dotInactiveDeep: Color(hex: 0xE4EDE8),
-        appBackground: Color(hex: 0xFFFFFF),
-        screenBackground: Color(hex: 0xECF5F0),
-        tabBarBackground: Color(hex: 0xECF5F0),
-        tabSelectedBackground: Color(hex: 0x1A8A52, opacity: 0.15),
-        tabSelectedText: Color(hex: 0x1A8A52),
-        tabUnselectedText: Color(hex: 0x5A7A6A),
-        textPrimary: Color(hex: 0x1A2E24),
-        textSecondary: Color(hex: 0x5A7A6A)
-    )
 }
 
 struct ThemeKey: EnvironmentKey {

@@ -73,6 +73,7 @@ class PlayerViewModel {
     var albumPillRevealTick: Int = 0
     private(set) var albumPillDelayPending: Bool = false
     private var albumPillDelayTask: Task<Void, Never>?
+    var albumPickerVisible: Bool = false
 
     // Quality / bitrate pill state — survives tab switches.
     var qualityPillsVisible: Bool = false

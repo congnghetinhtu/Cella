@@ -31,26 +31,42 @@ private struct CmaBackgroundLayer: View {
     let videoPlayer: AVPlayer?
     let artistImage: NSImage?
     let isActive: Bool
+    var unblur: Bool = false
 
     var body: some View {
         Group {
             if isActive {
                 if let player = videoPlayer {
-                    VideoBackgroundView(player: player)
-                        .opacity(0.35)
-                        .blur(radius: 4)
-                        .transition(.opacity)
+                    baseContent {
+                        VideoBackgroundView(player: player)
+                    }
                 } else if let image = artistImage {
-                    Image(nsImage: image)
-                        .resizable()
-                        .aspectRatio(21.0 / 9.0, contentMode: .fill)
-                        .opacity(0.35)
-                        .blur(radius: 4)
-                        .clipped()
-                        .transition(.opacity)
+                    baseContent {
+                        Image(nsImage: image)
+                            .resizable()
+                            .aspectRatio(21.0 / 9.0, contentMode: .fill)
+                            .clipped()
+                    }
                 }
             }
         }
+    }
+
+    // Blur radius doesn't interpolate smoothly (perceptual pop), so crossfade
+    // a blurred copy against a sharp copy via opacity instead.
+    @ViewBuilder
+    private func baseContent<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        ZStack {
+            content()
+                .opacity(unblur ? 0 : 0.35)
+                .blur(radius: 4)
+                .animation(.easeInOut(duration: 0.9), value: unblur)
+            content()
+                .opacity(unblur ? 0.35 : 0)
+                .blur(radius: 0)
+                .animation(.easeInOut(duration: 0.9), value: unblur)
+        }
+        .transition(.opacity)
     }
 }
 
@@ -58,7 +74,6 @@ struct EmotionScreenView: View {
     let pattern: [[Bool]]
     var viewModel: PlayerViewModel?
     @Environment(\.theme) private var theme
-    @Environment(\.colorScheme) private var colorScheme
     @AppStorage("displayMode") private var displayMode: String = "matrix"
 
     @State private var isHoveringBar = false
@@ -124,6 +139,18 @@ struct EmotionScreenView: View {
         return t == "..." || t == "…" || t == ".." || t.isEmpty
     }
 
+    /// True when the currently-playing lyric line is a placeholder ("..."), so
+    /// the motion area can stay sharp/unblurred during instrumental gaps.
+    private var currentLyricIsPlaceholder: Bool {
+        guard let vm = viewModel, !vm.currentLyrics.isEmpty else { return false }
+        for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
+            if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
+                return isPlaceholderLyric(vm.currentLyrics[i].text)
+            }
+        }
+        return false
+    }
+
     private func checkLyricTransition() {
         let idx = currentLyricIndex
         guard idx != prevLyricIndex else { return }
@@ -168,16 +195,19 @@ struct EmotionScreenView: View {
             CmaBackgroundLayer(
                 videoPlayer: viewModel?.videoPlayer,
                 artistImage: viewModel?.currentArtistImage,
-                isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix
+                isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix,
+                unblur: currentLyricIsPlaceholder
             )
             .animation(.smooth, value: viewModel?.currentArtistImage?.hash)
 
             // Main content (matrix / line / static)
             mainContent
-                .blur(radius: showFullLyrics ? 8 : 0)
-                .animation(.smooth, value: showFullLyrics)
+                .blur(radius: showFullLyrics && !currentLyricIsPlaceholder ? 8 : 0)
+                .animation(.easeInOut(duration: 0.9), value: showFullLyrics)
+                .animation(.easeInOut(duration: 0.9), value: currentLyricIsPlaceholder)
 
-            // Full lyrics overlay (centered in 21:9)
+            // Full lyrics overlay (centered in 21:9). When the album picker is
+            // open, left-align the text so it isn't covered by the popover.
             if showFullLyrics, let vm = viewModel {
                 LyricsView(
                     lyrics: vm.currentLyrics,
@@ -185,9 +215,11 @@ struct EmotionScreenView: View {
                     isPlaying: vm.playerState.isPlaying || vm.playerState == .autoMix,
                     nextLyrics: vm.nextLyrics,
                     isTransitioning: vm.isTransitioning,
-                    frozenIndex: frozenLyricIndex
+                    frozenIndex: frozenLyricIndex,
+                    textAlignment: vm.albumPickerVisible ? .leading : (currentLyricIsPlaceholder ? .trailing : .center)
                 )
-                .transition(.opacity)
+                .animation(.smooth, value: vm.albumPickerVisible)
+                .transition(.opacity) 
                 .onChange(of: vm.isTransitioning) { _, transitioning in
                     if transitioning && frozenLyricIndex < 0 {
                         for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
@@ -340,12 +372,11 @@ struct EmotionScreenView: View {
         let barHeight: CGFloat = isHoveringBar || isDragging ? 4 : 2
         let bw = Self.barWidth
         let spotWidth: CGFloat = 40
-        let isLight = colorScheme == .light
 
-        let baseOpac: Double = isLight ? 0.7 : 0.35
-        let hoverOpac: Double = isLight ? 1.0 : 0.9
-        let trackOpac: Double = isLight ? 0.6 : (isHoveringBar || isDragging ? 0.35 : 0.2)
-        let sweepMax: Double = isLight ? 0.7 : 0.5
+        let baseOpac: Double = 0.35
+        let hoverOpac: Double = 0.9
+        let trackOpac: Double = isHoveringBar || isDragging ? 0.35 : 0.2
+        let sweepMax: Double = 0.5
 
         return HStack {
             Spacer()

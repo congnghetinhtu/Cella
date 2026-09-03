@@ -386,6 +386,9 @@ struct AlbumPill: View {
                 }
             }
         }
+        .onChange(of: showAlbumSongs) { _, isOpen in
+            viewModel.albumPickerVisible = isOpen
+        }
         .popover(isPresented: $showAlbumSongs, arrowEdge: .bottom) {
             AlbumSongsPopover(
                 viewModel: viewModel,

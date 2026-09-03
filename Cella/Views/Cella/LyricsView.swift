@@ -15,6 +15,7 @@ struct LyricsView: View {
     var nextLyrics: [LrcLine] = []
     var isTransitioning: Bool = false
     var frozenIndex: Int = -1
+    var textAlignment: TextAlignment = .center
     @Environment(\.theme) private var theme
 
     private let lineHeight: CGFloat = 42
@@ -79,6 +80,14 @@ struct LyricsView: View {
 
     // MARK: - Current Lyrics
 
+    private var alignment: Alignment {
+        switch textAlignment {
+        case .leading: return .leading
+        case .trailing: return .trailing
+        default: return .center
+        }
+    }
+
     @ViewBuilder
     private func currentLyricsContent(geo: GeometryProxy, time: Double) -> some View {
         let scrollOffset = -CGFloat(currentIndex) * lineHeight
@@ -109,8 +118,8 @@ struct LyricsView: View {
                         .blur(radius: blur)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .frame(width: geo.size.width * 0.85)
-                        .multilineTextAlignment(.center)
+                        .frame(width: geo.size.width * 0.85, alignment: alignment)
+                        .multilineTextAlignment(textAlignment)
                         .offset(y: fixedY)
                 }
             }
@@ -153,8 +162,8 @@ struct LyricsView: View {
                     .blur(radius: blur)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(width: geo.size.width * 0.85)
-                    .multilineTextAlignment(.center)
+                    .frame(width: geo.size.width * 0.85, alignment: alignment)
+                    .multilineTextAlignment(textAlignment)
                     .offset(x: fx, y: yOffset + fy)
             }
         }
