@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import UniformTypeIdentifiers
 
 struct EnhancedLRCView: View {
     @StateObject private var viewModel = EnhancedLRCViewModel()
@@ -355,7 +356,8 @@ struct EnhancedLRCView: View {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
-        panel.allowedContentTypes = [.mp3, .wav]
+        panel.allowedContentTypes = [.mp3, .wav, .aiff]
+            + ["flac", "m4a", "caf", "ogg", "aac"].compactMap { UTType(filenameExtension: $0) }
         panel.prompt = "Open Audio File"
         panel.message = "Select an audio file to edit lyrics"
 

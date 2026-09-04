@@ -34,12 +34,23 @@ struct TrackAsset: Identifiable {
     }
 
     /// Individual artists split from the combined artist string.
+    /// Supports " & ", ", ", and "/" separators, and strips surrounding quotes.
     /// "Như Quỳnh & Mạnh Quỳnh" → ["Như Quỳnh", "Mạnh Quỳnh"].
+    /// "\"Phương Mỹ Chi\", \"DTAP\", \"Double2T\"" → ["Phương Mỹ Chi", "DTAP", "Double2T"].
     var artists: [String] {
         guard let combined = artistName else { return [] }
-        return combined.components(separatedBy: " & ")
+        let separators = CharacterSet(charactersIn: "&,/\u{FF0C}")
+        return combined.components(separatedBy: separators)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { $0.trimmingCharacters(in: .punctuationCharacters) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Clean artist display: the split artists joined with " & ".
+    var displayArtist: String {
+        let names = artists
+        if names.isEmpty { return artistName ?? "" }
+        return names.joined(separator: " & ")
     }
 
     /// Track title from .ca metadata, or parsed from filename (after " - " separator, or full name).

@@ -114,6 +114,48 @@ struct LrcParser {
         return parse(content)
     }
 
+    /// Looks up the .lrc file matching `audioURL` inside `playlistFolder` and
+    /// returns its metadata tags (title, artist, album, etc.).
+    /// Search order mirrors `loadLyrics`: album/lrc/ → root/lrc/ → root/.
+    static func metadata(for audioURL: URL, in playlistFolder: URL) -> LrcMetadata {
+        let lrcName = audioURL.deletingPathExtension().lastPathComponent + ".lrc"
+        let albumDir = audioURL.deletingLastPathComponent()
+        let candidates = [
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            playlistFolder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            playlistFolder.appendingPathComponent(lrcName)
+        ]
+        for lrcURL in candidates where FileManager.default.fileExists(atPath: lrcURL.path) {
+            let meta = loadMetadataOnly(from: lrcURL)
+            if !meta.isEmpty { return meta }
+        }
+        return LrcMetadata()
+    }
+
+    /// Reads only the header tags from an .lrc file, stopping at the first
+    /// timestamp line. Much faster than parsing the full file.
+    private static func loadMetadataOnly(from url: URL) -> LrcMetadata {
+        guard let content = try? String(contentsOf: url, encoding: .utf8) else {
+            return LrcMetadata()
+        }
+        var metadata = LrcMetadata()
+        for raw in content.components(separatedBy: .newlines) {
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+            // First timestamp = end of header
+            if trimmed.hasPrefix("[") {
+                if let firstChar = trimmed.dropFirst().first, firstChar.isNumber { break }
+            }
+            if let metaMatch = firstMatch(
+                #"\[([a-zA-Z]+):(.*)\]"#,
+                in: trimmed
+            ), metaMatch.count >= 3 {
+                metadata.set(key: metaMatch[1], value: metaMatch[2])
+            }
+        }
+        return metadata
+    }
+
     private static func firstMatch(_ pattern: String, in text: String) -> [String]? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
         let range = NSRange(text.startIndex..., in: text)

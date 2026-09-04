@@ -26,6 +26,7 @@ class PlayerViewModel {
     private var temporaryPattern: [[Bool]]?
     private var temporaryPatternTimer: Timer?
     private var nowPlayingTimer: Timer?
+    private var playbackTimer: Timer?
     private var currentMood: MusicMood = .neutral
     private var animationFrame: Int = 0
     private var moodTransitionTimer: Timer?
@@ -240,6 +241,7 @@ class PlayerViewModel {
         animationTimer?.invalidate()
         temporaryPatternTimer?.invalidate()
         nowPlayingTimer?.invalidate()
+        playbackTimer?.invalidate()
         moodTransitionTimer?.invalidate()
         gifTimer?.invalidate()
         if let obs = videoObservation {
@@ -260,8 +262,12 @@ class PlayerViewModel {
 
     private func startNowPlayingTimer() {
         nowPlayingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.syncPlaybackTime()
             self?.updateNowPlayingInfo()
+        }
+        // Fast playback-time sync (drives lyric lines, progress bar) — 20Hz
+        // instead of the old 1Hz, so lyric changes appear immediately.
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            self?.syncPlaybackTime()
         }
     }
 
@@ -739,12 +745,17 @@ class PlayerViewModel {
         let videoExtensions = Set(["mp4", "mov", "cma"])
 
         for artist in trackArtists {
+            // Filesystem stores accented names in NFD; normalize candidates so NFC artist
+            // strings (e.g. from .lrc) still match the on-disk folder.
+            let nfd = artist.precomposedStringWithCanonicalMapping
+                .decomposedStringWithCanonicalMapping
+            let titleCase = nfd.split(separator: " ").map(\.capitalized).joined(separator: " ")
             // Try various folder name formats: "artist", "Artist", "artist-name"
             let candidates = [
-                cmaDir.appendingPathComponent(artist),
-                cmaDir.appendingPathComponent(artist.split(separator: " ").map(\.capitalized).joined(separator: " ")),
-                cmaDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "-")),
-                cmaDir.appendingPathComponent(artist.replacingOccurrences(of: " ", with: "_"))
+                cmaDir.appendingPathComponent(nfd),
+                cmaDir.appendingPathComponent(titleCase),
+                cmaDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "-")),
+                cmaDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "_"))
             ]
             for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
                 let subContents = (try? FileManager.default.contentsOfDirectory(
@@ -1165,17 +1176,32 @@ class PlayerViewModel {
     // MARK: - Import & Analysis
 
     /// Builds a TrackAsset, attaching title / artist / album name from the .ca playlist
-    /// when the audio file has a matching entry. Falls back to filename parsing otherwise.
-    private func makeTrackAsset(from url: URL, playlist: CaPlaylist?) -> TrackAsset {
+    /// when the audio file has a matching entry. Falls back to .lrc metadata tags,
+    /// then to filename parsing.
+    private func makeTrackAsset(from url: URL, playlist: CaPlaylist?, playlistFolder: URL? = nil) -> TrackAsset {
         var track = TrackAsset(url: url)
-        guard let playlist else { return track }
-        if let album = CaParser.albumInfo(for: url, playlist: playlist) {
-            track.albumName = album.name
+
+        // 1. Try .ca metadata
+        if let playlist {
+            if let album = CaParser.albumInfo(for: url, playlist: playlist) {
+                track.albumName = album.name
+            }
+            if let info = CaParser.trackInfo(for: url, playlist: playlist) {
+                track.title = info.title
+                track.artist = info.artist
+            }
         }
-        if let info = CaParser.trackInfo(for: url, playlist: playlist) {
-            track.title = info.title
-            track.artist = info.artist
+
+        // 2. Fall back to .lrc metadata for any still-empty fields
+        if let folder = playlistFolder {
+            let meta = LrcParser.metadata(for: url, in: folder)
+            if !meta.isEmpty {
+                if track.title == nil || track.title!.isEmpty { track.title = meta.title }
+                if track.artist == nil || track.artist!.isEmpty { track.artist = meta.artist }
+                if track.albumName == nil || track.albumName!.isEmpty { track.albumName = meta.album }
+            }
         }
+
         return track
     }
 
@@ -1283,7 +1309,7 @@ class PlayerViewModel {
             // Validate off main thread — reads audio headers, not full files
             var validTracks: [TrackAsset] = []
             for rawURL in orderedFiles {
-                let rawTrack = self.makeTrackAsset(from: rawURL, playlist: parsedCa)
+                let rawTrack = self.makeTrackAsset(from: rawURL, playlist: parsedCa, playlistFolder: url)
                 do {
                     _ = try AudioHelpers.readAudio(url: rawTrack.url)
                     validTracks.append(rawTrack)
@@ -1804,7 +1830,7 @@ class PlayerViewModel {
         totalTrackCount = orderedFiles.count
         analyzedTrackCount = 0
 
-        let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlist: caPlaylist) }
+        let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlist: caPlaylist, playlistFolder: url) }
         mixQueue = MixQueue(
             tracks: tracks,
             transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))

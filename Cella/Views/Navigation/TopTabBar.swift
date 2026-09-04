@@ -837,8 +837,8 @@ struct NowPlayingBar: View {
                             .font(.system(size: 13, weight: .semibold, design: .rounded))
                             .foregroundStyle(theme.textPrimary)
                             .lineLimit(1)
-                        if let artist = track.artistName {
-                            Text(artist)
+                        if let artist = track.artistName, !track.displayArtist.isEmpty {
+                            Text(track.displayArtist)
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
