@@ -468,13 +468,19 @@ struct AlbumPill: View {
             .frame(width: 26, height: 26)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Playing from")
+                Text("Picked from")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
                 Text(viewModel.albumPillTitle)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(theme.textPrimary)
                     .fixedSize(horizontal: true, vertical: false)
+                if !viewModel.albumPillSourceName.isEmpty {
+                    Text("\(viewModel.albumPillSourceName).cella")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(theme.dotActive.opacity(0.8))
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
 
             if viewModel.albumPillHiSoVisible {

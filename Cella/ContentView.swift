@@ -8,10 +8,13 @@
 import SwiftUI
 
 struct ContentView: View {
-    @State private var selectedTab: AppTab = .cella
+    @State private var selectedTab: AppTab = .cluster
     @State private var savedVolume: Float = 1.0
     @State private var cellaVolume: Float = 1.0
     @State private var viewModel = PlayerViewModel()
+    @State private var detailPack: CellaPack?
+    @State private var displayedPack: CellaPack?
+    @State private var pendingLRCAudioURL: URL?
     @FocusState private var isFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
@@ -58,20 +61,67 @@ struct ContentView: View {
                 Group {
                     switch selectedTab {
                     case .cluster:
-                        ClusterView()
+                        ClusterView(viewModel: viewModel, onPlay: {
+                            selectedTab = .cella
+                        }, onOpenDetail: { pack in
+                            displayedPack = pack
+                            detailPack = pack
+                        }, onOpenLRC: { audioURL in
+                            pendingLRCAudioURL = audioURL
+                            selectedTab = .enhancedLRC
+                        })
                     case .motions:
                         CellaMotionsView()
                     case .cella:
                         CellaView(viewModel: viewModel)
                     case .enhancedLRC:
-                        EnhancedLRCView()
+                        EnhancedLRCView(pendingAudioURL: $pendingLRCAudioURL)
                     case .config:
                         ConfigView(viewModel: viewModel)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+            // Detail overlay — above nav bar, tap outside to dismiss.
+            Color.black.opacity(detailPack != nil ? 0.55 : 0)
+                .ignoresSafeArea()
+                .allowsHitTesting(detailPack != nil)
+                .onTapGesture {
+                    detailPack = nil
+                }
+
+            PackDetailView(
+                pack: displayedPack ?? CellaPack(url: URL(fileURLWithPath: ""), type: .openCella, name: "", coverURLs: [], albumCount: 0, trackCount: 0),
+                viewModel: viewModel,
+                onPlay: { startFile in
+                    if let detailPack {
+                        selectedTab = .cella
+                        viewModel.importViaOpenMix(url: detailPack.url, startFileName: startFile)
+                    }
+                    detailPack = nil
+                },
+                onAutoMix: { startFile, _ in
+                    if let detailPack {
+                        selectedTab = .cella
+                        viewModel.importViaOpenMix(url: detailPack.url, startFileName: startFile, blend: true)
+                    }
+                    detailPack = nil
+                },
+                onClose: {
+                    detailPack = nil
+                },
+                onOpenLRC: { audioURL in
+                    pendingLRCAudioURL = audioURL
+                    selectedTab = .enhancedLRC
+                    detailPack = nil
+                }
+            )
+            .environment(\.theme, theme)
+            .opacity(detailPack != nil ? 1 : 0)
+            .allowsHitTesting(detailPack != nil)
         }
+        .animation(.smooth, value: detailPack != nil)
         .animation(.smooth, value: effectiveColorScheme)
         .animation(.smooth, value: themeOverride)
         .environment(\.theme, theme)

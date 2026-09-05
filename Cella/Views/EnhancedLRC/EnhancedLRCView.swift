@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 
 struct EnhancedLRCView: View {
     @StateObject private var viewModel = EnhancedLRCViewModel()
+    @Binding var pendingAudioURL: URL?
     @Environment(\.theme) private var theme
     @State private var keyMonitor: Any?
 
@@ -54,6 +55,15 @@ struct EnhancedLRCView: View {
                 NSEvent.removeMonitor(keyMonitor)
             }
             keyMonitor = nil
+        }
+        .onChange(of: pendingAudioURL?.path) { _, newPath in
+            guard let newPath,
+                  pendingAudioURL != nil else { return }
+            let url = URL(fileURLWithPath: newPath)
+            pendingAudioURL = nil
+            Task {
+                await viewModel.loadAudio(from: url)
+            }
         }
     }
 
@@ -469,5 +479,5 @@ struct LrcLineRow: View {
 }
 
 #Preview {
-    EnhancedLRCView()
+    EnhancedLRCView(pendingAudioURL: .constant(nil))
 }

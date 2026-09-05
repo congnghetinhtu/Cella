@@ -48,6 +48,19 @@ class PlayerViewModel {
     private let openMixBridge = OpenMixBridge()
     private var streamEngine: StreamAudioEngine?
     private var openMixImportURL: URL?
+    private var requestedStartFileName: String?
+
+    /// Blend (smooth "OpenMix to") state. When set, the currently playing track
+    /// keeps playing while the target pack is analyzed; on analysis completion we
+    /// crossfade the current track straight into the requested track.
+    private var blendSourceTrack: TrackAsset?
+    private var blendPending = false
+    /// When a blend-mode import is active, the OpenMix stream must not take over
+    /// playback — the realtime engine already blends into the requested track and
+    /// keeps transitioning serially. Letting the stream kick in later (analysis
+    /// completes in the background) would REPLAY the just-blended song from its
+    /// start on a second playback engine.
+    private var blendStreamingDisabled = false
 
     // MARK: - Engine Log
 
@@ -66,6 +79,7 @@ class PlayerViewModel {
     // Album pill state — owned by the view model so it survives tab switches.
     var albumPillVisible: Bool = false
     var albumPillTitle: String = ""
+    var albumPillSourceName: String = ""
     var albumPillCover: NSImage?
     var albumPillHiRes: Bool = false
     var albumPillHiSoVisible: Bool = false
@@ -405,8 +419,15 @@ class PlayerViewModel {
 
     /// Crossfade (OpenMix) from the current track straight to a chosen album song.
     func crossfadeToTrack(at index: Int) {
-        guard var queue = mixQueue, index >= 0, index < queue.tracks.count else { return }
-        guard index != queue.currentIndex, let outgoing = queue.currentTrack else { return }
+        guard var queue = mixQueue, index >= 0, index < queue.tracks.count else {
+            print("[PlayerViewModel] crossfadeToTrack GUARD FAIL idx=\(index)")
+            return
+        }
+        guard index != queue.currentIndex, let outgoing = queue.currentTrack else {
+            print("[PlayerViewModel] crossfadeToTrack SAME/NO-TRACK idx=\(index) current=\(queue.currentIndex)")
+            return
+        }
+        print("[PlayerViewModel] crossfadeToTrack → \(queue.tracks[index].fileName) (idx \(index), current \(queue.currentIndex))")
         cancelPendingMoodTransition()
 
         let incoming = queue.tracks[index]
@@ -417,6 +438,7 @@ class PlayerViewModel {
             incoming: incoming
         )
 
+        print("[PlayerViewModel] CROSSFADE-SRC=crossfadeToTrack out=\(outgoing.fileName) in=\(incoming.fileName)")
         let started = audioEngine.crossfadeToNext(
             outgoingURL: outgoing.url,
             incomingURL: incoming.url,
@@ -425,7 +447,10 @@ class PlayerViewModel {
             outgoingAnalysis: outgoing.analysis,
             incomingAnalysis: incoming.analysis
         )
-        guard started else { return }
+        guard started else {
+            print("[PlayerViewModel] crossfadeToTrack ENGINE REFUSED (crossfade in progress?)")
+            return
+        }
 
         queue.currentIndex = index
         mixQueue = queue
@@ -1062,6 +1087,8 @@ class PlayerViewModel {
         case .playing:
             playerState = .paused
             audioEngine.pause()
+            streamEngine?.pause()
+            stopVideoPlayback()
             stopAnimationLoop()
             syncPlaybackTime()
 
@@ -1069,6 +1096,10 @@ class PlayerViewModel {
             guard let queue = mixQueue, !queue.isEmpty else { return }
             playerState = .playing
             audioEngine.play()
+            if let stream = streamEngine, stream.isPlaying {
+                stream.resume()
+            }
+            startVideoPlayback()
             syncPlaybackTime()
             // Apply any pending mood immediately on resume
             if pendingMood != nil {
@@ -1114,6 +1145,7 @@ class PlayerViewModel {
                 incoming: nextTrack
             )
 
+            print("[PlayerViewModel] CROSSFADE-SRC=skipForward out=\(outgoingTrack.fileName) in=\(nextTrack.fileName)")
             let started = audioEngine.crossfadeToNext(
                 outgoingURL: outgoingTrack.url,
                 incomingURL: nextTrack.url,
@@ -1215,6 +1247,7 @@ class PlayerViewModel {
         importError = nil
         analysisProgress = 0
         playlistFolderURL = url
+        albumPillSourceName = url.deletingPathExtension().lastPathComponent
         artistImages = []
         currentArtistImage = nil
         loadArtistImages(from: url)
@@ -1452,10 +1485,87 @@ class PlayerViewModel {
         } // Task.detached
     }
 
+    // MARK: - Blend ("OpenMix to")
+
+    /// Crossfades the still-playing source track straight into the requested
+    /// target track (queued by `importViaOpenMix(blend: true)`).
+    private func blendIntoRequested() {
+        guard blendPending else { return }
+        blendPending = false
+        guard let source = blendSourceTrack,
+              var queue = mixQueue,
+              let incoming = queue.currentTrack else {
+            // Nothing to blend from — hard-switch into the target.
+            if let fallback = mixQueue?.currentTrack {
+                try? loadTrackAndRestore(
+                    url: fallback.url,
+                    barTimestamps: fallback.analysis?.barTimestamps ?? []
+                )
+                audioEngine.play()
+            }
+            playerState = .playing
+            startAnimationLoop()
+            return
+        }
+        blendSourceTrack = nil
+        let index = queue.currentIndex
+        print("[PlayerViewModel] CROSSFADE-SRC=blendIntoRequested out=\(source.fileName) in=\(incoming.fileName) idx=\(index)")
+
+        playerState = .autoMix
+        let params = crossfader.computeCrossfadeParams(
+            outgoing: source,
+            incoming: incoming
+        )
+        let started = audioEngine.crossfadeToNext(
+            outgoingURL: source.url,
+            incomingURL: incoming.url,
+            crossfader: crossfader,
+            params: params,
+            outgoingAnalysis: source.analysis,
+            incomingAnalysis: incoming.analysis
+        )
+        guard started else {
+            log("Blend refused by engine — hard switch to \(incoming.fileName)")
+            try? loadTrackAndRestore(
+                url: incoming.url,
+                barTimestamps: incoming.analysis?.barTimestamps ?? []
+            )
+            audioEngine.play()
+            playerState = .playing
+            startAnimationLoop()
+            return
+        }
+
+        queue.currentIndex = index
+        mixQueue = queue
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+            guard let self else { return }
+            if self.playerState == .autoMix {
+                self.playerState = .playing
+                self.stopAnimationLoop()
+                self.startAnimationLoop()
+                self.startVideoPlayback()
+                self.log("Now playing: \(incoming.fileName)")
+                self.loadLyrics(for: self.mixQueue?.currentTrack?.url ?? incoming.url)
+            }
+        }
+
+        updateNowPlayingInfo()
+    }
+
     // MARK: - Track End Handling
 
     private func handleTrackEnd() {
         cancelPendingMoodTransition()
+
+        // If a blend into an "OpenMix to" target is pending, the old track just
+        // ended — crossfade into the requested track now.
+        if blendPending {
+            blendIntoRequested()
+            return
+        }
+
         guard var queue = mixQueue, !queue.isEmpty else {
             print("[PlayerViewModel] handleTrackEnd: no queue or empty")
             return
@@ -1463,6 +1573,7 @@ class PlayerViewModel {
 
         let currentName = queue.currentTrack?.fileName ?? "?"
         log("Track ended: \(currentName)")
+        print("[PlayerViewModel] CROSSFADE-SRC=handleTrackEnd blendPending=\(blendPending) track=\(currentName)")
 
         // Crossfade to next track automatically
         if let nextTrack = queue.nextTrack,
@@ -1704,21 +1815,34 @@ class PlayerViewModel {
 
     // MARK: - OpenMix Streaming Integration
 
-    func importViaOpenMix(url: URL) {
+    func importViaOpenMix(url: URL, startFileName: String? = nil, blend: Bool = false) {
         // Only accept .cella folders
         guard url.pathExtension.lowercased() == "cella" else {
             importError = "Not a .cella playlist. Rename folder with .cella extension."
             return
         }
 
+        // Capture the source track for a smooth blend into the requested song.
+        blendStreamingDisabled = blend
+        if blend, let source = mixQueue?.currentTrack {
+            blendSourceTrack = source
+            blendPending = true
+        } else {
+            blendSourceTrack = nil
+            blendPending = false
+        }
+
         // Stop any existing playback and clear old state
         cancelPendingMoodTransition()
-        stopAnimationLoop()
-        audioEngine.stop()
+        if !blend {
+            stopAnimationLoop()
+            audioEngine.stop()
+        }
         openMixBridge.stop()
         streamEngine?.stop()
         streamEngine = nil
         playlistFolderURL = url
+        albumPillSourceName = url.deletingPathExtension().lastPathComponent
         artistImages = []
         currentArtistImage = nil
         loadArtistImages(from: url)
@@ -1726,8 +1850,9 @@ class PlayerViewModel {
         importError = nil
         analysisProgress = 0
         openMixImportURL = url
+        requestedStartFileName = startFileName
 
-        print("[PlayerViewModel] Import via OpenMix: \(url.path)")
+        print("[PlayerViewModel] Import via OpenMix: \(url.path) blend=\(blend) blendPending=\(blendPending) thread=\(Thread.isMainThread ? "main" : "bg")")
 
         let audioExtensions = ["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"]
         let fileManager = FileManager.default
@@ -1831,23 +1956,47 @@ class PlayerViewModel {
         analyzedTrackCount = 0
 
         let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlist: caPlaylist, playlistFolder: url) }
+        var startIndex = 0
+        if let requestedStartFileName {
+            // Match by full filename (with extension) or by base name.
+            let base = URL(fileURLWithPath: requestedStartFileName)
+                .deletingPathExtension().lastPathComponent
+            if let match = tracks.firstIndex(where: {
+                $0.url.lastPathComponent == requestedStartFileName || $0.fileName == base
+            }) {
+                startIndex = match
+            }
+            print("[PlayerViewModel] startFileName='\(requestedStartFileName)' base='\(base)' → startIndex=\(startIndex) of \(tracks.count)")
+        }
+        requestedStartFileName = nil
+
         mixQueue = MixQueue(
             tracks: tracks,
-            transitions: [nil] + Array(repeating: nil, count: max(0, tracks.count - 1))
+            transitions: Array(repeating: nil, count: max(0, tracks.count - 1)),
+            currentIndex: startIndex
         )
 
         // Play first track immediately while OpenMix analyzes
-        do {
-            try loadTrackAndRestore(
-                url: tracks[0].url,
-                barTimestamps: tracks[0].analysis?.barTimestamps ?? []
-            )
-            audioEngine.play()
-            playerState = .playing
-            startAnimationLoop()
-            print("[PlayerViewModel] Now playing: \(tracks[0].fileName)")
-        } catch {
-            print("[PlayerViewModel] Failed to start playback: \(error)")
+        if !blend {
+            do {
+                try loadTrackAndRestore(
+                    url: tracks[startIndex].url,
+                    barTimestamps: tracks[startIndex].analysis?.barTimestamps ?? []
+                )
+                audioEngine.play()
+                playerState = .playing
+                startAnimationLoop()
+                startVideoPlayback()
+                print("[PlayerViewModel] Now playing: \(tracks[startIndex].fileName)")
+            } catch {
+                print("[PlayerViewModel] Failed to start playback: \(error)")
+            }
+        } else {
+            print("[PlayerViewModel] Blend mode: keeping current track, target '\(tracks[startIndex].fileName)' (idx \(startIndex)) when analysis completes")
+            // Blend immediately with the real-time engine — the OpenMix stream
+            // still analyzes in the background and takes over transitions as its
+            // chunks arrive. Do not block the transition on a full-pack analysis.
+            blendIntoRequested()
         }
 
         openMixBridge.onStatus = { [weak self] status in
@@ -1857,7 +2006,7 @@ class PlayerViewModel {
             self?.handleOpenMixChunk(data)
         }
 
-        streamEngine = StreamAudioEngine()
+        streamEngine = blend ? nil : StreamAudioEngine()
 
         openMixBridge.start()
         openMixBridge.analyze(tracks: audioFiles)
@@ -1872,7 +2021,9 @@ class PlayerViewModel {
             analyzedTrackCount = current
             totalTrackCount = total
             analysisProgress = Double(current) / Double(total)
-            playerState = .analyzing(progress: analysisProgress)
+            if !blendStreamingDisabled {
+                playerState = .analyzing(progress: analysisProgress)
+            }
             log("Analyzing \(current)/\(total): \(file)")
 
         case .mixingProgress(let current, let total, let file):
@@ -1880,7 +2031,7 @@ class PlayerViewModel {
 
         case .chunkReady(let index, let bytes, let progress):
             log("Chunk \(index) ready (\(bytes)B, \(Int(progress * 100))%)")
-            if index == 2 {
+            if !blendStreamingDisabled, index == 2 {
                 playerState = .playing
                 streamEngine?.startPlayback()
             }
@@ -1888,8 +2039,27 @@ class PlayerViewModel {
         case .analysisDone(let tracks):
             log("Analysis done: \(tracks.count) tracks")
             applyOpenMixAnalysis(tracks)
-            // Now trigger mix with auto-order
-            let order = Array(0..<tracks.count)
+            guard !blendStreamingDisabled else {
+                // Blend-mode imports blended synchronously at import time; a late
+                // analysisDone from a PREVIOUS import must never blend again —
+                // blendPending may already be true for the NEWER import, and this
+                // stale event would replay the old track on the old queue.
+                print("[PlayerViewModel] ANALYSIS-DONE skip (blend mode) — no early blend")
+                if case .analyzing = playerState {
+                    playerState = .playing
+                }
+                return
+            }
+            // Smooth blend into the requested song, if that path was chosen.
+            if blendPending {
+                blendIntoRequested()
+            }
+            // Stream the mix starting at the current position (0 for full normal
+            // playback, requested index for "OpenMix to" / per-track starts).
+            let currentIndex = mixQueue?.currentIndex ?? 0
+            let order = currentIndex < tracks.count
+                ? Array(currentIndex..<tracks.count)
+                : Array(0..<tracks.count)
             openMixBridge.mix(order: order)
 
         case .done(let duration):

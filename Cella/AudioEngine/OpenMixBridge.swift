@@ -114,6 +114,10 @@ class OpenMixBridge {
             proc.terminate()
             // Wait up to 2s for process to actually die
             proc.waitUntilExit()
+        } else {
+            // Process already gone — clear the pipes so stale writes don't SIGPIPE.
+            stdinPipe?.fileHandleForWriting.closeFile()
+            stdinPipe = nil
         }
         cleanup()
     }
@@ -204,6 +208,7 @@ class OpenMixBridge {
     // MARK: - Protocol
 
     private func sendCommand(_ command: [String: Any]) {
+        guard let proc = process, proc.isRunning else { return }
         guard let data = try? JSONSerialization.data(withJSONObject: command),
               let line = (String(data: data, encoding: .utf8)! + "\n").data(using: .utf8) else {
             return

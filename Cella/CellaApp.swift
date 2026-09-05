@@ -6,9 +6,16 @@
 //
 
 import SwiftUI
+import Darwin
 
 @main
 struct CellaApp: App {
+    init() {
+        // Writing to a pipe whose reader (e.g. the OpenMix Python subprocess)
+        // has just exited raises SIGPIPE, which terminates the app by default.
+        ignoreSIGPIPE()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -17,6 +24,11 @@ struct CellaApp: App {
                 }
         }
         .windowStyle(.hiddenTitleBar)
+    }
+
+    /// Ignore SIGPIPE so a dead IPC pipe can't crash the app.
+    private func ignoreSIGPIPE() {
+        signal(SIGPIPE, SIG_IGN)
     }
 
     // MARK: - Fullscreen

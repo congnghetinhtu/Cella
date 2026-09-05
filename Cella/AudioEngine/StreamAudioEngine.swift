@@ -14,9 +14,15 @@ class StreamAudioEngine {
 
     private let format: AVAudioFormat
 
-    private var isPlaying = false
+    private var isPlayingState = false
     private var scheduledBuffers: [AVAudioPCMBuffer] = []
     private var bufferLock = NSLock()
+
+    var isPlaying: Bool {
+        bufferLock.lock()
+        defer { bufferLock.unlock() }
+        return isPlayingState
+    }
 
     private var totalSamplesReceived: Int = 0
     private var samplesPlayed: Int = 0
@@ -27,7 +33,7 @@ class StreamAudioEngine {
     var currentTime: TimeInterval {
         bufferLock.lock()
         defer { bufferLock.unlock() }
-        guard let start = playStartTime, isPlaying else { return 0 }
+        guard let start = playStartTime, isPlayingState else { return 0 }
         let elapsed = -start.timeIntervalSinceNow
         let sampleRate = format.sampleRate
         return Double(samplesPlayed) / sampleRate + elapsed
@@ -108,7 +114,7 @@ class StreamAudioEngine {
         bufferLock.unlock()
 
         bufferLock.lock()
-        let shouldStart = !isPlaying && scheduledBuffers.count >= minBufferAhead
+        let shouldStart = !isPlayingState && scheduledBuffers.count >= minBufferAhead
         bufferLock.unlock()
         if shouldStart {
             startPlayback()
@@ -119,24 +125,32 @@ class StreamAudioEngine {
 
     func startPlayback() {
         bufferLock.lock()
-        guard !isPlaying else { bufferLock.unlock(); return }
-        isPlaying = true
+        guard !isPlayingState else { bufferLock.unlock(); return }
+        isPlayingState = true
         playStartTime = Date()
         bufferLock.unlock()
         playerNode.play()
         print("[StreamAudioEngine] Playback started")
     }
 
+    /// Resume after a pause (keeps playback position).
+    func resume() {
+        playerNode.play()
+        isPlayingState = true
+        print("[StreamAudioEngine] Playback resumed")
+    }
+
     func pause() {
         playerNode.pause()
-        isPlaying = false
+        isPlayingState = false
+        print("[StreamAudioEngine] Playback paused")
     }
 
     func stop() {
         playerNode.stop()
         engine.stop()
         bufferLock.lock()
-        isPlaying = false
+        isPlayingState = false
         scheduledBuffers.removeAll()
         totalSamplesReceived = 0
         samplesPlayed = 0
