@@ -4,7 +4,6 @@ import AppKit
 struct ConfigView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
-    @AppStorage("appearanceMode") private var appearanceMode: String = "system"
     @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
     @AppStorage("displayMode") private var displayMode: String = "matrix"
 
@@ -20,6 +19,7 @@ struct ConfigView: View {
         ScrollView {
             VStack(spacing: gridSpacing) {
                 libraryCard
+                    .transition(.move(edge: .top).combined(with: .opacity))
 
                 if viewModel.hasTracks {
                     HStack(alignment: .top, spacing: gridSpacing) {
@@ -40,12 +40,15 @@ struct ConfigView: View {
 
                 if let error = viewModel.importError {
                     errorCard(error)
+                        .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.97)))
                 }
             }
             .padding(.horizontal, 40)
             .padding(.vertical, 28)
             .frame(maxWidth: 800)
             .frame(maxWidth: .infinity)
+            .animation(.smooth, value: viewModel.hasTracks)
+            .animation(.smooth, value: viewModel.importError)
         }
     }
 
@@ -106,6 +109,17 @@ struct ConfigView: View {
                 Circle()
                     .fill(viewModel.playerState.isPlaying ? Color.green : theme.textSecondary)
                     .frame(width: 8, height: 8)
+                    .overlay(
+                        Circle()
+                            .fill(Color.green.opacity(0.4))
+                            .frame(width: 8, height: 8)
+                            .scaleEffect(viewModel.playerState.isPlaying ? 1.8 : 1.0)
+                            .opacity(viewModel.playerState.isPlaying ? 0 : 1)
+                            .animation(
+                                .easeOut(duration: 1.2).repeatForever(autoreverses: false),
+                                value: viewModel.playerState.isPlaying
+                            )
+                    )
                 Text(stateLabel)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
@@ -188,28 +202,6 @@ struct ConfigView: View {
                 Text("Appearance")
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textPrimary)
-            }
-
-            HStack(spacing: 6) {
-                ForEach([("system", "System"), ("dark", "Dark")], id: \.0) { id, label in
-                    let isSelected = appearanceMode == id
-                    Button {
-                        withAnimation(.smooth) {
-                            appearanceMode = id
-                        }
-                    } label: {
-                        Text(label)
-                            .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                            .foregroundStyle(isSelected ? .white : theme.textSecondary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
             }
 
             HStack(spacing: 6) {
@@ -357,6 +349,7 @@ struct ConfigView: View {
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
                 .foregroundStyle(accent ?? theme.textPrimary)
+                .contentTransition(.numericText())
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(theme.textSecondary)

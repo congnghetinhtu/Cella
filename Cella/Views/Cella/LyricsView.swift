@@ -22,8 +22,6 @@ struct LyricsView: View {
     private let lineHeight: CGFloat = 42
     private let visibleLines: CGFloat = 5
 
-    // Non-placeholder lyric lines (skips "..." so instrumental gaps don't
-    // become scroll targets / don't delay the next real line).
     private var displayLyrics: [LrcLine] {
         lyrics
     }
@@ -64,12 +62,14 @@ struct LyricsView: View {
                     currentLyricsContent(geo: geo, time: t)
                         .offset(x: isTransitioning ? -geo.size.width * 0.6 : 0)
                         .opacity(isTransitioning ? 0.0 : 1.0)
+                        .blur(radius: isTransitioning ? 4 : 0)
                         .animation(.lyricsSpring, value: isTransitioning)
 
                     if isTransitioning && !nextLyrics.isEmpty {
                         nextLyricsContent(geo: geo, time: t)
                             .offset(x: isTransitioning ? 0 : geo.size.width * 0.6)
                             .opacity(isTransitioning ? 1.0 : 0.0)
+                            .blur(radius: isTransitioning ? 0 : 4)
                             .animation(.lyricsSpring, value: isTransitioning)
                     }
                 }
@@ -83,12 +83,12 @@ struct LyricsView: View {
 
     private func floatX(_ index: Int, time: Double) -> CGFloat {
         let s = Double(index) * 1.7 + 0.3
-        return CGFloat(sin(time * 0.3 + s) * 1.5 + sin(time * 0.15 + s * 2.1) * 0.8)
+        return CGFloat(sin(time * 0.3 + s) * 2.0 + sin(time * 0.15 + s * 2.1) * 1.0)
     }
 
     private func floatY(_ index: Int, time: Double) -> CGFloat {
         let s = Double(index) * 2.3 + 1.1
-        return CGFloat(cos(time * 0.25 + s) * 1.2 + cos(time * 0.12 + s * 1.9) * 0.6)
+        return CGFloat(cos(time * 0.25 + s) * 1.6 + cos(time * 0.12 + s * 1.9) * 0.8)
     }
 
     // MARK: - Current Lyrics
@@ -112,10 +112,12 @@ struct LyricsView: View {
                 let distFromCenter = abs(CGFloat(index - currentIndex) * lineHeight)
                 let normalizedDist = min(distFromCenter / (lineHeight * 3.0), 1.0)
                 let isCurrent = index == currentIndex
+                let isPast = index < currentIndex
 
                 let opacity = isCurrent ? 1.0 : max(0.0, 1.0 - normalizedDist * 1.5)
                 let scale: CGFloat = isCurrent ? 1.0 : max(0.85, 1.0 - normalizedDist * 0.15)
                 let blur: CGFloat = isCurrent ? 0 : min(3, normalizedDist * 3)
+                let verticalSqueeze: CGFloat = isPast ? 0.97 : 1.0
 
                 let revealClamped = min(max(revealProgress, 0), 1)
                 let revealPeak = sin(revealClamped * .pi)
@@ -136,7 +138,11 @@ struct LyricsView: View {
                         ))
                         .foregroundStyle(currentColor)
                         .opacity(opacity)
-                        .scaleEffect(scale + revealScale, anchor: .center)
+                        .scaleEffect(
+                            x: scale + revealScale,
+                            y: scale * verticalSqueeze + revealScale,
+                            anchor: .center
+                        )
                         .shadow(color: isCurrent ? glow : .clear, radius: CGFloat(revealPeak * 12))
                         .blur(radius: blur)
                         .lineLimit(1)

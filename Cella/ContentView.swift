@@ -18,23 +18,10 @@ struct ContentView: View {
     @FocusState private var isFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
-    @AppStorage("appearanceMode") private var appearanceMode: String = "system"
     @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
-    private var effectiveColorScheme: ColorScheme {
-        switch appearanceMode {
-        case "dark": return .dark
-        case "light": return .light
-        default: return colorScheme
-        }
-    }
-
     private var preferredScheme: ColorScheme? {
-        switch appearanceMode {
-        case "dark": return .dark
-        case "light": return .light
-        default: return nil
-        }
+        .dark
     }
 
     private var theme: Theme {
@@ -123,7 +110,6 @@ struct ContentView: View {
             .allowsHitTesting(detailPack != nil)
         }
         .animation(.smooth, value: detailPack != nil)
-        .animation(.smooth, value: effectiveColorScheme)
         .animation(.smooth, value: themeOverride)
         .environment(\.theme, theme)
         .preferredColorScheme(preferredScheme)

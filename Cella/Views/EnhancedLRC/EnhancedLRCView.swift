@@ -8,24 +8,30 @@ struct EnhancedLRCView: View {
     @Binding var pendingAudioURL: URL?
     @Environment(\.theme) private var theme
     @State private var keyMonitor: Any?
+    @State private var isLoading = false
+
+    private let sectionPadding = EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16)
+    private let contentPadding: CGFloat = 12
 
     var body: some View {
         VStack(spacing: 0) {
             headerBar
 
-            Divider().background(theme.textSecondary.opacity(0.2))
+            Divider().background(theme.textSecondary.opacity(0.15))
 
             if viewModel.currentTrackURL != nil {
                 playbackControls
-                Divider().background(theme.textSecondary.opacity(0.2))
+                Divider().background(theme.textSecondary.opacity(0.15))
             }
 
             if !viewModel.metadata.isEmpty && viewModel.currentTrackURL != nil {
                 metadataBar
-                Divider().background(theme.textSecondary.opacity(0.2))
+                Divider().background(theme.textSecondary.opacity(0.15))
             }
 
-            if viewModel.lines.isEmpty && viewModel.currentTrackURL == nil {
+            if isLoading {
+                loadingState
+            } else if viewModel.lines.isEmpty && viewModel.currentTrackURL == nil {
                 emptyState
             } else if viewModel.lines.isEmpty {
                 noLyricsState
@@ -39,11 +45,11 @@ struct EnhancedLRCView: View {
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
                 guard let viewModel, viewModel.currentTrackURL != nil else { return event }
-                if event.keyCode == 15 { // "R" — toggle recording
+                if event.keyCode == 15 {
                     viewModel.toggleRecording()
                     return nil
                 }
-                if viewModel.isRecording, event.keyCode == 46 { // "M" — mark line at current time
+                if viewModel.isRecording, event.keyCode == 46 {
                     viewModel.recordLine()
                     return nil
                 }
@@ -62,7 +68,9 @@ struct EnhancedLRCView: View {
             let url = URL(fileURLWithPath: newPath)
             pendingAudioURL = nil
             Task {
+                isLoading = true
                 await viewModel.loadAudio(from: url)
+                isLoading = false
             }
         }
     }
@@ -70,7 +78,7 @@ struct EnhancedLRCView: View {
     // MARK: - Header
 
     private var headerBar: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button {
                 openFilePicker()
             } label: {
@@ -88,18 +96,45 @@ struct EnhancedLRCView: View {
 
             Spacer()
 
+            if viewModel.isRecording {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 6, height: 6)
+                        .overlay(
+                            Circle()
+                                .fill(Color.red.opacity(0.4))
+                                .frame(width: 6, height: 6)
+                                .scaleEffect(2.0)
+                                .opacity(0)
+                                .animation(
+                                    .easeOut(duration: 1.0).repeatForever(autoreverses: false),
+                                    value: viewModel.isRecording
+                                )
+                        )
+                    Text("Recording")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.red)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.1))
+                .clipShape(Capsule())
+            }
+
             Button {
                 viewModel.toggleRecording()
             } label: {
                 Label(
-                    viewModel.isRecording ? "Recording — M to mark (R to stop)" : "Record LRC (R)",
-                    systemImage: viewModel.isRecording ? "record.circle.fill" : "record.circle"
+                    viewModel.isRecording ? "Stop (R)" : "Record (R)",
+                    systemImage: viewModel.isRecording ? "stop.circle.fill" : "record.circle"
                 )
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(viewModel.isRecording ? .red : theme.textPrimary)
             }
             .buttonStyle(.plain)
             .disabled(viewModel.currentTrackURL == nil)
+            .opacity(viewModel.currentTrackURL == nil ? 0.4 : 1.0)
 
             Button {
                 viewModel.saveLrc()
@@ -109,6 +144,7 @@ struct EnhancedLRCView: View {
             }
             .buttonStyle(.plain)
             .disabled(viewModel.currentTrackURL == nil)
+            .opacity(viewModel.currentTrackURL == nil ? 0.4 : 1.0)
 
             Button {
                 _ = viewModel.exportLrc()
@@ -117,16 +153,17 @@ struct EnhancedLRCView: View {
                     .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(.plain)
+            .disabled(viewModel.currentTrackURL == nil)
+            .opacity(viewModel.currentTrackURL == nil ? 0.4 : 1.0)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(sectionPadding)
     }
 
     // MARK: - Playback Controls
 
     private var playbackControls: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 16) {
+        VStack(spacing: 12) {
+            HStack(spacing: 24) {
                 Button {
                     viewModel.seek(to: max(0, viewModel.currentTime - 5))
                 } label: {
@@ -152,10 +189,11 @@ struct EnhancedLRCView: View {
                 .buttonStyle(.plain)
             }
 
-            HStack {
+            HStack(spacing: 10) {
                 Text(formatTime(viewModel.currentTime))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
+                    .frame(width: 36, alignment: .trailing)
 
                 Slider(
                     value: Binding(
@@ -168,21 +206,23 @@ struct EnhancedLRCView: View {
                 Text(formatTime(audioDuration))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
+                    .frame(width: 36, alignment: .leading)
             }
 
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 Text("Speed")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(theme.textSecondary)
+                    .frame(width: 36, alignment: .trailing)
 
                 ForEach([Float(0.25), 0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
                     Button {
                         viewModel.setSpeed(speed)
                     } label: {
                         Text(speed == 1.0 ? "1x" : String(format: "%.2gx", speed))
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .font(.system(size: 10, weight: viewModel.playbackSpeed == speed ? .semibold : .medium, design: .monospaced))
                             .foregroundStyle(viewModel.playbackSpeed == speed ? .white : theme.textSecondary)
-                            .padding(.horizontal, 6)
+                            .frame(minWidth: 28)
                             .padding(.vertical, 3)
                             .background(
                                 viewModel.playbackSpeed == speed
@@ -196,14 +236,14 @@ struct EnhancedLRCView: View {
             }
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Metadata Bar
 
     private var metadataBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 if !viewModel.metadata.title.isEmpty {
                     metaTag(icon: "music.note", label: viewModel.metadata.title)
                 }
@@ -221,7 +261,7 @@ struct EnhancedLRCView: View {
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+            .padding(.vertical, 8)
         }
     }
 
@@ -233,6 +273,21 @@ struct EnhancedLRCView: View {
             .padding(.vertical, 4)
             .background(theme.textSecondary.opacity(0.1))
             .clipShape(Capsule())
+    }
+
+    // MARK: - Loading State
+
+    private var loadingState: some View {
+        VStack(spacing: 16) {
+            Spacer()
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(theme.dotActive)
+            Text("Loading audio...")
+                .font(.system(size: 13))
+                .foregroundStyle(theme.textSecondary)
+            Spacer()
+        }
     }
 
     // MARK: - Empty State
@@ -256,7 +311,8 @@ struct EnhancedLRCView: View {
                     .font(.system(size: 14, weight: .medium))
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
-                    .background(theme.tabSelectedBackground)
+                    .background(theme.dotActive)
+                    .foregroundStyle(.white)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -275,7 +331,7 @@ struct EnhancedLRCView: View {
             Text("No Lyrics Found")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
-            Text("No .lrc file found for this track.\nTap 'Add Line' to create lyrics from scratch.")
+            Text("No .lrc file found for this track.\nTap 'Add Line' below to create lyrics from scratch.")
                 .font(.system(size: 13))
                 .foregroundStyle(theme.textSecondary)
                 .multilineTextAlignment(.center)
@@ -305,6 +361,8 @@ struct EnhancedLRCView: View {
                         }
                     )
                     .id(line.id)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: contentPadding, bottom: 0, trailing: contentPadding))
                 }
                 .onMove { source, destination in
                     viewModel.moveLine(from: source, to: destination)
@@ -313,7 +371,7 @@ struct EnhancedLRCView: View {
             .listStyle(.plain)
             .onChange(of: viewModel.currentLineIndex) { _, newIndex in
                 if newIndex >= 0, newIndex < viewModel.lines.count {
-                    withAnimation {
+                    withAnimation(.easeInOut(duration: 0.3)) {
                         proxy.scrollTo(viewModel.lines[newIndex].id, anchor: .center)
                     }
                 }
@@ -324,7 +382,7 @@ struct EnhancedLRCView: View {
     // MARK: - Bottom Bar
 
     private var bottomBar: some View {
-        HStack {
+        HStack(spacing: 12) {
             Button {
                 viewModel.addLine()
             } label: {
@@ -335,6 +393,10 @@ struct EnhancedLRCView: View {
 
             Spacer()
 
+            Text("\(viewModel.lineCount) lines")
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(theme.textSecondary)
+
             Button {
                 viewModel.undo()
             } label: {
@@ -343,22 +405,18 @@ struct EnhancedLRCView: View {
             }
             .buttonStyle(.plain)
             .disabled(!viewModel.canUndo)
-
-            Text("\(viewModel.lineCount) lines")
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(theme.textSecondary)
+            .opacity(viewModel.canUndo ? 1.0 : 0.4)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(sectionPadding)
         .background(theme.appBackground)
     }
 
     // MARK: - Helpers
 
     private var audioDuration: TimeInterval {
-        guard let url = viewModel.currentTrackURL,
-              let player = try? AVAudioPlayer(contentsOf: url) else { return 0 }
-        return player.duration
+        guard let url = viewModel.currentTrackURL else { return 0 }
+        let asset = AVURLAsset(url: url)
+        return CMTimeGetSeconds(asset.duration)
     }
 
     private func openFilePicker() {
@@ -373,13 +431,10 @@ struct EnhancedLRCView: View {
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
-        print("[EnhancedLRC] Selected audio URL: \(url)")
-        print("[EnhancedLRC] Path: \(url.path)")
-        print("[EnhancedLRC] Deleting last path: \(url.deletingLastPathComponent().path)")
-
         Task {
+            isLoading = true
             await viewModel.loadAudio(from: url)
-            print("[EnhancedLRC] After load - trackName: \(viewModel.trackName), lines: \(viewModel.lines.count)")
+            isLoading = false
         }
     }
 
@@ -416,7 +471,7 @@ struct LrcLineRow: View {
                 onTimestampTap()
             } label: {
                 Text(line.timestampString)
-                    .font(.system(size: 12, design: .monospaced))
+                    .font(.system(size: 12, weight: isCurrent ? .medium : .regular, design: .monospaced))
                     .foregroundStyle(isRecordingTarget || isCurrent ? .white : theme.dotActive)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -444,7 +499,7 @@ struct LrcLineRow: View {
             } else {
                 Text(line.text.isEmpty ? "—" : line.text)
                     .font(.system(size: 14))
-                    .foregroundStyle(line.text.isEmpty ? theme.textSecondary : theme.textPrimary)
+                    .foregroundStyle(line.text.isEmpty ? theme.textSecondary.opacity(0.5) : theme.textPrimary)
                     .lineLimit(1)
                     .onTapGesture(count: 2) {
                         editText = line.text
@@ -458,6 +513,7 @@ struct LrcLineRow: View {
                 Circle()
                     .fill(theme.dotActive)
                     .frame(width: 6, height: 6)
+                    .transition(.scale.combined(with: .opacity))
             }
 
             Button {
@@ -475,6 +531,7 @@ struct LrcLineRow: View {
                 ? theme.dotActive.opacity(0.08)
                 : Color.clear
         )
+        .animation(.snappy, value: isCurrent)
     }
 }
 

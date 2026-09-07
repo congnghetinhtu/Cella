@@ -701,6 +701,7 @@ struct NowPlayingBar: View {
     @State private var lyricBadgeVisible = false
     @State private var lyricBadgeTask: Task<Void, Never>?
     @State private var qualityPillsTask: Task<Void, Never>?
+    @State private var isPlayPressed = false
 
     private var currentTrack: TrackAsset? { viewModel.mixQueue?.currentTrack }
     private var isPlaying: Bool { viewModel.playerState == .playing || viewModel.playerState == .autoMix }
@@ -908,9 +909,17 @@ struct NowPlayingBar: View {
         .animation(.smooth(duration: 0.4), value: lyrics)
         .animation(.snappy, value: viewModel.currentTime)
         .animation(.smooth(duration: 0.2), value: viewModel.currentVolume)
+        .scaleEffect(isPlayPressed ? 0.95 : 1.0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.6), value: isPlayPressed)
         .onTapGesture {
-            withAnimation(.snappy) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.65)) {
+                isPlayPressed = true
                 viewModel.togglePlayPause()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
+                    isPlayPressed = false
+                }
             }
         }
     }
@@ -1183,10 +1192,13 @@ struct TopTabBar: View {
     @Binding var selectedTab: AppTab
     @StateObject private var coordinator = ScrollCoordinator()
     @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @Namespace private var animation
     @State private var dragOffset: CGFloat = 0
     @State private var dragStartIndex: Int = 0
+
+    private let pillSpring: Animation = .spring(response: 0.35, dampingFraction: 0.65)
 
     var body: some View {
         HStack(spacing: 0) {
@@ -1217,11 +1229,11 @@ struct TopTabBar: View {
             guard let idx = tabs.firstIndex(of: selectedTab) else { return }
 
             if signal == 1, idx < tabs.count - 1 {
-                withAnimation(.snappy) {
+                withAnimation(reduceMotion ? .none : pillSpring) {
                     selectedTab = tabs[idx + 1]
                 }
             } else if signal == -1, idx > 0 {
-                withAnimation(.snappy) {
+                withAnimation(reduceMotion ? .none : pillSpring) {
                     selectedTab = tabs[idx - 1]
                 }
             }
@@ -1243,21 +1255,21 @@ struct TopTabBar: View {
                     if rawOffset < -threshold && dragStartIndex < tabs.count - 1 {
                         let nextTab = tabs[dragStartIndex + 1]
                         if selectedTab != nextTab {
-                            withAnimation(.snappy) {
+                            withAnimation(reduceMotion ? .none : pillSpring) {
                                 selectedTab = nextTab
                             }
                         }
                     } else if rawOffset > threshold && dragStartIndex > 0 {
                         let prevTab = tabs[dragStartIndex - 1]
                         if selectedTab != prevTab {
-                            withAnimation(.snappy) {
+                            withAnimation(reduceMotion ? .none : pillSpring) {
                                 selectedTab = prevTab
                             }
                         }
                     }
                 }
                 .onEnded { _ in
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    withAnimation(reduceMotion ? .none : .spring(response: 0.35, dampingFraction: 0.8)) {
                         dragOffset = 0
                     }
                 }
@@ -1270,27 +1282,84 @@ struct TopTabBar: View {
         let isActive = selectedTab == tab
         let tabCol = theme.tabColor(for: tabIndex)
         Button {
-            withAnimation(.snappy) {
+            withAnimation(reduceMotion ? .none : pillSpring) {
                 selectedTab = tab
             }
         } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(isActive ? tabCol : theme.tabUnselectedText)
-                .padding(.horizontal, 28)
-                .padding(.vertical, 10)
-                .background(
-                    ZStack {
-                        if isActive {
-                            Capsule()
-                                .fill(tabCol.opacity(0.2))
-                                .matchedGeometryEffect(id: "pill", in: animation)
-                                .offset(x: dragOffset)
-                        }
+            TabButtonLabel(
+                title: tab.rawValue,
+                color: tabCol,
+                isActive: isActive,
+                unselectedText: theme.tabUnselectedText
+            )
+            .padding(.horizontal, 28)
+            .padding(.vertical, 10)
+            .background(
+                ZStack {
+                    if isActive {
+                        Capsule()
+                            .fill(tabCol.opacity(0.2))
+                            .matchedGeometryEffect(id: "pill", in: animation)
+                            .offset(x: dragOffset)
                     }
-                )
-                .contentShape(Rectangle())
+                }
+            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Tab Button Label (hover + press feedback)
+
+private struct TabButtonLabel: View {
+    let title: String
+    let color: Color
+    let isActive: Bool
+    let unselectedText: Color
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isHovering = false
+    @State private var isPressed = false
+
+    private let joySpring: Animation = .spring(response: 0.35, dampingFraction: 0.65)
+    private let popSpring: Animation = .spring(response: 0.25, dampingFraction: 0.55)
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(foregroundColor)
+            .scaleEffect(isPressed ? 0.88 : (isHovering ? 1.06 : (isActive ? 1.02 : 1.0)))
+            .opacity(isHovering && !isActive ? 0.85 : 1.0)
+            .rotation3DEffect(.degrees(isPressed ? -2 : 0), axis: (x: 0, y: 1, z: 0))
+            .animation(reduceMotion ? .none : joySpring, value: isHovering)
+            .animation(reduceMotion ? .none : popSpring, value: isPressed)
+            .animation(reduceMotion ? .none : popSpring, value: isActive)
+            .onHover { hovering in
+                isHovering = hovering
+            }
+            .onContinuousHover { phase in
+                switch phase {
+                case .active:
+                    isHovering = true
+                case .ended:
+                    isHovering = false
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { _ in isPressed = true }
+                    .onEnded { _ in
+                        withAnimation(reduceMotion ? .none : popSpring) {
+                            isPressed = false
+                        }
+                    }
+            )
+    }
+
+    private var foregroundColor: Color {
+        if isActive { return color }
+        if isHovering { return color.opacity(0.6) }
+        return unselectedText
     }
 }
