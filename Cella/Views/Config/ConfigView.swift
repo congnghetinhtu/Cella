@@ -213,7 +213,7 @@ struct ConfigView: View {
             }
 
             HStack(spacing: 6) {
-                ForEach([("default", "Default"), ("seafoam", "Seafoam")], id: \.0) { id, label in
+                ForEach([("default", "Default"), ("seafoam", "Seafoam"), ("bipolar", "Colorful")], id: \.0) { id, label in
                     let isSelected = themeOverride == id
                     Button {
                         withAnimation(.smooth) {

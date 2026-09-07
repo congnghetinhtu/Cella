@@ -14,7 +14,7 @@ struct LineAnimationView: View {
     @State private var stars: [Star] = []
     @State private var starStartTime: Date = Date()
     private let segmentCount = 8
-    private let starCount = 4
+    private var starCount: Int { theme.isColorful ? 8 : 4 }
     private let displayLink = DisplayLink.shared
 
     private struct Star {
@@ -99,27 +99,36 @@ struct LineAnimationView: View {
         let _ = tick
         let energy = Double(viewModel.currentEnergyValue)
         let trailLen = 0.15 + energy * 0.15
-        let activeColor = theme.dotActive
+        let subsPerSeg = 6
         return Canvas { context, size in
             drawStars(context: context, size: size)
             for i in 0..<segmentCount {
-                let t = Double(i) / Double(segmentCount)
-                let nextT = Double(i + 1) / Double(segmentCount)
-                let segFrom = headPosition - trailLen + t * trailLen
-                let segTo = headPosition - trailLen + nextT * trailLen
-                let fade = 1.0 - pow(t, 1.5)
-                let opacity = 0.85 * fade
+                let t0 = Double(i) / Double(segmentCount)
+                let t1 = Double(i + 1) / Double(segmentCount)
+                let segFrom = headPosition - trailLen + t0 * trailLen
+                let segTo = headPosition - trailLen + t1 * trailLen
+                let baseFade = 1.0 - pow(t0, 1.5)
                 let lineWidth: CGFloat = i == segmentCount - 1 ? 4 : 2.5
-                let normFrom = positiveMod(segFrom)
-                let normTo = positiveMod(segTo)
-                if normFrom < normTo {
-                    let trimmed = path.trimmedPath(from: normFrom, to: normTo)
-                    context.stroke(trimmed, with: .color(activeColor.opacity(opacity)), lineWidth: lineWidth)
-                } else if normFrom > normTo {
-                    let tail = path.trimmedPath(from: normFrom, to: 1.0)
-                    context.stroke(tail, with: .color(activeColor.opacity(opacity)), lineWidth: lineWidth)
-                    let head = path.trimmedPath(from: 0, to: normTo)
-                    context.stroke(head, with: .color(activeColor.opacity(opacity * 0.7)), lineWidth: lineWidth)
+
+                for s in 0..<subsPerSeg {
+                    let st0 = t0 + (t1 - t0) * Double(s) / Double(subsPerSeg)
+                    let st1 = t0 + (t1 - t0) * Double(s + 1) / Double(subsPerSeg)
+                    let subFrom = headPosition - trailLen + st0 * trailLen
+                    let subTo = headPosition - trailLen + st1 * trailLen
+                    let subFade = 1.0 - pow(st0, 1.5)
+                    let opacity = 0.85 * subFade
+                    let subColor = theme.trailColorSmooth(at: st0)
+                    let normFrom = positiveMod(subFrom)
+                    let normTo = positiveMod(subTo)
+                    if normFrom < normTo {
+                        let trimmed = path.trimmedPath(from: normFrom, to: normTo)
+                        context.stroke(trimmed, with: .color(subColor.opacity(opacity)), lineWidth: lineWidth)
+                    } else if normFrom > normTo {
+                        let tail = path.trimmedPath(from: normFrom, to: 1.0)
+                        context.stroke(tail, with: .color(subColor.opacity(opacity)), lineWidth: lineWidth)
+                        let head = path.trimmedPath(from: 0, to: normTo)
+                        context.stroke(head, with: .color(subColor.opacity(opacity * 0.7)), lineWidth: lineWidth)
+                    }
                 }
             }
         }
@@ -175,7 +184,7 @@ struct LineAnimationView: View {
     private func drawStars(context: GraphicsContext, size: CGSize) {
         let elapsed = -starStartTime.timeIntervalSinceNow
         let w = size.width, h = size.height
-        for star in stars {
+        for (idx, star) in stars.enumerated() {
             let dx = cos(star.angle) * star.driftSpeed * elapsed
             let dy = sin(star.angle) * star.driftSpeed * elapsed
             let rawX = star.normX * w + dx
@@ -189,10 +198,10 @@ struct LineAnimationView: View {
             let soft = t * t * (3 - 2 * t)
             let twinkle = 0.3 + 0.7 * soft
             let finalOpacity = twinkle * edgeFade
+            let starColor = theme.trailColorCycle(at: Double(idx) / Double(starCount))
             let sp = Self.starPath(at: CGPoint(x: posX, y: posY), size: star.size)
-            context.fill(sp, with: .color(theme.dotActive.opacity(finalOpacity)))
-            // rounded stroke softens corners
-            context.stroke(sp, with: .color(theme.dotActive.opacity(finalOpacity)),
+            context.fill(sp, with: .color(starColor.opacity(finalOpacity)))
+            context.stroke(sp, with: .color(starColor.opacity(finalOpacity)),
                           style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
         }
     }

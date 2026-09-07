@@ -271,6 +271,11 @@ struct ClusterView: View {
                 library = ClusterLibrary.scan(URL(fileURLWithPath: libraryPath))
             }
             if library == nil, autoLoadDefault() {}
+            // Refresh cache counts in case analysis ran while away
+            if var lib = library {
+                lib.refreshCacheCounts()
+                library = lib
+            }
         }
     }
 
@@ -387,6 +392,16 @@ struct ClusterView: View {
                         .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(theme.textSecondary)
                     Spacer()
+                    if pack.cachedTrackCount > 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(theme.dotActive)
+                            Text("\(pack.cachedTrackCount)/\(pack.trackCount)")
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(theme.dotActive)
+                        }
+                    }
                     Image(systemName: "chevron.right.circle.fill")
                         .font(.system(size: 15))
                         .foregroundStyle(theme.textSecondary.opacity(0.6))
@@ -524,7 +539,9 @@ struct ClusterView: View {
     private func playPack(_ pack: CellaPack) {
         guard let viewModel else { return }
         loadingPackURL = pack.url
-        viewModel.importViaOpenMix(url: pack.url)
+        // Pass first track so background cache only analyzes that album
+        let firstTrack = ClusterLibrary.albums(in: pack.url).first?.tracks.first?.file
+        viewModel.importViaOpenMix(url: pack.url, startFileName: firstTrack)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             loadingPackURL = nil
         }
@@ -709,9 +726,21 @@ struct PackDetailView: View {
                                 .foregroundStyle(theme.textSecondary)
                                 .lineLimit(1)
                         }
-                        Text("\(album.trackCount) tracks")
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.textSecondary.opacity(0.7))
+                        HStack(spacing: 6) {
+                            Text("\(album.trackCount) tracks")
+                                .font(.system(size: 11))
+                                .foregroundStyle(theme.textSecondary.opacity(0.7))
+                            if album.cachedTrackCount > 0 {
+                                Text("·")
+                                    .foregroundStyle(theme.textSecondary.opacity(0.5))
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(theme.dotActive)
+                                Text("\(album.cachedTrackCount)/\(album.trackCount)")
+                                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                                    .foregroundStyle(theme.dotActive)
+                            }
+                        }
                     }
 
                     Spacer(minLength: 0)

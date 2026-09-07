@@ -40,6 +40,7 @@ struct CellaPack: Identifiable {
     var coverURLs: [URL]
     let albumCount: Int
     let trackCount: Int
+    var cachedTrackCount: Int
 }
 
 /// A single track inside a Cella album.
@@ -58,6 +59,7 @@ struct CellaAlbum: Identifiable {
     let artist: String?
     let coverURL: URL?
     let tracks: [CellaTrack]
+    let cachedTrackCount: Int
 
     var trackCount: Int { tracks.count }
 }
@@ -65,7 +67,14 @@ struct CellaAlbum: Identifiable {
 /// Scans a .cluster folder for .cella packs and summarizes their contents.
 struct ClusterLibrary {
     let url: URL
-    let packs: [CellaPack]
+    var packs: [CellaPack]
+
+    /// Re-scans .cellax cache counts for all packs.
+    mutating func refreshCacheCounts() {
+        for i in packs.indices {
+            packs[i].cachedTrackCount = AnalysisCache.countsInPack(packs[i].url).cached
+        }
+    }
 
     static func scan(_ url: URL) -> ClusterLibrary {
         let contents = (try? FileManager.default.contentsOfDirectory(
@@ -82,6 +91,7 @@ struct ClusterLibrary {
 
                 let type: CellaPackType = hasCa ? .structured : .openCella
                 let summary = summarize(packURL)
+                let cacheCounts = AnalysisCache.countsInPack(packURL)
                 let name = packURL.deletingPathExtension().lastPathComponent
                 let covers = collectCovers(packURL, structured: hasCa)
                 return CellaPack(
@@ -90,7 +100,8 @@ struct ClusterLibrary {
                     name: name,
                     coverURLs: covers,
                     albumCount: summary.albums,
-                    trackCount: summary.tracks
+                    trackCount: summary.tracks,
+                    cachedTrackCount: cacheCounts.cached
                 )
             }
 
@@ -150,10 +161,19 @@ struct ClusterLibrary {
         }
     }
 
+    /// Counts audio files in a folder that have .cellax cache files in Cache/ subfolder.
+    private static func countCachedTracks(in dir: URL, audioExtensions: Set<String>) -> Int {
+        let fm = FileManager.default
+        let contents = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let audioFiles = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+        return audioFiles.filter { fm.fileExists(atPath: AnalysisCache.cacheURL(for: $0).path) }.count
+    }
+
     /// Albums + tracks for drill-down inside a pack, without loading audio.
     static func albums(in packURL: URL) -> [CellaAlbum] {
         let fm = FileManager.default
         let contents = (try? fm.contentsOfDirectory(at: packURL, includingPropertiesForKeys: nil)) ?? []
+        let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
 
         // Cella Structured: authoritative list straight from .ca.
         if let caURL = contents.first(where: { $0.pathExtension.lowercased() == "ca" }),
@@ -164,18 +184,19 @@ struct ClusterLibrary {
                 let tracks = (album.tracks ?? []).map {
                     CellaTrack(file: $0.file, title: $0.title, artist: $0.artist)
                 }
+                let cached = countCachedTracks(in: albumDir, audioExtensions: audioExtensions)
                 return CellaAlbum(
                     name: album.name,
                     folderName: album.folder,
                     artist: album.artist,
                     coverURL: cover,
-                    tracks: tracks
+                    tracks: tracks,
+                    cachedTrackCount: cached
                 )
             }
         }
 
         // OpenCella: group root audio as "singles", subfolders as albums.
-        let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
         var albums: [CellaAlbum] = []
 
         let subfolders = contents
@@ -189,12 +210,14 @@ struct ClusterLibrary {
                 .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             guard !files.isEmpty else { continue }
             let cover = findCover(in: subfolder, names: ["cover", "folder", "artwork", "front", "album"], exts: Set(["jpg", "jpeg", "png", "heic", "webp"]))
+            let cached = countCachedTracks(in: subfolder, audioExtensions: audioExtensions)
             albums.append(CellaAlbum(
                 name: subfolder.lastPathComponent.replacingOccurrences(of: ".cella", with: ""),
                 folderName: subfolder.lastPathComponent,
                 artist: nil,
                 coverURL: cover,
-                tracks: files.map { CellaTrack(file: $0.lastPathComponent, title: nil, artist: nil) }
+                tracks: files.map { CellaTrack(file: $0.lastPathComponent, title: nil, artist: nil) },
+                cachedTrackCount: cached
             ))
         }
 
@@ -202,12 +225,14 @@ struct ClusterLibrary {
             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
         if !rootAudio.isEmpty {
             let cover = findCover(in: packURL, names: ["cover", "folder", "artwork", "front", "album"], exts: Set(["jpg", "jpeg", "png", "heic", "webp"]))
+            let cached = countCachedTracks(in: packURL, audioExtensions: audioExtensions)
             albums.insert(CellaAlbum(
                 name: packURL.deletingPathExtension().lastPathComponent,
                 folderName: "",
                 artist: nil,
                 coverURL: cover,
-                tracks: rootAudio.map { CellaTrack(file: $0.lastPathComponent, title: nil, artist: nil) }
+                tracks: rootAudio.map { CellaTrack(file: $0.lastPathComponent, title: nil, artist: nil) },
+                cachedTrackCount: cached
             ), at: 0)
         }
 

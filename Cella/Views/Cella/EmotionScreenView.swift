@@ -27,7 +27,7 @@ struct VideoBackgroundView: NSViewRepresentable {
 
 /// Isolated background container — only re-renders when video identity changes,
 /// not on volume / currentTime ticks. Prevents scroll from stuttering video.
-private struct CmaBackgroundLayer: View {
+struct CmaBackgroundLayer: View {
     let videoPlayer: AVPlayer?
     let artistImage: NSImage?
     let isActive: Bool
@@ -85,6 +85,8 @@ struct EmotionScreenView: View {
     @State private var lyricPulseActive = false
     @State private var lyricPulseTask: Task<Void, Never>?
     @State private var prevLyricIndex = -1
+    @State private var lyricReveal: Double = 0
+    @State private var revealTask: Task<Void, Never>?
     @State private var lastVolumeScroll = CFAbsoluteTime(0) // kept for compat, now throttled in viewModel
 
     private static let barWidth: CGFloat =
@@ -134,7 +136,81 @@ struct EmotionScreenView: View {
         lyricPulseActive || viewModel?.playerState == .autoMix
     }
 
-    private func isPlaceholderLyric(_ text: String) -> Bool {
+    // MARK: - Sub-layers
+
+    @ViewBuilder
+    private var placeholderBackground: some View {
+        RoundedRectangle(cornerRadius: 16)
+            .fill(theme.dotInactiveDeep)
+            .transition(.opacity)
+
+        // Artist image background — only when playing (isolated so volume scrub doesn't re-render video)
+        CmaBackgroundLayer(
+            videoPlayer: viewModel?.videoPlayer,
+            artistImage: viewModel?.currentArtistImage,
+            isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix,
+            unblur: currentLyricIsPlaceholder
+        )
+        .animation(.smooth, value: viewModel?.currentArtistImage?.hash)
+        .transition(.opacity)
+    }
+
+    @ViewBuilder
+    private var motionLayer: some View {
+        mainContent
+            .blur(radius: showFullLyrics && !currentLyricIsPlaceholder ? 8 : 0)
+            .transition(.opacity)
+            .animation(.easeInOut(duration: 0.9), value: showFullLyrics)
+            .animation(.easeInOut(duration: 0.9), value: currentLyricIsPlaceholder)
+    }
+
+    @ViewBuilder
+    private var fullLyricsLayer: some View {
+        if showFullLyrics, let vm = viewModel {
+            LyricsView(
+                lyrics: vm.currentLyrics,
+                currentTime: vm.currentTime,
+                isPlaying: vm.playerState.isPlaying || vm.playerState == .autoMix,
+                nextLyrics: vm.nextLyrics,
+                isTransitioning: vm.isTransitioning,
+                frozenIndex: frozenLyricIndex,
+                textAlignment: vm.albumPickerVisible ? .leading : (currentLyricIsPlaceholder ? .trailing : .center),
+                revealProgress: lyricReveal
+            )
+            .animation(.smooth, value: vm.albumPickerVisible)
+            .transition(.opacity)
+            .onChange(of: vm.isTransitioning) { _, transitioning in
+                if transitioning && frozenLyricIndex < 0 {
+                    for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
+                        if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
+                            frozenLyricIndex = i
+                            break
+                        }
+                    }
+                } else if !transitioning {
+                    frozenLyricIndex = -1
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var pausedOverlay: some View {
+        if viewModel?.isAnimationPaused == true {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    Text("Paused")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.textPrimary.opacity(0.7))
+                )
+                .onTapGesture {
+                    viewModel?.isAnimationPaused = false
+                }
+        }
+    }
+
+    static func isPlaceholderLyric(_ text: String) -> Bool {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return t == "..." || t == "…" || t == ".." || t.isEmpty
     }
@@ -145,7 +221,7 @@ struct EmotionScreenView: View {
         guard let vm = viewModel, !vm.currentLyrics.isEmpty else { return false }
         for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
             if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
-                return isPlaceholderLyric(vm.currentLyrics[i].text)
+                return Self.isPlaceholderLyric(vm.currentLyrics[i].text)
             }
         }
         return false
@@ -165,8 +241,26 @@ struct EmotionScreenView: View {
         let prevText = vm.currentLyrics[prevLyricIndex].text
         let newText = vm.currentLyrics[idx].text
 
-        if isPlaceholderLyric(prevText) && !isPlaceholderLyric(newText) {
+        if Self.isPlaceholderLyric(prevText) && !Self.isPlaceholderLyric(newText) {
             triggerLyricPulse()
+            triggerLyricReveal()
+        }
+    }
+
+    private func triggerLyricReveal() {
+        revealTask?.cancel()
+        lyricReveal = 0
+        withAnimation(.smooth(duration: 0.8)) {
+            lyricReveal = 1
+        }
+        revealTask = Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.smooth(duration: 0.5)) {
+                    lyricReveal = 0
+                }
+            }
         }
     }
 
@@ -188,64 +282,10 @@ struct EmotionScreenView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 16)
-                .fill(theme.dotInactiveDeep)
-
-            // Artist image background — only when playing (isolated so volume scrub doesn't re-render video)
-            CmaBackgroundLayer(
-                videoPlayer: viewModel?.videoPlayer,
-                artistImage: viewModel?.currentArtistImage,
-                isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix,
-                unblur: currentLyricIsPlaceholder
-            )
-            .animation(.smooth, value: viewModel?.currentArtistImage?.hash)
-
-            // Main content (matrix / line / static)
-            mainContent
-                .blur(radius: showFullLyrics && !currentLyricIsPlaceholder ? 8 : 0)
-                .animation(.easeInOut(duration: 0.9), value: showFullLyrics)
-                .animation(.easeInOut(duration: 0.9), value: currentLyricIsPlaceholder)
-
-            // Full lyrics overlay (centered in 21:9). When the album picker is
-            // open, left-align the text so it isn't covered by the popover.
-            if showFullLyrics, let vm = viewModel {
-                LyricsView(
-                    lyrics: vm.currentLyrics,
-                    currentTime: vm.currentTime,
-                    isPlaying: vm.playerState.isPlaying || vm.playerState == .autoMix,
-                    nextLyrics: vm.nextLyrics,
-                    isTransitioning: vm.isTransitioning,
-                    frozenIndex: frozenLyricIndex,
-                    textAlignment: vm.albumPickerVisible ? .leading : (currentLyricIsPlaceholder ? .trailing : .center)
-                )
-                .animation(.smooth, value: vm.albumPickerVisible)
-                .transition(.opacity) 
-                .onChange(of: vm.isTransitioning) { _, transitioning in
-                    if transitioning && frozenLyricIndex < 0 {
-                        for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
-                            if vm.currentTime >= vm.currentLyrics[i].time - 0.1 {
-                                frozenLyricIndex = i
-                                break
-                            }
-                        }
-                    } else if !transitioning {
-                        frozenLyricIndex = -1
-                    }
-                }
-            }
-
-            if viewModel?.isAnimationPaused == true {
-                RoundedRectangle(cornerRadius: 16)
-                    .fill(.ultraThinMaterial)
-                    .overlay(
-                        Text("Paused")
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(theme.textPrimary.opacity(0.7))
-                    )
-                    .onTapGesture {
-                        viewModel?.isAnimationPaused = false
-                    }
-            }
+            placeholderBackground
+            motionLayer
+            fullLyricsLayer
+            pausedOverlay
         }
         .overlay(slimLyricsOverlay, alignment: .bottom)
         .overlay(alignment: .bottom) {
@@ -258,19 +298,19 @@ struct EmotionScreenView: View {
                 .stroke(
                     LinearGradient(
                         colors: [
-                            .green.opacity(0.0),
-                            .green.opacity(0.6),
-                            .mint.opacity(0.8),
-                            .green.opacity(0.6),
-                            .green.opacity(0.0)
+                            theme.haloPrimary.opacity(0.0),
+                            theme.haloPrimary.opacity(0.6),
+                            theme.haloSecondary.opacity(0.8),
+                            theme.haloPrimary.opacity(0.6),
+                            theme.haloPrimary.opacity(0.0)
                         ],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
                     lineWidth: 2
                 )
-                .shadow(color: .green.opacity(isBorderPulsing ? 0.6 : 0), radius: 12)
-                .shadow(color: .mint.opacity(isBorderPulsing ? 0.4 : 0), radius: 20)
+                .shadow(color: theme.haloPrimary.opacity(isBorderPulsing ? 0.6 : 0), radius: 12)
+                .shadow(color: theme.haloSecondary.opacity(isBorderPulsing ? 0.4 : 0), radius: 20)
                 .opacity(isBorderPulsing ? 1 : 0)
                 .animation(.smooth(duration: 0.6), value: isBorderPulsing)
         )
@@ -284,11 +324,15 @@ struct EmotionScreenView: View {
             prevLyricIndex = currentLyricIndex
             lyricPulseTask?.cancel()
             lyricPulseActive = false
+            revealTask?.cancel()
+            lyricReveal = 0
         }
         .onChange(of: viewModel?.mixQueue?.currentTrack?.url) { _, _ in
             prevLyricIndex = currentLyricIndex
             lyricPulseTask?.cancel()
             lyricPulseActive = false
+            revealTask?.cancel()
+            lyricReveal = 0
         }
         .onContinuousHover { phase in
             switch phase {
@@ -338,7 +382,7 @@ struct EmotionScreenView: View {
             if showSlimLyrics && !currentLyricLine.isEmpty {
                 Text(currentLyricLine)
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .foregroundStyle(theme.dotActive)
+                    .foregroundStyle(theme.lyricColor(for: currentLyricIndex))
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -406,7 +450,7 @@ struct EmotionScreenView: View {
                                         let fade = min(fadeIn, fadeOut)
 
                                         Capsule()
-                                            .fill(theme.dotActive.opacity(Double(fade * sweepMax)))
+                                            .fill(theme.trailColorSmooth(at: eased).opacity(Double(fade * sweepMax)))
                                             .frame(width: spotWidth, height: geo.size.height)
                                             .offset(x: -spotWidth / 2 + eased * (fw + spotWidth))
                                     }

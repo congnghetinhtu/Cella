@@ -40,6 +40,7 @@ struct ContentView: View {
     private var theme: Theme {
         switch themeOverride {
         case "seafoam": return .seafoam
+        case "bipolar": return .bipolar
         default: return .dark
         }
     }
@@ -92,7 +93,7 @@ struct ContentView: View {
                 }
 
             PackDetailView(
-                pack: displayedPack ?? CellaPack(url: URL(fileURLWithPath: ""), type: .openCella, name: "", coverURLs: [], albumCount: 0, trackCount: 0),
+                pack: displayedPack ?? CellaPack(url: URL(fileURLWithPath: ""), type: .openCella, name: "", coverURLs: [], albumCount: 0, trackCount: 0, cachedTrackCount: 0),
                 viewModel: viewModel,
                 onPlay: { startFile in
                     if let detailPack {

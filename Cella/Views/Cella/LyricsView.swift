@@ -16,6 +16,7 @@ struct LyricsView: View {
     var isTransitioning: Bool = false
     var frozenIndex: Int = -1
     var textAlignment: TextAlignment = .center
+    var revealProgress: Double = 0
     @Environment(\.theme) private var theme
 
     private let lineHeight: CGFloat = 42
@@ -116,6 +117,16 @@ struct LyricsView: View {
                 let scale: CGFloat = isCurrent ? 1.0 : max(0.85, 1.0 - normalizedDist * 0.15)
                 let blur: CGFloat = isCurrent ? 0 : min(3, normalizedDist * 3)
 
+                let revealClamped = min(max(revealProgress, 0), 1)
+                let revealPeak = sin(revealClamped * .pi)
+                let revealScale = CGFloat(revealPeak * 0.06)
+                let currentColor = isCurrent
+                    ? (theme.isColorful && revealPeak > 0.01
+                        ? theme.trailColorSmooth(at: revealClamped)
+                        : theme.lyricColor(for: index))
+                    : theme.textPrimary
+                let glow = theme.lyricColor(for: index).opacity(revealPeak)
+
                 if abs(CGFloat(index - currentIndex)) < visibleLines {
                     Text(line.text)
                         .font(.system(
@@ -123,11 +134,10 @@ struct LyricsView: View {
                             weight: .bold,
                             design: .rounded
                         ))
-                        .foregroundStyle(
-                            isCurrent ? theme.dotActive : theme.textPrimary
-                        )
+                        .foregroundStyle(currentColor)
                         .opacity(opacity)
-                        .scaleEffect(scale, anchor: .center)
+                        .scaleEffect(scale + revealScale, anchor: .center)
+                        .shadow(color: isCurrent ? glow : .clear, radius: CGFloat(revealPeak * 12))
                         .blur(radius: blur)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -168,7 +178,7 @@ struct LyricsView: View {
                         design: .rounded
                     ))
                     .foregroundStyle(
-                        isCenter ? theme.dotActive : theme.textPrimary
+                        isCenter ? theme.lyricColor(for: index + 100) : theme.textPrimary
                     )
                     .opacity(opacity)
                     .scaleEffect(scale, anchor: .center)

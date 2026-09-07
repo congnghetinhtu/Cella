@@ -275,6 +275,9 @@ struct BottomTabBar: View {
 
     @ViewBuilder
     private func tabButton(for tab: AppTab) -> some View {
+        let tabIndex = AppTab.allCases.firstIndex(of: tab) ?? 0
+        let isActive = selectedTab == tab
+        let tabCol = theme.tabColor(for: tabIndex)
         Button {
             withAnimation(.smooth) {
                 selectedTab = tab
@@ -282,14 +285,14 @@ struct BottomTabBar: View {
         } label: {
             Text(tab.rawValue)
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(selectedTab == tab ? theme.tabSelectedText : theme.tabUnselectedText)
+                .foregroundStyle(isActive ? tabCol : theme.tabUnselectedText)
                 .padding(.horizontal, 24)
                 .padding(.vertical, 12)
                 .background(
                     ZStack {
-                        if selectedTab == tab {
+                        if isActive {
                             Capsule()
-                                .fill(theme.tabSelectedBackground)
+                                .fill(tabCol.opacity(0.2))
                                 .matchedGeometryEffect(id: "pill", in: animation)
                                 .offset(x: dragOffset)
                         }
@@ -488,16 +491,16 @@ struct AlbumPill: View {
                     Circle()
                         .fill(.white)
                         .frame(width: 4, height: 4)
-                        .shadow(color: .yellow, radius: 2)
+                        .shadow(color: theme.haloAccent, radius: 2)
                     Text("Hi-So")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Capsule().fill(LinearGradient(colors: [.yellow, .orange, .yellow.opacity(0.85)], startPoint: .leading, endPoint: .trailing)))
+                .background(Capsule().fill(LinearGradient(colors: [theme.haloAccent, theme.haloWarm, theme.haloAccent.opacity(0.85)], startPoint: .leading, endPoint: .trailing)))
                 .clipShape(Capsule())
-                .shadow(color: .yellow.opacity(0.4), radius: 4)
+                .shadow(color: theme.haloAccent.opacity(0.4), radius: 4)
             }
         }
         .padding(.horizontal, 12)
@@ -919,7 +922,7 @@ struct NowPlayingBar: View {
             Circle()
                 .fill(.white)
                 .frame(width: 5, height: 5)
-                .shadow(color: .green, radius: 3)
+                .shadow(color: theme.haloPrimary, radius: 3)
 
             Text("OpenMixing to")
                 .font(.system(size: 9, weight: .bold, design: .monospaced))
@@ -931,7 +934,7 @@ struct NowPlayingBar: View {
             Capsule()
                 .fill(
                     LinearGradient(
-                        colors: [.green, .mint, .green.opacity(0.85)],
+                        colors: [theme.haloPrimary, theme.haloSecondary, theme.haloPrimary.opacity(0.85)],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
@@ -972,7 +975,7 @@ struct NowPlayingBar: View {
             Capsule()
                 .fill(
                     LinearGradient(
-                        colors: [.green, .mint, .green.opacity(0.85)],
+                        colors: [theme.haloPrimary, theme.haloSecondary, theme.haloPrimary.opacity(0.85)],
                         startPoint: .leading,
                         endPoint: .trailing
                     )
@@ -993,7 +996,7 @@ struct NowPlayingBar: View {
                 )
         )
         .clipShape(Capsule())
-        .shadow(color: .green.opacity(0.5), radius: 6)
+        .shadow(color: theme.haloPrimary.opacity(0.5), radius: 6)
     }
 
     // MARK: - Metadata Pill (Quality / Bitrate)
@@ -1144,11 +1147,11 @@ struct NowPlayingBar: View {
                         .frame(height: barHeight)
                     Capsule()
                         .fill(isVolumeAdjusting ?
-                            LinearGradient(colors: [.green, .mint], startPoint: .leading, endPoint: .trailing) :
+                            LinearGradient(colors: [theme.haloPrimary, theme.haloSecondary], startPoint: .leading, endPoint: .trailing) :
                             LinearGradient(colors: [theme.textSecondary, theme.textSecondary], startPoint: .leading, endPoint: .trailing)
                         )
                         .frame(width: geo.size.width * CGFloat(vol), height: barHeight)
-                        .shadow(color: .green.opacity(isVolumeAdjusting ? 0.8 : 0), radius: isVolumeAdjusting ? 6 : 0)
+                        .shadow(color: theme.haloPrimary.opacity(isVolumeAdjusting ? 0.8 : 0), radius: isVolumeAdjusting ? 6 : 0)
                         .animation(.smooth(duration: 0.15), value: vol)
                         .animation(.easeOut(duration: 0.4), value: isVolumeAdjusting)
                 }
@@ -1263,6 +1266,9 @@ struct TopTabBar: View {
 
     @ViewBuilder
     private func tabButton(for tab: AppTab) -> some View {
+        let tabIndex = AppTab.allCases.firstIndex(of: tab) ?? 0
+        let isActive = selectedTab == tab
+        let tabCol = theme.tabColor(for: tabIndex)
         Button {
             withAnimation(.snappy) {
                 selectedTab = tab
@@ -1270,14 +1276,14 @@ struct TopTabBar: View {
         } label: {
             Text(tab.rawValue)
                 .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(selectedTab == tab ? theme.tabSelectedText : theme.tabUnselectedText)
+                .foregroundStyle(isActive ? tabCol : theme.tabUnselectedText)
                 .padding(.horizontal, 28)
                 .padding(.vertical, 10)
                 .background(
                     ZStack {
-                        if selectedTab == tab {
+                        if isActive {
                             Capsule()
-                                .fill(theme.tabSelectedBackground)
+                                .fill(tabCol.opacity(0.2))
                                 .matchedGeometryEffect(id: "pill", in: animation)
                                 .offset(x: dragOffset)
                         }

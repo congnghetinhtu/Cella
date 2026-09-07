@@ -23,40 +23,23 @@ actor TrackAnalyzer {
     }
 
     /// Analyzes a single audio file and returns its analysis results.
+    /// Uses disk cache (.cellax) when available and valid.
     func analyze(url: URL) async throws -> TrackAnalysis {
-        // Run BPM detection (spfk-tempo)
-        let bpm: Double?
-        do {
-            bpm = try await detectBPM(url: url)
-        } catch {
-            print("[Analyzer] BPM failed for \(url.lastPathComponent): \(error.localizedDescription)")
-            bpm = nil
+        // Check cache first — fastest path
+        if let cached = AnalysisCache.load(for: url) {
+            return cached
         }
 
-        // Run key detection — non-fatal, returns nil on low confidence
-        let keySignature: TrackAnalysis.KeySignature?
-        do {
-            keySignature = try await detectKey(url: url)
-        } catch {
-            print("[Analyzer] Key detection skipped: \(error.localizedDescription)")
-            keySignature = nil
-        }
+        // Run BPM, Key, Loudness in parallel (each reads file independently)
+        async let bpmResult: Double? = detectBPM(url: url)
+        async let keyResult: TrackAnalysis.KeySignature? = detectKey(url: url)
+        async let loudnessResult: LoudnessDescription? = detectLoudness(url: url)
 
-        // Run loudness measurement — non-fatal
-        let loudnessDesc: LoudnessDescription?
-        do {
-            loudnessDesc = try LoudnessAnalyzer.analyze(url: url, minimumDuration: 5)
-        } catch {
-            print("[Analyzer] Loudness failed for \(url.lastPathComponent): \(error.localizedDescription)")
-            loudnessDesc = nil
-        }
-
-        // Read audio file and downsample to 22kHz mono for analysis (saves ~75% memory)
+        // Read + downsample audio while spfk-* runs in parallel
         let audioFile = try AudioHelpers.readAudio(url: url)
         let totalFrames = AVAudioFrameCount(audioFile.length)
         let targetSampleRate: Double = 22050
 
-        // Read full file into original format
         let originalBuffer: AVAudioPCMBuffer
         if let buf = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: totalFrames) {
             buf.frameLength = totalFrames
@@ -65,53 +48,53 @@ actor TrackAnalyzer {
         } else if let fallback = AVAudioPCMBuffer(pcmFormat: audioFile.processingFormat, frameCapacity: 1) {
             originalBuffer = fallback
         } else {
-            return TrackAnalysis(
-                bpm: nil, beatTimestamps: [], barTimestamps: [], keySignature: nil,
-                loudnessIntegrated: nil,
-                structureSections: [], energyProfile: [], hasVocals: false,
-                vocalActivity: [], duration: 0,
-                spectralCentroid: 0, spectralRolloff: 0, spectralBandwidth: 0, spectralFlatness: 0,
-                averageRMS: 0, peakAmplitude: 0, introRegion: nil, outroRegion: nil,
-                vocalOnsetTimestamps: [], vocalOffsetTimestamps: []
-            )
+            return emptyAnalysis()
         }
 
-        // Downsample to mono 22kHz (reduces memory from ~105MB to ~13MB for 5-min track)
         let buffer = downsampleToMono(originalBuffer, targetSampleRate: targetSampleRate)
 
+        // Await parallel results
+        let bpm = try? await bpmResult
+        let keySignature = try? await keyResult
+        let loudnessDesc = try? await loudnessResult
+
+        // Shared FFT setup for vocal detection + vocal activity (reuse across both)
+        let mono = buffer.floatChannelData![0]
+        let frameLength = Int(buffer.frameLength)
+        let sampleRate = Float(buffer.format.sampleRate)
+        let fftWindow = 4096
+        let log2n = vDSP_Length(log2(Float(fftWindow)))
+        let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
+
+        // Compute all buffer-based features in one pass
         let energyProfile = AudioHelpers.getRMSProfile(buffer: buffer, windowSize: 8192)
-
-        // Detect sections from energy profile
         let structureSections = detectSections(energyProfile: energyProfile, duration: audioFile.duration)
-
-        // Detect vocal presence from spectral content
-        let hasVocals = detectVocals(buffer: buffer)
-
-        // Detect per-window vocal activity
-        let vocalActivity = detectVocalActivity(buffer: buffer)
-
-        // Detect real beats/downbeat from onsets (phase-locked, no pitch shift).
+        let introOutro = detectIntroOutro(structureSections: structureSections)
+        let spectral = AudioHelpers.computeSpectralFeatures(buffer: buffer)
+        let avgRMS = averageEnergy(energyProfile)
+        let peakAmp = AudioHelpers.peakAmplitude(buffer: buffer)
         let beatInfo = AudioHelpers.detectBeats(buffer: buffer, bpm: bpm ?? 0)
         let beatTimestamps = beatInfo.beats
         let bpb = detectBarsPerBeat(beatTimestamps: beatTimestamps, bpm: bpm ?? 120)
         let barTimestamps = stride(from: 0, to: beatTimestamps.count, by: bpb).map { beatTimestamps[$0] }
 
-        // Compute spectral features in a single FFT pass
-        let spectral = AudioHelpers.computeSpectralFeatures(buffer: buffer)
+        // Vocal detection — share FFT setup
+        let hasVocals: Bool
+        let vocalActivity: [Float]
+        let vocalBoundaries: (onsets: [Double], offsets: [Double])
 
-        // Compute average RMS and peak amplitude
-        let avgRMS = averageEnergy(energyProfile)
-        let peakAmp = AudioHelpers.peakAmplitude(buffer: buffer)
+        if let setup = fftSetup {
+            hasVocals = detectVocals(buffer: buffer, fftSetup: setup, log2n: log2n)
+            vocalActivity = detectVocalActivity(buffer: buffer, fftSetup: setup, log2n: log2n)
+            vocalBoundaries = AudioHelpers.detectVocalBoundaries(buffer: buffer)
+            vDSP_destroy_fftsetup(setup)
+        } else {
+            hasVocals = false
+            vocalActivity = []
+            vocalBoundaries = ([], [])
+        }
 
-        // Detect intro and outro regions
-        let introOutro = detectIntroOutro(structureSections: structureSections)
-        let introRegion = introOutro.intro
-        let outroRegion = introOutro.outro
-
-        // Detect vocal onset/offset boundaries
-        let vocalBoundaries = AudioHelpers.detectVocalBoundaries(buffer: buffer)
-
-        return TrackAnalysis(
+        let result = TrackAnalysis(
             bpm: bpm,
             beatTimestamps: beatTimestamps,
             barTimestamps: barTimestamps,
@@ -128,11 +111,14 @@ actor TrackAnalyzer {
             spectralFlatness: spectral.flatness,
             averageRMS: Float(avgRMS),
             peakAmplitude: peakAmp,
-            introRegion: introRegion,
-            outroRegion: outroRegion,
+            introRegion: introOutro.intro.map { TrackAnalysis.Region(start: $0.start, end: $0.end) },
+            outroRegion: introOutro.outro.map { TrackAnalysis.Region(start: $0.start, end: $0.end) },
             vocalOnsetTimestamps: vocalBoundaries.onsets,
             vocalOffsetTimestamps: vocalBoundaries.offsets
         )
+
+        AnalysisCache.save(result, for: url)
+        return result
     }
 
     /// Analyzes multiple files concurrently, yielding progress updates.
@@ -183,9 +169,25 @@ actor TrackAnalyzer {
     // MARK: - BPM Detection (spfk-tempo)
 
     private func detectBPM(url: URL) async throws -> Double? {
-        let analysis = try BpmAnalysis(url: url)
-        let bpm = try await analysis.process()
-        return bpm?.rawValue
+        let origErr = dup(STDERR_FILENO)
+        let devNull = open("/dev/null", O_WRONLY)
+        dup2(devNull, STDERR_FILENO)
+        close(devNull)
+
+        let bpm: Double?
+        do {
+            let analysis = try BpmAnalysis(url: url)
+            let result = try await analysis.process()
+            bpm = result?.rawValue
+        } catch {
+            bpm = nil
+        }
+
+        dup2(origErr, STDERR_FILENO)
+        close(origErr)
+
+        guard let value = bpm, value > 0 else { return nil }
+        return value
     }
 
     // MARK: - Key Detection (spfk-musical-analysis)
@@ -193,42 +195,37 @@ actor TrackAnalyzer {
     private func detectKey(url: URL) async throws -> TrackAnalysis.KeySignature? {
         let analysis = try MusicalKeyAnalysis(url: url)
         let keyValue = try await analysis.process()
-
         let tonic = keyValue.name.description
         let mode = keyValue.tonality == .minor ? "minor" : "major"
-
         return TrackAnalysis.KeySignature(tonic: tonic, mode: mode)
+    }
+
+    // MARK: - Loudness Detection (spfk-loudness)
+
+    private func detectLoudness(url: URL) async throws -> LoudnessDescription? {
+        try LoudnessAnalyzer.analyze(url: url, minimumDuration: 5)
     }
 
     // MARK: - Structure Detection (energy-based)
 
-    /// Detects song sections from energy profile using energy level changes.
     private func detectSections(energyProfile: [Float], duration: Double) -> [TrackAnalysis.StructureSection] {
         guard energyProfile.count >= 4 else { return [] }
 
         let windowDuration = duration / Double(energyProfile.count * 2)
         var sections: [TrackAnalysis.StructureSection] = []
-
         var sectionStart = 0
         var prevEnergy = energyProfile[0]
 
         for i in 1..<energyProfile.count {
             let energyDiff = abs(energyProfile[i] - prevEnergy)
-
             if energyDiff > 0.2 {
                 let startTime = Double(sectionStart) * windowDuration * 2
                 let endTime = Double(i) * windowDuration * 2
                 let avgEnergy = averageRange(energyProfile, from: sectionStart, to: i)
-
                 let label = classifySection(avgEnergy: avgEnergy)
-                sections.append(TrackAnalysis.StructureSection(
-                    startTime: startTime,
-                    endTime: endTime,
-                    label: label
-                ))
+                sections.append(TrackAnalysis.StructureSection(startTime: startTime, endTime: endTime, label: label))
                 sectionStart = i
             }
-
             prevEnergy = energyProfile[i]
         }
 
@@ -236,11 +233,7 @@ actor TrackAnalyzer {
         if startTime < duration {
             let avgEnergy = averageRange(energyProfile, from: sectionStart, to: energyProfile.count)
             let label = classifySection(avgEnergy: avgEnergy)
-            sections.append(TrackAnalysis.StructureSection(
-                startTime: startTime,
-                endTime: duration,
-                label: label
-            ))
+            sections.append(TrackAnalysis.StructureSection(startTime: startTime, endTime: duration, label: label))
         }
 
         return sections
@@ -265,7 +258,6 @@ actor TrackAnalyzer {
 
     // MARK: - Intro/Outro Detection
 
-    /// Detects intro and outro regions from structure sections.
     private func detectIntroOutro(
         structureSections: [TrackAnalysis.StructureSection]
     ) -> (intro: (start: Double, end: Double)?, outro: (start: Double, end: Double)?) {
@@ -285,34 +277,20 @@ actor TrackAnalyzer {
             }
         }
 
-        // If no explicit intro/outro, infer from energy levels
-        if intro == nil, let firstSection = structureSections.first {
-            if firstSection.label == "verse" || firstSection.label == "bridge" {
-                // Track starts with content — no intro
-            }
-        }
-
         return (intro, outro)
     }
 
-    // MARK: - Vocal Detection (spectral analysis)
+    // MARK: - Vocal Detection (spectral analysis) — accepts shared FFTSetup
 
-    /// Detects vocal presence using spectral centroid + ZCR + energy analysis across multiple regions.
-    private func detectVocals(buffer: AVAudioPCMBuffer) -> Bool {
+    private func detectVocals(buffer: AVAudioPCMBuffer, fftSetup: FFTSetup, log2n: vDSP_Length) -> Bool {
         guard let channelData = buffer.floatChannelData else { return false }
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 4096 else { return false }
 
         let mono = channelData[0]
         let sampleRate = Float(buffer.format.sampleRate)
-
-        // Create reusable FFTSetup for windowed centroids
         let windowSize = 4096
-        let log2n = vDSP_Length(log2(Float(windowSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return false }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
 
-        // Sample 3 regions across the track
         let regionSize = min(frameLength / 3, windowSize)
         let regions = [
             (start: 0, end: regionSize),
@@ -359,9 +337,8 @@ actor TrackAnalyzer {
         return vocalVotes >= 1
     }
 
-    /// Detects per-window vocal activity using spectral features.
-    /// Reuses a single FFTSetup across all windows (massive speedup).
-    private func detectVocalActivity(buffer: AVAudioPCMBuffer) -> [Float] {
+    /// Detects per-window vocal activity — accepts shared FFTSetup.
+    private func detectVocalActivity(buffer: AVAudioPCMBuffer, fftSetup: FFTSetup, log2n: vDSP_Length) -> [Float] {
         guard let channelData = buffer.floatChannelData else { return [] }
         let frameLength = Int(buffer.frameLength)
         guard frameLength > 4096 else { return [] }
@@ -369,14 +346,10 @@ actor TrackAnalyzer {
         let mono = channelData[0]
         let sampleRate = Float(buffer.format.sampleRate)
         let windowSize = 4096
-        let hopSize = 4096  // No overlap — fewer windows
-
-        // Create FFTSetup ONCE and reuse for all windows
-        let log2n = vDSP_Length(log2(Float(windowSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
-        defer { vDSP_destroy_fftsetup(fftSetup) }
+        let hopSize = 4096
 
         var activity = [Float]()
+        activity.reserveCapacity(frameLength / hopSize)
         var position = 0
 
         while position + windowSize <= frameLength {
@@ -401,7 +374,6 @@ actor TrackAnalyzer {
 
             var score: Float = 0
             if rms > 0.004 {
-                // Wide, speech/rap-friendly bands: rap is bright and high-ZCR.
                 let centroidLow: Float = 300
                 let centroidHigh: Float = 6000
                 let centroidMid = (centroidLow + centroidHigh) / 2.0
@@ -415,9 +387,7 @@ actor TrackAnalyzer {
                 let zcrScore = exp(-zcrDist * zcrDist * 1.2)
 
                 let energyScore = min(1.0, rms * 4.0)
-                // Favor ZCR + centroid (speech/rap markers) over raw energy.
                 score = (centroidScore * 0.4 + zcrScore * 0.35 + energyScore * 0.25)
-                // Soft penalties instead of hard cuts.
                 if centroid < 150 { score *= 0.6 }
                 if centroid > 7000 { score *= 0.7 }
                 if zcr < 0.003 { score *= 0.6 }
@@ -433,7 +403,6 @@ actor TrackAnalyzer {
 
     // MARK: - Downsampling
 
-    /// Converts a buffer to mono and reduces high sample rates for faster analysis.
     private func downsampleToMono(_ buffer: AVAudioPCMBuffer, targetSampleRate: Double) -> AVAudioPCMBuffer {
         let originalRate = buffer.format.sampleRate
         let originalFrames = Int(buffer.frameLength)
@@ -481,52 +450,12 @@ actor TrackAnalyzer {
 
     // MARK: - Utility
 
-    private func smoothArray(_ array: [Double], windowSize: Int) -> [Double] {
-        guard array.count >= windowSize, windowSize > 0 else { return array }
-
-        let half = windowSize / 2
-        var result = [Double]()
-        result.reserveCapacity(array.count)
-
-        // Running sum approach — O(n) instead of O(n²)
-        var runningSum: Double = 0
-
-        // Initialize with centered window at index 0: [0, half]
-        let initialCount = min(half + 1, array.count)
-        for i in 0..<initialCount {
-            runningSum += array[i]
-        }
-        result.append(runningSum / Double(initialCount))
-
-        for i in 1..<array.count {
-            // Add new element entering the window
-            let addIdx = i + half
-            if addIdx < array.count {
-                runningSum += array[addIdx]
-            }
-            // Remove old element leaving the window
-            let removeIdx = i - half - 1
-            if removeIdx >= 0 {
-                runningSum -= array[removeIdx]
-            }
-            // Count elements in current window
-            let lo = max(0, i - half)
-            let hi = min(array.count - 1, i + half)
-            let count = hi - lo + 1
-            result.append(runningSum / Double(max(1, count)))
-        }
-
-        return result
-    }
-
     private func averageEnergy(_ profile: [Float]) -> Double {
         guard !profile.isEmpty else { return 0 }
         let sum = profile.reduce(0, +)
         return Double(sum) / Double(profile.count)
     }
 
-    /// Heuristic meter detection from beat clustering.
-    /// Returns 3 for waltz-like patterns, 4 otherwise.
     private func detectBarsPerBeat(beatTimestamps: [Double], bpm: Double) -> Int {
         guard beatTimestamps.count >= 12 else { return 4 }
         let beatInterval = 60.0 / bpm
@@ -538,5 +467,16 @@ actor TrackAnalyzer {
             if mod3 < beatInterval * 0.5 { score3 += 1 }
         }
         return score3 > score4 ? 3 : 4
+    }
+
+    private func emptyAnalysis() -> TrackAnalysis {
+        TrackAnalysis(
+            bpm: nil, beatTimestamps: [], barTimestamps: [], keySignature: nil,
+            loudnessIntegrated: nil, structureSections: [], energyProfile: [],
+            hasVocals: false, vocalActivity: [], duration: 0,
+            spectralCentroid: 0, spectralRolloff: 0, spectralBandwidth: 0, spectralFlatness: 0,
+            averageRMS: 0, peakAmplitude: 0, introRegion: nil, outroRegion: nil,
+            vocalOnsetTimestamps: [], vocalOffsetTimestamps: []
+        )
     }
 }

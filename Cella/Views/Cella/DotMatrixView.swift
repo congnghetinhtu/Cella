@@ -25,7 +25,7 @@ struct DotMatrixView: View {
             ForEach(0..<rows, id: \.self) { row in
                 HStack(spacing: dotSpacing) {
                     ForEach(0..<columns, id: \.self) { col in
-                        dotView(isActive: col < pattern[row].count ? pattern[row][col] : false)
+                        dotView(isActive: col < pattern[row].count ? pattern[row][col] : false, row: row, col: col)
                     }
                 }
             }
@@ -36,9 +36,9 @@ struct DotMatrixView: View {
     // MARK: - Dot View
 
     @ViewBuilder
-    private func dotView(isActive: Bool) -> some View {
+    private func dotView(isActive: Bool, row: Int = 0, col: Int = 0) -> some View {
         Circle()
-            .fill(isActive ? theme.dotActive : theme.dotInactive)
+            .fill(isActive ? theme.trailColorCycle(at: Double(row * 5 + col) / 25.0) : theme.dotInactive)
             .frame(width: dotSize, height: dotSize)
             .opacity(isActive ? 0.9 : 0.6)
             .animation(.snappy, value: isActive)

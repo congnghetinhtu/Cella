@@ -8,7 +8,7 @@
 import Foundation
 import AVFoundation
 
-struct TrackAnalysis: Sendable {
+struct TrackAnalysis: Sendable, Codable {
     // MARK: - Audio Analysis Results
 
     /// Beats per minute detected by spfk-tempo.
@@ -69,10 +69,10 @@ struct TrackAnalysis: Sendable {
     // MARK: - Structure
 
     /// Intro region (start, end) in seconds. nil if not detected.
-    let introRegion: (start: Double, end: Double)?
+    let introRegion: Region?
 
     /// Outro region (start, end) in seconds. nil if not detected.
-    let outroRegion: (start: Double, end: Double)?
+    let outroRegion: Region?
 
     // MARK: - Vocal Boundary Analysis
 
@@ -82,9 +82,16 @@ struct TrackAnalysis: Sendable {
     /// Timestamps where vocal phrases end (vocal → silence/gap).
     let vocalOffsetTimestamps: [Double]
 
+    // MARK: - Codable Region (replaces tuple)
+
+    struct Region: Sendable, Codable {
+        let start: Double
+        let end: Double
+    }
+
     // MARK: - Convenience Types
 
-    struct KeySignature: Sendable, Equatable {
+    struct KeySignature: Sendable, Equatable, Codable {
         let tonic: String
         let mode: String
 
@@ -144,7 +151,7 @@ struct TrackAnalysis: Sendable {
 
     }
 
-    struct StructureSection: Sendable {
+    struct StructureSection: Sendable, Codable {
         let startTime: Double
         let endTime: Double
         let label: String

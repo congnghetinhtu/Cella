@@ -49,6 +49,7 @@ class PlayerViewModel {
     private var streamEngine: StreamAudioEngine?
     private var openMixImportURL: URL?
     private var requestedStartFileName: String?
+    private var cacheTask: Task<Void, Never>?
 
     /// Blend (smooth "OpenMix to") state. When set, the currently playing track
     /// keeps playing while the target pack is analyzed; on analysis completion we
@@ -1244,6 +1245,9 @@ class PlayerViewModel {
             return
         }
 
+        // Cancel any running background cache task
+        cacheTask?.cancel()
+
         importError = nil
         analysisProgress = 0
         playlistFolderURL = url
@@ -1854,6 +1858,12 @@ class PlayerViewModel {
 
         print("[PlayerViewModel] Import via OpenMix: \(url.path) blend=\(blend) blendPending=\(blendPending) thread=\(Thread.isMainThread ? "main" : "bg")")
 
+        // Capture start file for background cache task (before it's cleared)
+        let capturedStartFile = startFileName
+
+        // Cancel previous background cache task
+        cacheTask?.cancel()
+
         let audioExtensions = ["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"]
         let fileManager = FileManager.default
         let contents = (try? fileManager.contentsOfDirectory(
@@ -2009,7 +2019,111 @@ class PlayerViewModel {
         streamEngine = blend ? nil : StreamAudioEngine()
 
         openMixBridge.start()
-        openMixBridge.analyze(tracks: audioFiles)
+
+        // Only send the played album's tracks to Python OpenMix (not entire pack)
+        let fm2 = FileManager.default
+        var albumForOpenMix = audioFiles
+        if let startName = capturedStartFile {
+            let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
+            for sub in subfolders {
+                let subFiles = (try? fm2.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
+                if subFiles.contains(where: { $0.lastPathComponent == startName }) {
+                    albumForOpenMix = subFiles.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                    break
+                }
+            }
+        }
+        print("[PlayerViewModel] OpenMix analyzing \(albumForOpenMix.count) tracks (of \(audioFiles.count) total)")
+        openMixBridge.analyze(tracks: albumForOpenMix)
+
+        // Background: generate .cellax cache files for the played album only
+        cacheTask = Task.detached(priority: .utility) { [weak self] in
+            guard let self else { return }
+            let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
+            let fm = FileManager.default
+            let contents = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+
+            // Find the album directory containing the played track
+            let startFile = capturedStartFile
+            var targetAlbumDir: URL?
+
+            if let startFile {
+                // Search subfolders for the track
+                let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
+                for sub in subfolders {
+                    let subContents = (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
+                    if subContents.contains(where: { $0.lastPathComponent == startFile }) {
+                        targetAlbumDir = sub
+                        break
+                    }
+                }
+                // Check root
+                if targetAlbumDir == nil {
+                    let rootAudio = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                    if rootAudio.contains(where: { $0.lastPathComponent == startFile }) {
+                        targetAlbumDir = url
+                    }
+                }
+            }
+
+            // Fallback: if no start file or not found, analyze all albums
+            var albumDirs: [URL] = []
+            if let target = targetAlbumDir {
+                albumDirs = [target]
+            } else {
+                let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
+                for sub in subfolders {
+                    let subContents = (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
+                    if subContents.contains(where: { audioExtensions.contains($0.pathExtension.lowercased()) }) {
+                        albumDirs.append(sub)
+                    }
+                }
+                let rootAudio = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                if !rootAudio.isEmpty {
+                    albumDirs.insert(url, at: 0)
+                }
+            }
+
+            let albumName = targetAlbumDir?.lastPathComponent ?? "all albums"
+            print("[PlayerViewModel] Background cache: \(albumDirs.count) album(s) in \(url.lastPathComponent) (target: \(albumName))")
+            let analyzer = TrackAnalyzer()
+            var totalAnalyzed = 0
+
+            for albumDir in albumDirs {
+                if Task.isCancelled {
+                    print("[PlayerViewModel] Background cache cancelled — switching album")
+                    return
+                }
+                let albumContents = (try? fm.contentsOfDirectory(at: albumDir, includingPropertiesForKeys: nil)) ?? []
+                let audioFiles = albumContents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                let uncached = audioFiles.filter { !fm.fileExists(atPath: AnalysisCache.cacheURL(for: $0).path) }
+
+                let name = albumDir.lastPathComponent
+                if uncached.isEmpty {
+                    print("[PlayerViewModel] [\(name)] all \(audioFiles.count) cached — skip")
+                    continue
+                }
+
+                print("[PlayerViewModel] [\(name)] \(uncached.count) uncached of \(audioFiles.count)")
+                for audioURL in uncached {
+                    if Task.isCancelled {
+                        print("[PlayerViewModel] Background cache cancelled — switching album")
+                        return
+                    }
+                    do {
+                        let analysis = try await analyzer.analyze(url: audioURL)
+                        AnalysisCache.save(analysis, for: audioURL)
+                        totalAnalyzed += 1
+                        // Yield UI + throttle: 200ms between tracks
+                        try? await Task.sleep(for: .milliseconds(200))
+                    } catch {
+                        print("[PlayerViewModel] [\(name)] skip \(audioURL.lastPathComponent): \(error.localizedDescription)")
+                    }
+                }
+            }
+
+            print("[PlayerViewModel] Background cache done: \(totalAnalyzed) analyzed")
+        }
     }
 
     private func handleOpenMixStatus(_ status: OpenMixStatus) {
@@ -2134,8 +2248,8 @@ class PlayerViewModel {
                 spectralFlatness: 0,
                 averageRMS: Float(trackData["energy_avg"] as? Double ?? 0),
                 peakAmplitude: 0,
-                introRegion: introEnd > 0 ? (start: 0, end: introEnd) : nil,
-                outroRegion: outroStart < duration ? (start: outroStart, end: duration) : nil,
+                introRegion: introEnd > 0 ? TrackAnalysis.Region(start: 0, end: introEnd) : nil,
+                outroRegion: outroStart < duration ? TrackAnalysis.Region(start: outroStart, end: duration) : nil,
                 vocalOnsetTimestamps: [],
                 vocalOffsetTimestamps: []
             )
