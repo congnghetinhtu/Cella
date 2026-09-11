@@ -146,6 +146,10 @@ class StreamAudioEngine {
         print("[StreamAudioEngine] Playback paused")
     }
 
+    func setVolume(_ volume: Float) {
+        engine.mainMixerNode.volume = min(2.0, max(0, volume))
+    }
+
     func stop() {
         playerNode.stop()
         engine.stop()

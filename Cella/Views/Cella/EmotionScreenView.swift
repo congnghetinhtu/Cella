@@ -88,6 +88,9 @@ struct EmotionScreenView: View {
     @State private var lyricReveal: Double = 0
     @State private var revealTask: Task<Void, Never>?
     @State private var lastVolumeScroll = CFAbsoluteTime(0) // kept for compat, now throttled in viewModel
+    @State private var swipeProgress: CGFloat = 0
+    @State private var swipeTask: Task<Void, Never>?
+    @State private var swipeActive: Bool = false
 
     private static let barWidth: CGFloat =
         CGFloat(MatrixPatterns.columns) * 36 + CGFloat(MatrixPatterns.columns - 1) * 24
@@ -175,7 +178,8 @@ struct EmotionScreenView: View {
                 isTransitioning: vm.isTransitioning,
                 frozenIndex: frozenLyricIndex,
                 textAlignment: vm.albumPickerVisible ? .leading : (currentLyricIsPlaceholder ? .trailing : .center),
-                revealProgress: lyricReveal
+                revealProgress: lyricReveal,
+                highlightIndex: vm.highlightLyricIndex
             )
             .animation(.smooth, value: vm.albumPickerVisible)
             .transition(.opacity)
@@ -286,6 +290,9 @@ struct EmotionScreenView: View {
             motionLayer
             fullLyricsLayer
             pausedOverlay
+            if swipeActive {
+                lyricSwipeOverlay
+            }
         }
         .overlay(slimLyricsOverlay, alignment: .bottom)
         .overlay(alignment: .bottom) {
@@ -333,6 +340,9 @@ struct EmotionScreenView: View {
             lyricPulseActive = false
             revealTask?.cancel()
             lyricReveal = 0
+        }
+        .onChange(of: viewModel?.showLyricSwipe ?? false) { _, show in
+            if show { startSwipeAnimation() }
         }
         .onContinuousHover { phase in
             switch phase {
@@ -394,6 +404,58 @@ struct EmotionScreenView: View {
                     ))
                     .animation(.smooth, value: currentLyricLine)
             }
+        }
+    }
+
+    // MARK: - Lyric Swipe Overlay
+
+    private var lyricSwipeOverlay: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            ZStack(alignment: .leading) {
+                Rectangle()
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                theme.haloPrimary.opacity(0.0),
+                                theme.haloPrimary.opacity(0.6),
+                                theme.haloAccent.opacity(0.9),
+                                theme.haloPrimary.opacity(0.6),
+                                theme.haloPrimary.opacity(0.0)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: w)
+                    .mask(
+                        Rectangle()
+                            .frame(width: 4)
+                            .offset(x: swipeProgress * w - 2)
+                    )
+                    .shadow(color: theme.haloAccent.opacity(0.7), radius: 12)
+                    .shadow(color: theme.haloPrimary.opacity(0.5), radius: 24)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func startSwipeAnimation() {
+        swipeTask?.cancel()
+        swipeActive = true
+        swipeProgress = 0
+        swipeTask = Task { @MainActor in
+            withAnimation(.easeInOut(duration: 0.8)) {
+                swipeProgress = 1.0
+            }
+            try? await Task.sleep(for: .seconds(1.2))
+            viewModel?.showLyricSwipe = false
+            withAnimation(.easeOut(duration: 0.3)) {
+                swipeProgress = 0
+            }
+            try? await Task.sleep(for: .seconds(0.5))
+            swipeActive = false
+            viewModel?.highlightLyricIndex = nil
         }
     }
 

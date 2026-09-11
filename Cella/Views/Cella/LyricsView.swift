@@ -17,6 +17,7 @@ struct LyricsView: View {
     var frozenIndex: Int = -1
     var textAlignment: TextAlignment = .center
     var revealProgress: Double = 0
+    var highlightIndex: Int? = nil
     @Environment(\.theme) private var theme
 
     private let lineHeight: CGFloat = 42
@@ -34,6 +35,7 @@ struct LyricsView: View {
     private var currentIndex: Int {
         let lines = displayLyrics
         guard !lines.isEmpty else { return -1 }
+        if let hi = highlightIndex, hi >= 0, hi < lines.count { return hi }
         if isTransitioning && frozenIndex >= 0 { return min(frozenIndex, lines.count - 1) }
         for i in stride(from: lines.count - 1, through: 0, by: -1) {
             if currentTime >= lines[i].time - 0.1 {
@@ -128,6 +130,8 @@ struct LyricsView: View {
                         : theme.lyricColor(for: index))
                     : theme.textPrimary
                 let glow = theme.lyricColor(for: index).opacity(revealPeak)
+                let isHighlight = index == highlightIndex
+                let highlightColor = theme.haloAccent
 
                 if abs(CGFloat(index - currentIndex)) < visibleLines {
                     Text(line.text)
@@ -136,14 +140,14 @@ struct LyricsView: View {
                             weight: .bold,
                             design: .rounded
                         ))
-                        .foregroundStyle(currentColor)
+                        .foregroundStyle(isHighlight ? highlightColor : currentColor)
                         .opacity(opacity)
                         .scaleEffect(
-                            x: scale + revealScale,
-                            y: scale * verticalSqueeze + revealScale,
+                            x: scale + revealScale + (isHighlight ? 0.04 : 0),
+                            y: scale * verticalSqueeze + revealScale + (isHighlight ? 0.04 : 0),
                             anchor: .center
                         )
-                        .shadow(color: isCurrent ? glow : .clear, radius: CGFloat(revealPeak * 12))
+                        .shadow(color: isHighlight ? highlightColor.opacity(0.8) : (isCurrent ? glow : .clear), radius: isHighlight ? 16 : CGFloat(revealPeak * 12))
                         .blur(radius: blur)
                         .lineLimit(1)
                         .truncationMode(.tail)

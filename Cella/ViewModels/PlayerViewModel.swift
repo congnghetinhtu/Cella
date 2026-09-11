@@ -74,6 +74,8 @@ class PlayerViewModel {
     var nextLyrics: [LrcLine] = []
     var lyricsMode: LyricsMode = .off
     var currentLyricsTrackURL: URL?
+    var highlightLyricIndex: Int? = nil
+    var showLyricSwipe: Bool = false
     var lastLyricBadgeTrackID: String?
     var lastQualityTrackID: String?
 
@@ -303,6 +305,88 @@ class PlayerViewModel {
         audioEngine.seek(to: clamped)
         syncPlaybackTime()
         updateNowPlayingInfo()
+    }
+
+    // MARK: - LRC Insert
+
+    private func resolveLrcURL(for trackURL: URL) -> URL? {
+        guard let folder = playlistFolderURL else { return nil }
+        let lrcName = trackURL.deletingPathExtension().lastPathComponent + ".lrc"
+        let albumDir = trackURL.deletingLastPathComponent()
+        let candidates = [
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            folder.appendingPathComponent(lrcName)
+        ]
+        for lrcURL in candidates where FileManager.default.fileExists(atPath: lrcURL.path) {
+            return lrcURL
+        }
+        return nil
+    }
+
+    private func resolveOrCreateLrcURL(for trackURL: URL) -> URL? {
+        if let existing = resolveLrcURL(for: trackURL) { return existing }
+        guard let folder = playlistFolderURL else { return nil }
+        let albumDir = trackURL.deletingLastPathComponent()
+        let lrcName = trackURL.deletingPathExtension().lastPathComponent + ".lrc"
+        let lrcDir = albumDir.appendingPathComponent("lrc")
+        if !FileManager.default.fileExists(atPath: lrcDir.path) {
+            try? FileManager.default.createDirectory(at: lrcDir, withIntermediateDirectories: true)
+        }
+        return lrcDir.appendingPathComponent(lrcName)
+    }
+
+    private func lrcTimestamp(_ time: TimeInterval) -> String {
+        let ms = Int((time * 100).truncatingRemainder(dividingBy: 100))
+        let totalSec = Int(time)
+        let sec = totalSec % 60
+        let min = totalSec / 60
+        return String(format: "%02d:%02d.%02d", min, sec, ms)
+    }
+
+    func insertBreak(at time: TimeInterval) -> Bool {
+        guard let trackURL = mixQueue?.currentTrack?.url,
+              let lrcURL = resolveOrCreateLrcURL(for: trackURL) else { return false }
+        var lines = (try? String(contentsOf: lrcURL))?.components(separatedBy: .newlines) ?? []
+        let newLine = "[\(lrcTimestamp(time))]..."
+        lines.append(newLine)
+        let sorted = sortLrcLines(lines)
+        try? sorted.joined(separator: "\n").write(to: lrcURL, atomically: true, encoding: .utf8)
+        loadLyrics(for: trackURL)
+
+        let insertedIndex = currentLyrics.firstIndex { abs($0.time - time) < 0.01 }
+        highlightLyricIndex = insertedIndex
+        showLyricSwipe = true
+        return true
+    }
+
+    func insertInit() -> Bool {
+        return insertBreak(at: 0)
+    }
+
+    private func sortLrcLines(_ lines: [String]) -> [String] {
+        let parsed: [(String, TimeInterval)] = lines.map { line in
+            let time = extractLrcTime(line)
+            return (line, time)
+        }
+        return parsed.sorted { $0.1 < $1.1 }.map { $0.0 }
+    }
+
+    private func extractLrcTime(_ line: String) -> TimeInterval {
+        guard let range = line.range(of: #"^\[[0-9:.]+\]"#, options: .regularExpression) else {
+            return -1
+        }
+        let tag = String(line[range]).dropFirst().dropLast()
+        let parts = tag.components(separatedBy: ":")
+        guard parts.count == 2 else { return -1 }
+        let minParts = parts[1].components(separatedBy: ".")
+        guard let m = Double(parts[0]) else { return -1 }
+        guard let s = Double(minParts[0]) else { return -1 }
+        var ms: Double = 0
+        if minParts.count > 1, let msVal = Double(minParts[1]) {
+            ms = msVal / pow(10.0, Double(minParts[1].count))
+        }
+        return m * 60 + s + ms
     }
 
     // MARK: - Queue Management
@@ -590,11 +674,18 @@ class PlayerViewModel {
     func setVolume(_ volume: Float) {
         currentVolume = volume
         audioEngine.smoothVolume(to: volume)
+        applySecondaryVolume(volume)
     }
 
     func setVolumeImmediate(_ volume: Float) {
         currentVolume = volume
         audioEngine.setVolumeImmediate(volume)
+        applySecondaryVolume(volume)
+    }
+
+    private func applySecondaryVolume(_ volume: Float) {
+        streamEngine?.setVolume(volume)
+        profileSoundPlayer?.volume = min(1, max(0, volume)) * 0.8
     }
 
     /// Scroll-driven volume: engine updates immediately, UI throttled to 60Hz to avoid stuttering video
@@ -639,7 +730,7 @@ class PlayerViewModel {
     private func playProfileSound() {
         guard let url = Bundle.main.url(forResource: "airpodsMaxOnline", withExtension: "m4a") else { return }
         profileSoundPlayer = try? AVAudioPlayer(contentsOf: url)
-        profileSoundPlayer?.volume = 0.8
+        profileSoundPlayer?.volume = min(1, max(0, currentVolume)) * 0.8
         profileSoundPlayer?.play()
     }
 
@@ -685,8 +776,6 @@ class PlayerViewModel {
             currentLyrics = []
             currentLyricsTrackURL = nil
         }
-
-        // Preload next track lyrics for transition fusion
         if let nextTrack = mixQueue?.nextTrack {
             let nextLrcName = nextTrack.url.deletingPathExtension().lastPathComponent + ".lrc"
             let nextAlbumDir = nextTrack.url.deletingLastPathComponent()
@@ -2017,6 +2106,7 @@ class PlayerViewModel {
         }
 
         streamEngine = blend ? nil : StreamAudioEngine()
+        streamEngine?.setVolume(currentVolume)
 
         openMixBridge.start()
 
