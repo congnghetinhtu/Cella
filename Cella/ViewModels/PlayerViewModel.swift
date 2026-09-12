@@ -33,7 +33,7 @@ class PlayerViewModel {
     private var pendingMood: MusicMood?
     private let powerManager = PowerManager.shared
 
-    var currentAudioProfile: AudioProfile = .flat
+    var currentPreset: OrquestaPreset = .natural
 
     // MARK: - Automix Components
 
@@ -125,7 +125,6 @@ class PlayerViewModel {
     // Multi-artist video playlist
     var artistVideoURLs: [URL] = []
     private var artistVideoIndex: Int = 0
-    private var profileSoundPlayer: AVAudioPlayer?
 
     var currentTrackHasLrc: Bool {
         guard let url = mixQueue?.currentTrack?.url else { return false }
@@ -685,7 +684,6 @@ class PlayerViewModel {
 
     private func applySecondaryVolume(_ volume: Float) {
         streamEngine?.setVolume(volume)
-        profileSoundPlayer?.volume = min(1, max(0, volume)) * 0.8
     }
 
     /// Scroll-driven volume: engine updates immediately, UI throttled to 60Hz to avoid stuttering video
@@ -718,24 +716,43 @@ class PlayerViewModel {
         audioEngine.setHallReverb(enabled)
     }
 
-    func applyAudioProfile(_ profile: AudioProfile) {
-        let isNew = profile != currentAudioProfile
-        currentAudioProfile = profile
-        audioEngine.applyProfileEQ(profile)
-        if profile == .airpodsMax && isNew {
-            playProfileSound()
-        }
+    func selectPreset(_ preset: OrquestaPreset) {
+        currentPreset = preset
+        audioEngine.applyProfileEQ(preset)
     }
 
-    private func playProfileSound() {
-        guard let url = Bundle.main.url(forResource: "airpodsMaxOnline", withExtension: "m4a") else { return }
-        profileSoundPlayer = try? AVAudioPlayer(contentsOf: url)
-        profileSoundPlayer?.volume = min(1, max(0, currentVolume)) * 0.8
-        profileSoundPlayer?.play()
+    /// Re-applies the in-flight EQ without touching the selected preset —
+    /// used while dragging a band on the Orquesta custom curve.
+    func refreshProfileEQ() {
+        audioEngine.applyProfileEQ(currentPreset)
+    }
+
+    var surroundMode: SurroundMode = .off
+
+    func applySurround(_ mode: SurroundMode) {
+        surroundMode = mode
+        audioEngine.setSurroundMode(mode)
+    }
+
+    /// Solo a single EQ band (0–9). Pass nil to unsolo. Masking applies on the
+    /// next profile application.
+    func setSoloBand(_ index: Int?) {
+        audioEngine.setSoloBand(index)
+        audioEngine.applyProfileEQ(currentPreset)
     }
 
     private func restoreAudioSettings() {
-        audioEngine.applyProfileEQ(currentAudioProfile)
+        let storedPreset = OrquestaPreset.resolve(
+            UserDefaults.standard.string(forKey: OrquestaPreset.storageKey)
+        )
+        currentPreset = storedPreset
+        audioEngine.applyProfileEQ(storedPreset)
+        if let raw = UserDefaults.standard.string(forKey: SurroundMode.storageKey),
+           let stored = SurroundMode(rawValue: raw) {
+            applySurround(stored)
+        } else {
+            audioEngine.setSurroundMode(.off)
+        }
     }
 
     private func loadTrackAndRestore(url: URL, rate: Float = 1.0, barTimestamps: [Double] = [], analysis: TrackAnalysis? = nil) throws {
@@ -2277,9 +2294,16 @@ class PlayerViewModel {
             streamEngine = nil
 
             if let url = openMixImportURL {
-                log("Falling back to real-time engine")
+                // The real-time engine already plays the user's chosen track.
+                // Only fall back to a full re-import when nothing is playing —
+                // otherwise it replays from track 0 over the current selection.
                 openMixImportURL = nil
-                importFolder(url: url)
+                if playerState != .playing {
+                    log("Falling back to real-time engine")
+                    importFolder(url: url)
+                } else {
+                    importError = message
+                }
             } else {
                 importError = message
             }

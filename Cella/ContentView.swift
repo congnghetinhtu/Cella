@@ -497,6 +497,21 @@ struct ContentView: View {
             if let path = ProcessInfo.processInfo.environment["CELLA_TEST_PLAYLIST"] {
                 viewModel.importViaOpenMix(url: URL(fileURLWithPath: path))
             }
+            if ProcessInfo.processInfo.environment["CELLA_AUTOTEST"] != nil {
+                Task { @MainActor in
+                    for _ in 0..<60 {
+                        if viewModel.mixQueue != nil { break }
+                        try? await Task.sleep(nanoseconds: 250_000_000)
+                    }
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                    viewModel.jumpToTrack(at: 0)
+                    try? await Task.sleep(nanoseconds: 6_000_000_000)
+                    viewModel.applySurround(.ampliado)
+                    try? await Task.sleep(nanoseconds: 4_000_000_000)
+                    viewModel.applySurround(.teatro)
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
             #endif
         }
         .onDisappear {

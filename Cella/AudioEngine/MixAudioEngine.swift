@@ -26,6 +26,20 @@ class MixAudioEngine {
     private let eqB = AVAudioUnitEQ(numberOfBands: 1)
     private let hallReverb = AVAudioUnitReverb()
     private let profileEq: AVAudioUnitEQ
+    private let surroundEq: AVAudioUnitEQ
+
+    /// Stereo width factor for the current surround mode. Updated by the
+    /// ramp timer. `StereoWidthEffect.process()` reads this value to apply
+    /// real-time M/S widening to the mixer output buffer.
+    private var currentWidthValue: Float = 1.0
+
+    /// Current surround staging mode (family of stage EQ + reverb mix).
+    private var surroundMode: SurroundMode = .off
+    /// Reverb forced on by the Motions tab.
+    private var motionReverb = false
+    /// Index (0–9) of a soloed EQ band, or nil. All other bands bypassed.
+    private var soloBand: Int?
+
     private let peakLimiter: AVAudioUnit = {
         let desc = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
@@ -70,6 +84,8 @@ class MixAudioEngine {
     private var preCrossfadeRampTimer: Timer?
     private var preCrossfadeRampStartTime: Date?
     private var trackStartTime: Date?
+    private var fxRampTimer: Timer?
+    private var reverbRampTimer: Timer?
 
     private var remainingAtStart: TimeInterval = 0
     private var seekOffset: TimeInterval = 0
@@ -101,6 +117,7 @@ class MixAudioEngine {
     init(config: AudioConfig = .standard) {
         self.config = config
         self.profileEq = AVAudioUnitEQ(numberOfBands: 10)
+        self.surroundEq = AVAudioUnitEQ(numberOfBands: 4)
         self.currentPlayer = playerA
         self.otherPlayer = playerB
         self.currentTimePitch = timePitchA
@@ -117,8 +134,7 @@ class MixAudioEngine {
         eqB.globalGain = 0
 
         profileEq.globalGain = 0
-
-
+        surroundEq.globalGain = 0
 
         setupEngine()
         registerConfigurationObserver()
@@ -135,6 +151,9 @@ class MixAudioEngine {
         preCrossfadeTimer?.invalidate()
         preCrossfadeRampTimer?.invalidate()
         tempoRampTimer?.invalidate()
+        fxRampTimer?.invalidate()
+        profileRampTimer?.invalidate()
+        reverbRampTimer?.invalidate()
     }
 
     // MARK: - Audio Device / Route Change
@@ -231,6 +250,12 @@ class MixAudioEngine {
         scheduleTrackEndTimer(delay: reloadDelay)
 
         print("[Engine] Resumed on new device at \(String(format: "%.1f", position))s")
+
+        // Re-apply current width if surround mode is active.
+        if surroundMode != .off {
+            StereoWidthEffect.currentWidth = widthValue(for: surroundMode)
+            currentWidthValue = widthValue(for: surroundMode)
+        }
     }
 
     // MARK: - Engine Setup
@@ -243,6 +268,7 @@ class MixAudioEngine {
         engine.attach(eqA)
         engine.attach(eqB)
         engine.attach(profileEq)
+        engine.attach(surroundEq)
         engine.attach(hallReverb)
         engine.attach(peakLimiter)
         engine.attach(mixerNode)
@@ -258,9 +284,14 @@ class MixAudioEngine {
         mixerNode.volume = 1.0
         engine.connect(mixerNode, to: profileEq, format: format)
         profileEq.globalGain = 0
-        engine.connect(profileEq, to: hallReverb, format: format)
+
+        engine.connect(profileEq, to: surroundEq, format: format)
+        surroundEq.globalGain = 0
+
+        engine.connect(surroundEq, to: hallReverb, format: format)
         hallReverb.loadFactoryPreset(.largeHall)
         hallReverb.wetDryMix = 0
+
         engine.connect(hallReverb, to: peakLimiter, format: format)
 
         engine.connect(peakLimiter, to: engine.mainMixerNode, format: nil)
@@ -276,6 +307,13 @@ class MixAudioEngine {
             print("[Engine] FAILED to start: \(error)")
         }
 
+        // Stereo width tap — processes M/S widening on the mixer output
+        // in-place. Runs every render cycle; StereoWidthEffect.currentWidth
+        // controls the width factor (1.0 = unmodified).
+        mixerNode.installTap(onBus: 0, bufferSize: 512, format: config.processingFormat) { buffer, _ in
+            StereoWidthEffect.process(buffer)
+        }
+
         // Re-apply defaults after engine start — engine may reinitialize
         // node internal state on start, losing pre-attach values.
         timePitchA.pitch = 0
@@ -287,6 +325,9 @@ class MixAudioEngine {
 
         for band in profileEq.bands { band.bypass = true }
         profileEq.globalGain = 0
+
+        for band in surroundEq.bands { band.bypass = true }
+        surroundEq.globalGain = 0
 
         hallReverb.wetDryMix = 0
     }
@@ -437,6 +478,8 @@ class MixAudioEngine {
         playerA.reset()
         playerB.stop()
         playerB.reset()
+        currentWidthValue = 1.0
+        StereoWidthEffect.currentWidth = 1.0
         resetEQ(eqA)
         resetEQ(eqB)
         isPlaying = false
@@ -462,6 +505,19 @@ class MixAudioEngine {
         timePitchB.rate = 1.0
         timePitchB.bypass = true
     }
+
+    // MARK: - Playback Head
+
+    /// Current playback head in source samples (0-based), or nil if unknown.
+    private func currentPlaybackFrame() -> Int64? {
+        guard let nodeTime = currentPlayer.lastRenderTime,
+              let playerTime = currentPlayer.playerTime(forNodeTime: nodeTime) else {
+            return nil
+        }
+        return Int64(playerTime.sampleTime) + Int64(seekOffset * playerTime.sampleRate)
+    }
+
+    var isWidenModeActive: Bool { surroundMode != .off }
 
     func seek(to time: TimeInterval) {
         guard let url = currentURL else { return }
@@ -1113,29 +1169,189 @@ class MixAudioEngine {
         eq.bands[0].filterType = .lowPass
     }
 
-    // MARK: - Hall Reverb
+    // MARK: - Hall Reverb (Motions tab only)
 
     func setHallReverb(_ enabled: Bool) {
-        hallReverb.wetDryMix = enabled ? 55 : 0
+        motionReverb = enabled
+        beginReverbRamp(motionReverb ? 55 : 0)
+    }
+
+    private func beginReverbRamp(_ target: Float) {
+        reverbRampTimer?.invalidate()
+        reverbRampTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let diff = target - self.hallReverb.wetDryMix
+            if abs(diff) > 0.2 {
+                self.hallReverb.wetDryMix += diff * 0.25
+            } else {
+                self.hallReverb.wetDryMix = target
+                self.reverbRampTimer?.invalidate()
+                self.reverbRampTimer = nil
+            }
+        }
+        reverbRampTimer?.tolerance = 0.005
+    }
+
+    // MARK: - Surround Staging (EQ restage + stereo width, inline)
+
+    func setSurroundMode(_ mode: SurroundMode) {
+        surroundMode = mode
+        beginSurroundRamp()
+    }
+
+    /// Width factor for each surround mode. 1.0 = original stereo, >1 = wider.
+    /// Controls the StereoWidthEffect AUAudioUnit parameter directly — no
+    /// player swapping, no silent gaps.
+    private func widthValue(for mode: SurroundMode) -> Float {
+        switch mode {
+        case .off: return 1.0
+        case .ampliado: return 2.0
+        case .teatro: return 1.5
+        }
+    }
+
+    private func beginSurroundRamp() {
+        let configs: [(type: AVAudioUnitEQFilterType, freq: Float)] = [
+            (.lowShelf, 60),
+            (.parametric, 400),
+            (.parametric, 2500),
+            (.highShelf, 10000),
+        ]
+
+        let targets: [Float]
+        let widthTarget = widthValue(for: surroundMode)
+        switch surroundMode {
+        case .off:
+            targets = [0, 0, 0, 0]
+        case .ampliado:
+            targets = [-2.5, -1.0, -2.0, 6.0]
+        case .teatro:
+            targets = [6.0, 2.0, -3.0, -1.5]
+        }
+
+        for (i, band) in surroundEq.bands.enumerated() {
+            band.bypass = false
+            band.bandwidth = 0.6
+            band.filterType = configs[i].type
+            band.frequency = configs[i].freq
+        }
+        surroundEq.globalGain = 0
+
+        // Gain compensation — the surround EQ stacks on top of profileEq.
+        // Reduce profileEq.globalGain by the max surround boost so the
+        // combined output doesn't clip (e.g. Aurora +6 bass + Teatro +6
+        // low shelf = compensate -6 on profileEq).
+        let maxSurroundBoost = targets.max() ?? 0
+        profileEq.globalGain = -max(0, maxSurroundBoost)
+
+        fxRampTimer?.invalidate()
+        fxRampTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            var done = true
+
+            // Ramp EQ bands.
+            for (i, band) in self.surroundEq.bands.enumerated() {
+                let target = i < targets.count ? targets[i] : 0
+                let diff = target - band.gain
+                if abs(diff) > 0.01 { done = false }
+                band.gain += diff * 0.25
+            }
+
+            // Ramp stereo width — writes directly to the static processor.
+            let cur = self.currentWidthValue
+            let diff = widthTarget - cur
+            if abs(diff) > 0.003 { done = false }
+            let next = cur + diff * 0.25
+            self.currentWidthValue = next
+            StereoWidthEffect.currentWidth = next
+
+            if done {
+                self.fxRampTimer?.invalidate()
+                self.fxRampTimer = nil
+            }
+        }
+        fxRampTimer?.tolerance = 0.005
+    }
+
+    #if DEBUG
+    /// Returns the current surround effect state (for tests / debugging).
+    var debugSurroundReverbMix: Float {
+        motionReverb ? 55 : 0
+    }
+    #endif
+
+    // MARK: - Gain Compensation
+
+    /// Max positive gain (dB) the surround EQ will apply for the current mode.
+    /// Used to reduce profileEq.globalGain so both EQs don't stack and clip.
+    private func maxSurroundBoostForCurrentMode() -> Float {
+        switch surroundMode {
+        case .off: return 0
+        case .ampliado: return 6.0  // high shelf +6
+        case .teatro: return 6.0    // low shelf +6
+        }
+    }
+
+    // MARK: - Solo Band
+
+    func setSoloBand(_ index: Int?) {
+        soloBand = index
     }
 
     // MARK: - Audio Profile (EQ only)
 
-    func applyProfileEQ(_ profile: AudioProfile) {
-        let bands = profile.config.eqBands
+    private var profileRampTimer: Timer?
+    private var profileTargets: [Float] = []
+
+    func applyProfileEQ(_ preset: OrquestaPreset) {
+        let bands = preset.eqBands
+
+        // Fixed geometry per band — only gain animates, so a preset swap never
+        // re-engages a filter (that transient is what pops the gain).
         for (i, band) in profileEq.bands.enumerated() {
+            band.filterType = .parametric
+            band.bandwidth = 0.5
             if i < bands.count {
-                let (freq, gain) = bands[i]
-                band.filterType = .parametric
-                band.frequency = freq
-                band.gain = gain
-                band.bandwidth = 0.5
-                band.bypass = abs(gain) < 0.1
+                band.frequency = bands[i].freq
+                band.bypass = false
             } else {
                 band.bypass = true
             }
         }
-        profileEq.globalGain = 0
+        // Solo masking — keep only the soloed band audible.
+        if let solo = soloBand {
+            for (i, band) in profileEq.bands.enumerated() {
+                band.bypass = i != solo
+            }
+        }
+        // Gain compensation — offset the surround EQ boost so combined
+        // output doesn't clip when both EQs are active.
+        let surroundBoost = maxSurroundBoostForCurrentMode()
+        profileEq.globalGain = -max(0, surroundBoost)
+
+        profileTargets = bands.map { $0.gain }
+        startProfileRamp()
+    }
+
+    /// Glide each parametric band gain to its target — exponential approach,
+    /// ~0.15s settle. Tight callers (live drag) just retarget mid-flight.
+    private func startProfileRamp() {
+        profileRampTimer?.invalidate()
+        profileRampTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            var done = true
+            for (i, band) in self.profileEq.bands.enumerated() where !band.bypass {
+                let target = i < self.profileTargets.count ? self.profileTargets[i] : 0
+                let diff = target - band.gain
+                if abs(diff) > 0.01 { done = false }
+                band.gain += diff * 0.22
+            }
+            if done {
+                self.profileRampTimer?.invalidate()
+                self.profileRampTimer = nil
+            }
+        }
+        profileRampTimer?.tolerance = 0.005
     }
 
     /// Samples a track's vocal activity level (0–1) at a given time.
