@@ -60,7 +60,8 @@ enum SeafoamCursor {
         switch themeName {
         case "bipolar": return (1.0, 0.361, 0.541)
         case "seafoam": return (0.576, 0.914, 0.745)
-        default:         return (1.0, 0.502, 0.220)
+        case "mint":    return (0.133, 0.827, 0.933)
+        default:        return (1.0, 0.502, 0.220)
         }
     }
 

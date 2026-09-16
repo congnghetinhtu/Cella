@@ -13,20 +13,24 @@ struct EnhancedLRCView: View {
     private let sectionPadding = EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16)
     private let contentPadding: CGFloat = 12
 
+    private var cardBorder: some ShapeStyle {
+        theme.textSecondary.opacity(CardStyle.borderOpacity)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
 
-            Divider().background(theme.textSecondary.opacity(0.15))
+            Divider().background(cardBorder)
 
             if viewModel.currentTrackURL != nil {
                 playbackControls
-                Divider().background(theme.textSecondary.opacity(0.15))
+                Divider().background(cardBorder)
             }
 
             if !viewModel.metadata.isEmpty && viewModel.currentTrackURL != nil {
                 metadataBar
-                Divider().background(theme.textSecondary.opacity(0.15))
+                Divider().background(cardBorder)
             }
 
             if isLoading {
@@ -41,6 +45,8 @@ struct EnhancedLRCView: View {
 
             bottomBar
         }
+        .padding(.horizontal, CardStyle.horizontalPadding)
+        .padding(.vertical, CardStyle.verticalPadding)
         .background(theme.appBackground)
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
@@ -235,8 +241,8 @@ struct EnhancedLRCView: View {
                 }
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(CardStyle.padding)
+        .background(theme.screenBackground)
     }
 
     // MARK: - Metadata Bar
@@ -260,9 +266,10 @@ struct EnhancedLRCView: View {
                     metaTag(icon: "clock", label: viewModel.metadata.length)
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, CardStyle.padding)
             .padding(.vertical, 8)
         }
+        .background(theme.screenBackground)
     }
 
     private func metaTag(icon: String, label: String) -> some View {
@@ -408,7 +415,7 @@ struct EnhancedLRCView: View {
             .opacity(viewModel.canUndo ? 1.0 : 0.4)
         }
         .padding(sectionPadding)
-        .background(theme.appBackground)
+        .background(theme.screenBackground)
     }
 
     // MARK: - Helpers

@@ -274,6 +274,22 @@ class PlayerViewModel {
             print("[PlayerViewModel] onTrackEnd callback fired")
             self?.handleTrackEnd()
         }
+        audioEngine.onCrossfadeCompleted = { [weak self] in
+            self?.completePendingSwitch()
+        }
+    }
+
+    /// Runs the pending track-switch completion only once the engine has actually
+    /// swapped players. Without this, the wall-clock asyncAfter could fire before
+    /// the swap and index the new song's lyrics against the outgoing clock.
+    private var pendingSwitchCompletion: (() -> Void)?
+
+    private func completePendingSwitch() {
+        guard let pending = pendingSwitchCompletion else { return }
+        pendingSwitchCompletion = nil
+        // Force-sync clock BEFORE state flip so lyrics index the new song immediately.
+        syncPlaybackTime()
+        pending()
     }
 
     private func startNowPlayingTimer() {
@@ -288,8 +304,13 @@ class PlayerViewModel {
     }
 
     private func syncPlaybackTime() {
-        currentTime = audioEngine.currentTime
-        currentDuration = audioEngine.duration
+        let newTime = audioEngine.currentTime
+        let newDuration = audioEngine.duration
+        if abs(newTime - currentTime) > 2.0 {
+            print("[TICK] currentTime jump \(String(format: "%.1f", currentTime)) -> \(String(format: "%.1f", newTime)) dur=\(String(format: "%.1f", newDuration)) state=\(playerState)")
+        }
+        currentTime = newTime
+        currentDuration = newDuration
     }
 
     // MARK: - Playback Info
@@ -536,10 +557,10 @@ class PlayerViewModel {
             return
         }
 
-        queue.currentIndex = index
+queue.currentIndex = index
         mixQueue = queue
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+        pendingSwitchCompletion = { [weak self] in
             if self?.playerState == .autoMix {
                 self?.playerState = .playing
                 self?.stopAnimationLoop()
@@ -547,8 +568,6 @@ class PlayerViewModel {
                 self?.loadLyrics(for: queue.currentTrack?.url ?? incoming.url)
             }
         }
-
-        updateNowPlayingInfo()
     }
 
     // MARK: - Album Pill
@@ -1266,7 +1285,7 @@ class PlayerViewModel {
             queue.advanceToNext()
             mixQueue = queue
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+            pendingSwitchCompletion = { [weak self] in
                 if self?.playerState == .autoMix {
                     self?.playerState = .playing
                     self?.stopAnimationLoop()
@@ -1649,7 +1668,7 @@ class PlayerViewModel {
         queue.currentIndex = index
         mixQueue = queue
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+        pendingSwitchCompletion = { [weak self] in
             guard let self else { return }
             if self.playerState == .autoMix {
                 self.playerState = .playing
@@ -1711,7 +1730,7 @@ class PlayerViewModel {
             queue.advanceToNext()
             mixQueue = queue
 
-            DispatchQueue.main.asyncAfter(deadline: .now() + params.duration) { [weak self] in
+            pendingSwitchCompletion = { [weak self] in
                 if self?.playerState == .autoMix {
                     self?.playerState = .playing
                     self?.stopAnimationLoop()

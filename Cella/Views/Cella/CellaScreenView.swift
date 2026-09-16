@@ -70,7 +70,7 @@ struct CmaBackgroundLayer: View {
     }
 }
 
-struct EmotionScreenView: View {
+struct CellaScreenView: View {
     let pattern: [[Bool]]
     var viewModel: PlayerViewModel?
     @Environment(\.theme) private var theme
@@ -108,11 +108,18 @@ struct EmotionScreenView: View {
     private var showFullLyrics: Bool {
         guard let vm = viewModel else { return false }
         return lyricsMode == .full && !vm.currentLyrics.isEmpty
+            && vm.currentLyricsTrackURL == vm.mixQueue?.currentTrack?.url
     }
 
     private var showSlimLyrics: Bool {
         guard let vm = viewModel else { return false }
         return lyricsMode == .slim && !vm.currentLyrics.isEmpty
+            && vm.currentLyricsTrackURL == vm.mixQueue?.currentTrack?.url
+    }
+
+    private var lyricsReady: Bool {
+        guard let vm = viewModel else { return false }
+        return !vm.playerState.isTransitioning
     }
 
     private var currentLyricLine: String {
@@ -182,7 +189,16 @@ struct EmotionScreenView: View {
                 highlightIndex: vm.highlightLyricIndex
             )
             .animation(.smooth, value: vm.albumPickerVisible)
-            .transition(.opacity)
+            .opacity(lyricsReady ? 1 : 0)
+            .offset(y: lyricsReady ? 0 : 16)
+            .blur(radius: lyricsReady ? 0 : 6)
+            .scaleEffect(lyricsReady ? 1 : 0.985)
+            .animation(.spring(response: 0.7, dampingFraction: 0.82), value: lyricsReady)
+            .onChange(of: lyricsReady) { _, ready in
+                if ready, let vm = viewModel {
+                    print("[LYRIC] reveal ready time=\(String(format: "%.2f", vm.currentTime)) lrcTrack=\(vm.currentLyricsTrackURL?.lastPathComponent ?? "nil") curTrack=\(vm.mixQueue?.currentTrack?.url.lastPathComponent ?? "nil") lines=\(vm.currentLyrics.count)")
+                }
+            }
             .onChange(of: vm.isTransitioning) { _, transitioning in
                 if transitioning && frozenLyricIndex < 0 {
                     for i in stride(from: vm.currentLyrics.count - 1, through: 0, by: -1) {
@@ -402,7 +418,11 @@ struct EmotionScreenView: View {
                         insertion: .opacity.combined(with: .move(edge: .bottom)),
                         removal: .opacity.combined(with: .move(edge: .top))
                     ))
+                    .opacity(lyricsReady ? 1 : 0)
+                    .offset(y: lyricsReady ? 0 : 12)
+                    .blur(radius: lyricsReady ? 0 : 5)
                     .animation(.smooth, value: currentLyricLine)
+                    .animation(.spring(response: 0.7, dampingFraction: 0.82), value: lyricsReady)
             }
         }
     }

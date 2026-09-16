@@ -74,6 +74,7 @@ class MixAudioEngine {
     private let config: AudioConfig
 
     var onTrackEnd: TrackEndHandler?
+    var onCrossfadeCompleted: (() -> Void)?
 
     private(set) var isPlaying = false
     private(set) var isCrossfading = false
@@ -1238,11 +1239,10 @@ class MixAudioEngine {
         surroundEq.globalGain = 0
 
         // Gain compensation — the surround EQ stacks on top of profileEq.
-        // Reduce profileEq.globalGain by the max surround boost so the
-        // combined output doesn't clip (e.g. Aurora +6 bass + Teatro +6
-        // low shelf = compensate -6 on profileEq).
+        // Half compensation — reduce profileEq.globalGain by half the max
+        // surround boost. Provides clipping headroom without killing volume.
         let maxSurroundBoost = targets.max() ?? 0
-        profileEq.globalGain = -max(0, maxSurroundBoost)
+        profileEq.globalGain = -max(0, maxSurroundBoost) / 2
 
         fxRampTimer?.invalidate()
         fxRampTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -1284,12 +1284,15 @@ class MixAudioEngine {
 
     /// Max positive gain (dB) the surround EQ will apply for the current mode.
     /// Used to reduce profileEq.globalGain so both EQs don't stack and clip.
+    /// Returns half the actual boost for more natural volume.
     private func maxSurroundBoostForCurrentMode() -> Float {
+        let full: Float
         switch surroundMode {
-        case .off: return 0
-        case .ampliado: return 6.0  // high shelf +6
-        case .teatro: return 6.0    // low shelf +6
+        case .off: full = 0
+        case .ampliado: full = 6.0
+        case .teatro: full = 6.0
         }
+        return full / 2
     }
 
     // MARK: - Solo Band
@@ -1672,6 +1675,8 @@ class MixAudioEngine {
         currentTimePitch.bypass = true
         otherTimePitch.rate = 1.0
         otherTimePitch.bypass = true
+
+        onCrossfadeCompleted?()
 
         // ── Diagnostic: verify state after swap ────────────────────────
         let newCurrentPlayerID = currentPlayer === playerA ? "A" : "B"

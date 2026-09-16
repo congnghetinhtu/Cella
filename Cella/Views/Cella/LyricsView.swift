@@ -36,7 +36,7 @@ struct LyricsView: View {
         let lines = displayLyrics
         guard !lines.isEmpty else { return -1 }
         if let hi = highlightIndex, hi >= 0, hi < lines.count { return hi }
-        if isTransitioning && frozenIndex >= 0 { return min(frozenIndex, lines.count - 1) }
+        if isTransitioning && frozenIndex >= 0 && !nextLyrics.isEmpty { return min(frozenIndex, lines.count - 1) }
         for i in stride(from: lines.count - 1, through: 0, by: -1) {
             if currentTime >= lines[i].time - 0.1 {
                 return i
@@ -158,7 +158,7 @@ struct LyricsView: View {
             }
         }
         .offset(y: scrollOffset)
-        .animation(.lyricsSpring, value: currentIndex)
+        .animation(isTransitioning ? nil : .lyricsSpring, value: currentIndex)
     }
 
     // MARK: - Next Lyrics

@@ -12,7 +12,7 @@ CellaApp                     ← @main, fullscreen, hidden title bar
     ├── TopTabBar            ← pill-style tab bar (scroll/drag switching)
     ├── ExploreView          ← placeholder
     ├── CellaView            ← main player UI
-    │   ├── EmotionScreenView  ← 21:9 dark container
+    │   ├── CellaScreenView  ← 21:9 dark container
     │   │   └── DotMatrixView  ← 9×5 dot grid renderer
     │   └── PlayerIndicatorView ← status text
     └── ConfigView           ← folder import + analysis progress

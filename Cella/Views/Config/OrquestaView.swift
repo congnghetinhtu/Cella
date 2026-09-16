@@ -22,13 +22,14 @@ struct OrquestaView: View {
     }
 
     private let cardRadius: CGFloat = 18
-    private let cardPadding: CGFloat = 28
+    private let cardPadding: CGFloat = 40
 
     @State private var draggingSeat: Int?
     @State private var dragStartGain: Float = 0
     @State private var hoveredSeat: Int?
     @State private var soloSeat: Int?
     @State private var animPhase: Double = 0
+    @State private var burstTimer: Timer?
 
     private let bandLift: CGFloat = 0.45
     private let maxGain: Float = 6
@@ -76,6 +77,9 @@ struct OrquestaView: View {
             syncStoredPreset()
             startBreathing()
         }
+        .onChange(of: surroundMode) { _, _ in
+            triggerBurst()
+        }
         .onDisappear {
             stopBreathing()
         }
@@ -95,6 +99,21 @@ struct OrquestaView: View {
     private func stopBreathing() {
         animTimer?.invalidate()
         animTimer = nil
+    }
+
+    /// Fast burst on mode switch — runs at 3× speed for 0.8s, then settles.
+    private func triggerBurst() {
+        burstTimer?.invalidate()
+        var elapsed = 0.0
+        burstTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { timer in
+            elapsed += 1.0 / 60.0
+            withAnimation(.linear(duration: 1.0 / 60.0)) {
+                animPhase += 0.195  // 3× normal speed
+            }
+            if elapsed >= 0.8 {
+                timer.invalidate()
+            }
+        }
     }
 
     @State private var animTimer: Timer?
@@ -220,7 +239,6 @@ struct OrquestaView: View {
         let c1 = theme.haloPrimary.opacity(0.28 * glowIntensity)
         let c2 = theme.haloSecondary.opacity(0.12 * glowIntensity)
 
-        // Arc-tracing glow — orbits continuously with ease.
         let arcPath = Path { path in
             path.move(to: CGPoint(x: cx - arcR, y: baseY))
             path.addQuadCurve(
@@ -228,7 +246,9 @@ struct OrquestaView: View {
                 control: CGPoint(x: cx, y: baseY - arcR * 0.95)
             )
         }
-        let neonPulse = 0.65 + 0.2 * (0.5 + 0.5 * sin(animPhase * 1.5))
+
+        // Pulsing glow — breathes between dim and bright.
+        let pulse = 0.35 + 0.3 * (0.5 + 0.5 * sin(animPhase * 1.5))
 
         return ZStack {
             // Base floor fill.
@@ -250,11 +270,12 @@ struct OrquestaView: View {
                 )
             )
 
+            // Pulsing glow border on the arc — hidden for Natural preset.
             if viewModel.currentPreset.id != OrquestaPreset.natural.id {
                 arcPath
-                    .stroke(Color.white.opacity(neonPulse), lineWidth: 2)
-                    .shadow(color: .white.opacity(neonPulse * 0.7), radius: 6)
-                    .shadow(color: .white.opacity(neonPulse * 0.35), radius: 12)
+                    .stroke(Color.white.opacity(pulse), lineWidth: 2)
+                    .shadow(color: .white.opacity(pulse * 0.7), radius: 6)
+                    .shadow(color: .white.opacity(pulse * 0.35), radius: 12)
             }
         }
     }
@@ -488,11 +509,11 @@ struct OrquestaView: View {
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.35))
+                    .fill(isSelected ? preset.accentColor : theme.dotInactive.opacity(0.35))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 9)
-                    .stroke(isSelected ? theme.haloPrimary.opacity(0.4) : Color.clear, lineWidth: 1)
+                    .stroke(isSelected ? preset.accentColor.opacity(0.4) : Color.clear, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)

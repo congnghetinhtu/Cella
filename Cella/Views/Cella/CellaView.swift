@@ -15,10 +15,34 @@ struct CellaView: View {
         VStack(spacing: 24) {
             Spacer()
 
-            EmotionScreenView(
+            CellaScreenView(
                 pattern: viewModel.currentPattern,
                 viewModel: viewModel
             )
+            .overlay(alignment: .topTrailing) {
+                HStack(spacing: 12) {
+                    ForEach(0..<5, id: \.self) { _ in
+                        Circle()
+                            .fill(Color.white.opacity(0.9))
+                            .frame(width: 15, height: 15)
+                    }
+                }
+                .padding(.top, 12)
+                .offset(y: -42)
+            }
+            .overlay {
+                ZStack(alignment: .leading) {
+                    Color.clear
+                    VStack(spacing: 12) {
+                        ForEach(0..<5, id: \.self) { _ in
+                            Circle()
+                                .fill(Color.white.opacity(0.9))
+                                .frame(width: 15, height: 15)
+                        }
+                    }
+                    .padding(.leading, 20)
+                }
+            }
             .padding(.horizontal, 80)
 
             HStack(spacing: 14) {

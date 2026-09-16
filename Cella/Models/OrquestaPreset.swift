@@ -1,4 +1,4 @@
-import Foundation
+import SwiftUI
 
 /// A curated Cella Orquesta preset — a complete audio mood that bundles the
 /// look (theme), the sound (EQ curve) and the space (surround staging).
@@ -9,6 +9,7 @@ struct OrquestaPreset: Equatable, Sendable {
     let themeID: String
     let eqBands: [(freq: Float, gain: Float)]
     let surround: SurroundMode
+    let accentColor: Color
 
     var isCustom: Bool { id == Self.customID }
 
@@ -27,9 +28,10 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "natural",
         displayName: "Natural",
         iconName: "waveform.path",
-        themeID: "dark",
+        themeID: "seafoam",
         eqBands: eqFrequencies.map { ($0, 0) },
-        surround: .off
+        surround: .off,
+        accentColor: Color(hex: 0x93E9BE)
     )
 
     /// Warm vocal focus: gentle bass shelf, dark warm stage, wide.
@@ -40,7 +42,8 @@ struct OrquestaPreset: Equatable, Sendable {
         themeID: "dark",
         eqBands: [(31, 2), (62, 3), (125, 2), (250, 1), (500, 0),
                   (1000, 0), (2000, 0), (4000, 0), (8000, 1), (16000, 1)],
-        surround: .ampliado
+        surround: .ampliado,
+        accentColor: Color(hex: 0xFF8038)
     )
 
     /// Oceanic air: sub-warmth, clean mids, airy highs, seafoam stage, wide.
@@ -48,10 +51,11 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "oceano",
         displayName: "Océano",
         iconName: "water.waves",
-        themeID: "seafoam",
+        themeID: "mint",
         eqBands: [(31, 3), (62, 2), (125, 1), (250, 0), (500, 1),
                   (1000, 2), (2000, 2), (4000, 3), (8000, 2), (16000, 3)],
-        surround: .ampliado
+        surround: .ampliado,
+        accentColor: Color(hex: 0x22D3EE)
     )
 
     /// Colorful punch: big bass, crisp treble, bipolar stage, theater.
@@ -62,7 +66,8 @@ struct OrquestaPreset: Equatable, Sendable {
         themeID: "bipolar",
         eqBands: [(31, 4), (62, 6), (125, 4), (250, 1), (500, -1),
                   (1000, -1), (2000, 1), (4000, 3), (8000, 4), (16000, 3)],
-        surround: .teatro
+        surround: .teatro,
+        accentColor: Color(hex: 0xFF5C8A)
     )
 
     static let factoryPresets: [OrquestaPreset] = [natural, calido, oceano, aurora]
@@ -79,7 +84,8 @@ struct OrquestaPreset: Equatable, Sendable {
             iconName: "slider.horizontal.3",
             themeID: "dark",
             eqBands: customCurve,
-            surround: .off
+            surround: .off,
+            accentColor: Color(hex: 0xFF8038)
         )
     }
 

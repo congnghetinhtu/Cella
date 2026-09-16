@@ -6,162 +6,81 @@ struct ConfigView: View {
     @Environment(\.theme) private var theme
     @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
-    private let cardRadius: CGFloat = 18
-    private let cardPadding: CGFloat = 28
-    private let gridSpacing: CGFloat = 16
+    @State private var guidePage: Int? = 0
+
+    private let cardRadius: CGFloat = CardStyle.radius
+    private let cardPadding: CGFloat = 40
+    private let gridSpacing: CGFloat = 28
 
     private var cardBorder: some ShapeStyle {
-        theme.textSecondary.opacity(0.10)
+        theme.textSecondary.opacity(CardStyle.borderOpacity)
     }
+
+    // MARK: - Body
 
     var body: some View {
         ScrollView {
-            VStack(spacing: gridSpacing) {
-                importBar
-
+            VStack(alignment: .leading, spacing: gridSpacing) {
                 orquestaCard
+                    .frame(minHeight: 420)
 
-                appInfoCard
+                // Bento row: Guide + About equal split, equal height
+                HStack(alignment: .top, spacing: gridSpacing) {
+                    quickGuideCard
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 300, alignment: .top)
+                    aboutCard
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 300, alignment: .top)
+                }
 
                 if let error = viewModel.importError {
                     errorCard(error)
                         .transition(.move(edge: .top).combined(with: .opacity).combined(with: .scale(scale: 0.97)))
                 }
             }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 28)
-            .frame(maxWidth: 960)
+            .padding(.horizontal, 96)
+            .padding(.vertical, 64)
             .frame(maxWidth: .infinity)
             .animation(.smooth, value: viewModel.hasTracks)
             .animation(.smooth, value: viewModel.importError)
         }
     }
 
-    // MARK: - Import Bar (compact top row)
-
-    private var importBar: some View {
-        HStack(spacing: 12) {
-            // Status dot — only visible when player is active
-            if viewModel.playerState != .idle {
-                Circle()
-                    .fill(viewModel.playerState.isPlaying ? Color.green : theme.textSecondary)
-                    .frame(width: 8, height: 8)
-                    .overlay(
-                        Circle()
-                            .fill(Color.green.opacity(0.4))
-                            .frame(width: 8, height: 8)
-                            .scaleEffect(viewModel.playerState.isPlaying ? 1.8 : 1.0)
-                            .opacity(viewModel.playerState.isPlaying ? 0 : 1)
-                            .animation(
-                                .easeOut(duration: 1.2).repeatForever(autoreverses: false),
-                                value: viewModel.playerState.isPlaying
-                            )
-                    )
-            }
-
-            if viewModel.playlistCount > 0 {
-                Text("\(viewModel.playlistCount) tracks")
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(theme.textSecondary)
-            }
-
-            Spacer()
-
-            Button(action: selectFolder) {
-                HStack(spacing: 6) {
-                    Image(systemName: "folder.badge.plus")
-                        .font(.system(size: 12, weight: .medium))
-                    Text(viewModel.playlistCount > 0 ? "Import" : "Import Playlist")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(theme.dotActive)
-                .clipShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .disabled(viewModel.playerState.isTransitioning)
-        }
-        .padding(.horizontal, cardPadding)
-        .padding(.vertical, 12)
-        .background(theme.screenBackground)
-        .clipShape(RoundedRectangle(cornerRadius: cardRadius))
-        .overlay(
-            RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
-        )
-    }
-
-    // MARK: - Orquesta (full width hero)
+    // MARK: - Orquesta Card
 
     private var orquestaCard: some View {
         OrquestaView(viewModel: viewModel)
             .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
-    // MARK: - App Info Card
+    // MARK: - Quick Guide Card (paging carousel)
 
-    private var appInfoCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private var quickGuideCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Image(systemName: "info.circle")
+                Image(systemName: "lightbulb")
                     .font(.system(size: 13))
-                    .foregroundStyle(theme.dotActive)
-                Text("About")
+                    .foregroundStyle(theme.haloWarm)
+                Text("Quick Guide")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(theme.textPrimary)
-            }
-
-            Divider().background(cardBorder)
-
-            HStack(alignment: .top, spacing: 32) {
-                appInfoColumn(
-                    title: "Cella",
-                    lines: [
-                        "macOS music player",
-                        "Swift / SwiftUI frontend",
-                        "OpenMix analysis engine",
-                        "Beat-aligned crossfades"
-                    ]
-                )
-
-                appInfoColumn(
-                    title: "OpenMix",
-                    lines: [
-                        "Python audio analysis",
-                        "BPM, key, energy, vocals",
-                        "Equal-power crossfade",
-                        "Vocal-aware ducking"
-                    ]
-                )
-
                 Spacer()
-
-                VStack(alignment: .trailing, spacing: 6) {
-                    Text("Developer")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(theme.textSecondary.opacity(0.6))
-                    Text("Thanh Solar NEXT")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                    Text("Owner")
-                        .font(.system(size: 10))
-                        .foregroundStyle(theme.textSecondary)
-
-                    Spacer().frame(height: 6)
-
-                    Text("Publisher")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(theme.textSecondary.opacity(0.6))
-                    Text("Tic")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(theme.textPrimary)
-                }
+                Text("Swipe")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(theme.dotInactive.opacity(0.25)))
             }
+            .padding(.horizontal, cardPadding)
+            .padding(.top, cardPadding)
+            .padding(.bottom, 12)
+
+            guideCarousel
         }
-        .padding(cardPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.bottom, cardPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.screenBackground)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
@@ -170,17 +89,211 @@ struct ConfigView: View {
         )
     }
 
-    private func appInfoColumn(title: String, lines: [String]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
-            ForEach(lines, id: \.self) { line in
-                Text(line)
-                    .font(.system(size: 11))
+    private var guideCarousel: some View {
+        ScrollView(.horizontal) {
+            LazyHStack(spacing: 0) {
+                guideSlide(
+                    icon: "folder.fill",
+                    step: 1,
+                    title: "Import a Library",
+                    text: "Play any .cella playlist from Cluster. The mood engine takes over.",
+                    tint: theme.dotActive
+                )
+                .containerRelativeFrame(.horizontal)
+                .id(0)
+
+                guideSlide(
+                    icon: "waveform",
+                    step: 2,
+                    title: "Pick a Preset",
+                    text: "Natural, Cálido, Océano, Aurora — one tap sets the whole mood.",
+                    tint: theme.haloPrimary
+                )
+                .containerRelativeFrame(.horizontal)
+                .id(1)
+
+                guideSlide(
+                    icon: "slider.horizontal.3",
+                    step: 3,
+                    title: "Shape the Curve",
+                    text: "Drag the ten seats to boost or cut each band. Your curve turns Custom.",
+                    tint: theme.haloSecondary
+                )
+                .containerRelativeFrame(.horizontal)
+                .id(2)
+
+                guideSlide(
+                    icon: "dot.radiowaves.left.and.right",
+                    step: 4,
+                    title: "Stage the Sound",
+                    text: "Ampliado widens. Teatro widens and warms the low end.",
+                    tint: theme.haloAccent
+                )
+                .containerRelativeFrame(.horizontal)
+                .id(3)
+            }
+            .scrollTargetLayout()
+        }
+        .scrollPosition(id: $guidePage, anchor: .center)
+        .scrollTargetBehavior(.paging)
+        .scrollIndicators(.hidden)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: 190)
+        .overlay(alignment: .bottom) {
+            HStack(spacing: 6) {
+                ForEach(0..<4, id: \.self) { index in
+                    Capsule()
+                        .fill(index == guidePage ? theme.dotActive : theme.textSecondary.opacity(0.25))
+                        .frame(width: index == guidePage ? 18 : 6, height: 6)
+                        .animation(.snappy, value: guidePage)
+                        .contentShape(Capsule())
+                        .onTapGesture {
+                            withAnimation(.snappy) { guidePage = index }
+                        }
+                }
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    private func guideSlide(icon: String, step: Int, title: String, text: String, tint: Color) -> some View {
+        HStack(spacing: 20) {
+            RoundedRectangle(cornerRadius: 16)
+                .fill(tint.opacity(0.15))
+                .frame(width: 64, height: 64)
+                .overlay(
+                    Image(systemName: icon)
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundStyle(tint)
+                )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("\(step) of 4")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(tint)
+                Text(title)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                Text(text)
+                    .font(.system(size: 12))
                     .foregroundStyle(theme.textSecondary)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(2, reservesSpace: true)
             }
         }
+        .padding(.horizontal, cardPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    // MARK: - About Card
+
+    private var aboutCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(
+                        LinearGradient(
+                            colors: [theme.haloPrimary, theme.haloSecondary],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 44, height: 44)
+                    .overlay(
+                        Image(systemName: "waveform")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.white)
+                    )
+                    .shadow(color: theme.haloPrimary.opacity(0.35), radius: 6, y: 2)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Cella")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("OpenMix player")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textSecondary)
+                }
+
+                Spacer(minLength: 8)
+
+                Text("v1.0")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(theme.dotInactive.opacity(0.25)))
+            }
+            .padding(.top, cardPadding)
+            .padding(.bottom, 14)
+
+            aboutGroup {
+                aboutRow(icon: "shippingbox.fill", label: "Version", value: "Cella 1.0")
+                aboutRow(icon: "waveform.path", label: "Engine", value: "OpenMix")
+                aboutRow(icon: "doc.text", label: "License", value: "MIT")
+            }
+
+            Spacer(minLength: 10)
+                .frame(height: 10)
+
+            aboutGroup {
+                aboutRow(icon: "person.fill", label: "Developer", value: "Thanh Solar NEXT")
+                aboutRow(icon: "building.2.fill", label: "Publisher", value: "Tic")
+            }
+
+            Spacer(minLength: 0)
+
+            Text("Built with Swift, SwiftUI, and Python.")
+                .font(.system(size: 10))
+                .foregroundStyle(theme.textSecondary.opacity(0.6))
+                .lineLimit(1)
+                .fixedSize()
+                .padding(.top, 8)
+        }
+        .padding(.bottom, cardPadding)
+        .padding(.horizontal, cardPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(theme.screenBackground)
+        .clipShape(RoundedRectangle(cornerRadius: cardRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(cardBorder, lineWidth: 1)
+        )
+    }
+
+    private func aboutGroup<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(theme.textSecondary.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(cardBorder, lineWidth: 1)
+        )
+    }
+
+    private func aboutRow(icon: String, label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.dotActive)
+                .frame(width: 16)
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(theme.textSecondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 26)
     }
 
     // MARK: - Error Card
@@ -203,28 +316,5 @@ struct ConfigView: View {
             RoundedRectangle(cornerRadius: cardRadius)
                 .stroke(cardBorder, lineWidth: 1)
         )
-    }
-
-    // MARK: - Actions
-
-    private func selectFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Choose .cella Playlist"
-        panel.message = "Select a .cella playlist folder"
-
-        let result = panel.runModal()
-        print("[ConfigView] Panel result: \(result.rawValue), url: \(panel.url?.path ?? "nil")")
-
-        if result == .OK, let url = panel.url {
-            guard url.pathExtension.lowercased() == "cella" else {
-                viewModel.importError = "Not a .cella playlist. Rename folder with .cella extension."
-                print("[ConfigView] ERROR: Selected folder is not .cella: \(url.lastPathComponent)")
-                return
-            }
-            viewModel.importViaOpenMix(url: url)
-        }
     }
 }

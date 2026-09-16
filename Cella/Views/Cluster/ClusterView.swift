@@ -113,7 +113,7 @@ struct CellaContextMenuView: View {
                 menuRow(action)
                 if action.id != actions.last?.id {
                     Divider()
-                        .overlay(theme.textSecondary.opacity(0.14))
+                        .overlay(theme.textSecondary.opacity(CardStyle.borderOpacity))
                         .padding(.horizontal, 8)
                 }
             }
@@ -254,7 +254,7 @@ struct ClusterView: View {
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let cardRadius: CGFloat = 18
+    private let cardRadius: CGFloat = CardStyle.radius
 
     var body: some View {
         ZStack {
@@ -297,7 +297,7 @@ struct ClusterView: View {
                         packCard(pack)
                     }
                 }
-                .padding(.horizontal, 36)
+                .padding(.horizontal, CardStyle.horizontalPadding)
                 .padding(.top, 8)
                 .padding(.bottom, 40)
             }
@@ -325,7 +325,7 @@ struct ClusterView: View {
                 chooseLibrary()
             }
         }
-        .padding(.horizontal, 36)
+        .padding(.horizontal, CardStyle.horizontalPadding)
         .padding(.top, 28)
         .padding(.bottom, 20)
     }
@@ -555,7 +555,7 @@ private struct PackCardView: View {
                 .stroke(
                     isHovering
                         ? theme.dotActive.opacity(0.3)
-                        : theme.textSecondary.opacity(0.14),
+                        : theme.textSecondary.opacity(CardStyle.borderOpacity),
                     lineWidth: isHovering ? 1.5 : 1
                 )
         )
@@ -749,7 +749,7 @@ struct PackDetailView: View {
     @State private var expandedAlbum: CellaAlbum.ID?
     @State private var loadedCovers: [URL: NSImage] = [:]
 
-    private let cardRadius: CGFloat = 16
+    private let cardRadius: CGFloat = CardStyle.radius
 
     var body: some View {
         VStack(spacing: 0) {
@@ -767,11 +767,11 @@ struct PackDetailView: View {
         }
         .frame(width: 860, height: 620)
         .background(theme.appBackground.ignoresSafeArea())
-        .clipShape(RoundedRectangle(cornerRadius: 20))
-        .contentShape(RoundedRectangle(cornerRadius: 20))
+        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .contentShape(RoundedRectangle(cornerRadius: CardStyle.radius))
         .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(theme.textSecondary.opacity(0.2), lineWidth: 1)
+            RoundedRectangle(cornerRadius: CardStyle.radius)
+                .stroke(theme.textSecondary.opacity(CardStyle.borderOpacity), lineWidth: 1)
         )
         .task(id: pack.url) {
             guard !pack.url.path.isEmpty else { return }

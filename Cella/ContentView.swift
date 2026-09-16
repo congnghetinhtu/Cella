@@ -37,6 +37,7 @@ struct ContentView: View {
         switch themeOverride {
         case "seafoam": return .seafoam
         case "bipolar": return .bipolar
+        case "mint": return .mint
         default: return .dark
         }
     }

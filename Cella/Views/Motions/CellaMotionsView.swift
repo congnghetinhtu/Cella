@@ -43,6 +43,10 @@ struct CellaMotionsView: View {
     @State private var loopCount: Int = 3
     @State private var playbackTimer: Timer?
 
+    private var cardBorder: some ShapeStyle {
+        theme.textSecondary.opacity(CardStyle.borderOpacity)
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             Text("Cella Motions")
@@ -57,7 +61,8 @@ struct CellaMotionsView: View {
 
             Spacer()
         }
-        .padding(28)
+        .padding(.horizontal, CardStyle.horizontalPadding)
+        .padding(.vertical, CardStyle.verticalPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -84,7 +89,14 @@ struct CellaMotionsView: View {
                 }
             }
         }
+        .padding(CardStyle.padding)
         .frame(maxWidth: 640)
+        .background(theme.screenBackground)
+        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: CardStyle.radius)
+                .stroke(cardBorder, lineWidth: 1)
+        )
     }
 
     // MARK: - Video Player
@@ -311,7 +323,7 @@ struct CellaMotionsView: View {
     // MARK: - Drop Zone
 
     private var dropZone: some View {
-        RoundedRectangle(cornerRadius: 16)
+        RoundedRectangle(cornerRadius: CardStyle.radius)
             .stroke(theme.dotActive.opacity(0.4), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
             .frame(maxWidth: 560, minHeight: 280)
             .overlay(

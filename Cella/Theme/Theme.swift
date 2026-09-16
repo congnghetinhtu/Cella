@@ -14,12 +14,29 @@ struct Theme {
     let textSecondary: Color
 
     var isColorful: Bool { dotActive == Color(hex: 0xFF5C8A) }
+    private var isMint: Bool { dotActive == Color(hex: 0x7DD3FC) }
 
     /// Halo / glow colors — adapt to theme
-    var haloPrimary: Color { isColorful ? Color(hex: 0xFF7EB3) : Color(hex: 0x4ADE80) }    // pink vs green
-    var haloSecondary: Color { isColorful ? Color(hex: 0x8B7EFA) : Color(hex: 0x6EE7B7) }  // lavender vs mint
-    var haloAccent: Color { isColorful ? Color(hex: 0x56CCF2) : Color(hex: 0xFACC15) }     // sky blue vs yellow
-    var haloWarm: Color { isColorful ? Color(hex: 0xFF9A5C) : Color(hex: 0xFB923C) }       // tangerine vs orange
+    var haloPrimary: Color {
+        if isColorful { return Color(hex: 0xFF7EB3) }
+        if isMint { return Color(hex: 0x22D3EE) }
+        return Color(hex: 0x4ADE80)
+    }
+    var haloSecondary: Color {
+        if isColorful { return Color(hex: 0x8B7EFA) }
+        if isMint { return Color(hex: 0x5EEAD4) }
+        return Color(hex: 0x6EE7B7)
+    }
+    var haloAccent: Color {
+        if isColorful { return Color(hex: 0x56CCF2) }
+        if isMint { return Color(hex: 0x06B6D4) }
+        return Color(hex: 0xFACC15)
+    }
+    var haloWarm: Color {
+        if isColorful { return Color(hex: 0xFF9A5C) }
+        if isMint { return Color(hex: 0xF472B6) }
+        return Color(hex: 0xFB923C)
+    }
 
     /// Trail / star color palette per theme
     var trailPalette: [Color] {
@@ -30,6 +47,10 @@ struct Theme {
             return [Color(hex: 0x93E9BE), Color(hex: 0x5EEAD4), Color(hex: 0x67E8F9), Color(hex: 0x4ADE80), Color(hex: 0x2DD4BF)]
         case Color(hex: 0xFF5C8A): // bipolar — pastel rainbow
             return [Color(hex: 0xFF7EB3), Color(hex: 0xFF9A5C), Color(hex: 0x8B7EFA), Color(hex: 0x56CCF2), Color(hex: 0x6FCF97)]
+        case Color(hex: 0x7DD3FC): // mint — sky blues
+            return [Color(hex: 0x7DD3FC), Color(hex: 0x38BDF8), Color(hex: 0xBAE6FD), Color(hex: 0xA78BFA), Color(hex: 0x67E8F9)]
+        case Color(hex: 0x22D3EE): // ocean — vivid aqua
+            return [Color(hex: 0x22D3EE), Color(hex: 0x5EEAD4), Color(hex: 0xF472B6), Color(hex: 0x06B6D4), Color(hex: 0x67E8F9)]
         default:
             return [dotActive]
         }
@@ -39,7 +60,8 @@ struct Theme {
     func trailColorSmooth(at t: Double) -> Color {
         let palette = trailPalette
         guard palette.count > 1 else { return palette.first ?? dotActive }
-        let scaled = t * Double(palette.count - 1)
+        let clamped = min(max(t, 0), 1)
+        let scaled = clamped * Double(palette.count - 1)
         let idx = Int(scaled)
         let frac = scaled - Double(idx)
         guard idx < palette.count - 1 else { return palette.last! }
@@ -49,8 +71,9 @@ struct Theme {
     /// Returns a cycling accent color from the palette at position 0–1.
     func trailColorCycle(at t: Double) -> Color {
         let palette = trailPalette
+        guard !palette.isEmpty else { return dotActive }
         let idx = Int(t * Double(palette.count)) % palette.count
-        return palette[idx]
+        return palette[idx < 0 ? idx + palette.count : idx]
     }
 
     /// Multi-color per tab — each tab gets a distinct color (Colorful theme only).
@@ -108,6 +131,20 @@ struct Theme {
         textPrimary: Color(hex: 0xFFF0F5),
         textSecondary: Color(hex: 0x998AAA)
     )
+
+    static let mint = Theme(
+        dotInactive: Color(hex: 0x1A2E3A),
+        dotActive: Color(hex: 0x22D3EE),
+        dotInactiveDeep: Color(hex: 0x0E1A24),
+        appBackground: Color(hex: 0x060E14),
+        screenBackground: Color(hex: 0x0E1A24),
+        tabBarBackground: Color(hex: 0x0E1A24),
+        tabSelectedBackground: Color(hex: 0x22D3EE, opacity: 0.25),
+        tabSelectedText: Color(hex: 0x22D3EE),
+        tabUnselectedText: Color(hex: 0x4A8A9A),
+        textPrimary: Color(hex: 0xE0F0F8),
+        textSecondary: Color(hex: 0x7AAABB)
+    )
 }
 
 struct ThemeKey: EnvironmentKey {
@@ -119,6 +156,17 @@ extension EnvironmentValues {
         get { self[ThemeKey.self] }
         set { self[ThemeKey.self] = newValue }
     }
+}
+
+// MARK: - Unified Card Style
+
+enum CardStyle {
+    static let radius: CGFloat = 18
+    static let padding: CGFloat = 28
+    static let borderOpacity: Double = 0.10
+    static let horizontalPadding: CGFloat = 40
+    static let verticalPadding: CGFloat = 28
+    static let gridSpacing: CGFloat = 16
 }
 
 // MARK: - Unified Animation Curves
