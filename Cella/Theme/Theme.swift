@@ -14,7 +14,7 @@ struct Theme {
     let textSecondary: Color
 
     var isColorful: Bool { dotActive == Color(hex: 0xFF5C8A) }
-    private var isMint: Bool { dotActive == Color(hex: 0x7DD3FC) }
+    private var isMint: Bool { dotActive == Color(hex: 0x22D3EE) }
 
     /// Halo / glow colors — adapt to theme
     var haloPrimary: Color {

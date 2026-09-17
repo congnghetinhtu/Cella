@@ -12,6 +12,7 @@ struct ContentView: View {
     @State private var savedVolume: Float = 1.0
     @State private var cellaVolume: Float = 1.0
     @State private var viewModel = PlayerViewModel()
+    @StateObject private var motionsViewModel = MotionsViewModel()
     @State private var detailPack: CellaPack?
     @State private var displayedPack: CellaPack?
     @State private var pendingLRCAudioURL: URL?
@@ -278,7 +279,7 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 // Top: Nav bar
-                BottomTabBar(selectedTab: $selectedTab)
+                BottomTabBar(selectedTab: $selectedTab, motionsViewModel: motionsViewModel)
                     .padding(.horizontal, 48)
                     .padding(.top, 20)
 
@@ -297,7 +298,7 @@ struct ContentView: View {
                         })
                         .transition(bloomTransition)
                     case .motions:
-                        CellaMotionsView()
+                        CellaMotionsView(viewModel: motionsViewModel)
                             .transition(bloomTransition)
                     case .cella:
                         CellaView(viewModel: viewModel)
@@ -536,7 +537,8 @@ struct ContentView: View {
                 viewModel.setVolume(cellaVolume)
             }
             viewModel.setHallReverb(tab == .motions)
-            if tab != .cella {
+            if tab != .motions {
+                motionsViewModel.pauseEditing()
                 viewModel.isAnimationPaused = true
             }
         }

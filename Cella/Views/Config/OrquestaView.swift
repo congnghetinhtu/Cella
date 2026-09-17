@@ -30,6 +30,8 @@ struct OrquestaView: View {
     @State private var soloSeat: Int?
     @State private var animPhase: Double = 0
     @State private var burstTimer: Timer?
+    @State private var pressedPreset: String?
+    @State private var stageFlash: Double = 0
 
     private let bandLift: CGFloat = 0.45
     private let maxGain: Float = 6
@@ -79,6 +81,17 @@ struct OrquestaView: View {
         }
         .onChange(of: surroundMode) { _, _ in
             triggerBurst()
+        }
+        .onChange(of: viewModel.currentPreset.id) { _, _ in
+            triggerBurst()
+            withAnimation(.easeOut(duration: 0.6)) {
+                stageFlash = 1.0
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                withAnimation(.easeIn(duration: 0.4)) {
+                    stageFlash = 0
+                }
+            }
         }
         .onDisappear {
             stopBreathing()

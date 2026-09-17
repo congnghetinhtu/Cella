@@ -5,165 +5,196 @@
 //  Cella Motions — create Instagram boomerang videos.
 //  Mark-based trimmer: scrub to the moment, tap to mark in/out.
 //  Precision from the big video frame, not tiny filmstrip handles.
+//  Editor state lives in `MotionsViewModel` so it survives tab switches and
+//  can be paused (and flagged Unsaved) from the nav layer.
 //
 
 import SwiftUI
 import AVKit
+import UniformTypeIdentifiers
 
 /// Preset boomerang clip durations (seconds).
 private let presetDurations: [Double] = [0.3, 0.5, 1.0, 2.0]
 
 struct CellaMotionsView: View {
+    @ObservedObject var viewModel: MotionsViewModel
     @Environment(\.theme) private var theme
 
-    @State private var sourceURL: URL?
-    @State private var outputURL: URL?
-    @State private var isExporting = false
-    @State private var exportProgress: Double = 0
-    @State private var errorMessage: String?
-    @State private var successMessage: String?
-
-    @State private var player: AVPlayer?
-    @State private var videoDuration: Double = 0
-    @State private var frameRate: Double = 30
-    @State private var timeObserver: Any?
-
-    // Selection
-    @State private var trimStart: Double = 0
-    @State private var trimEnd: Double = 1.0
-    @State private var targetDuration: Double = 1.0
-    @State private var currentTime: Double = 0
-
-    // Filmstrip (full video, static — always aligned)
-    @State private var overviewThumbs: [NSImage] = []
-
-    // UI
-    @State private var isPlaying = false
-    @State private var isLoopPreviewing = false
-    @State private var loopCount: Int = 3
-    @State private var playbackTimer: Timer?
+    @State private var isDragOver: Bool = false
 
     private var cardBorder: some ShapeStyle {
         theme.textSecondary.opacity(CardStyle.borderOpacity)
     }
 
-    var body: some View {
-        VStack(spacing: 18) {
-            Text("Cella Motions")
-                .font(.system(size: 26, weight: .bold, design: .rounded))
-                .foregroundStyle(theme.textPrimary)
+    private let cardRadius: CGFloat = CardStyle.radius
+    private let gridSpacing: CGFloat = 28
 
-            if sourceURL != nil {
+    var body: some View {
+        VStack(spacing: 0) {
+            if viewModel.sourceURL != nil {
                 editor
             } else {
                 dropZone
             }
-
-            Spacer()
         }
-        .padding(.horizontal, CardStyle.horizontalPadding)
-        .padding(.vertical, CardStyle.verticalPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.smooth, value: viewModel.sourceURL != nil)
+        .onKeyPress(.space) { viewModel.playPause(); return .handled }
+        .onKeyPress(.leftArrow) { viewModel.stepFrame(by: -1); return .handled }
+        .onKeyPress(.rightArrow) { viewModel.stepFrame(by: 1); return .handled }
+        .onKeyPress("i") { viewModel.markIn(); return .handled }
+        .onKeyPress("o") { viewModel.markOut(); return .handled }
+        .onKeyPress("l") { viewModel.toggleLoopPreview(); return .handled }
+        .onKeyPress("[") { viewModel.nudgeTrimStart(-0.1); return .handled }
+        .onKeyPress("]") { viewModel.nudgeTrimEnd(0.1); return .handled }
+        .onChange(of: viewModel.trimStart) { _, _ in viewModel.noteClipChanged() }
+        .onChange(of: viewModel.trimEnd) { _, _ in viewModel.noteClipChanged() }
+        .onChange(of: viewModel.loopCount) { _, _ in viewModel.noteClipChanged() }
+        .onChange(of: viewModel.targetDuration) { _, _ in viewModel.noteClipChanged() }
+    }
+
+    // MARK: - Editor (canvas + split inspector, no scroll)
+
+    private var editor: some View {
+        GeometryReader { geo in
+            bentoCard
+                .padding(.horizontal, 96)
+                .padding(.vertical, 64)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.appBackground)
+        .overlay(alignment: .bottom) { toastOverlay }
+    }
+
+    private var bentoCard: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: cardRadius)
+                .fill(theme.screenBackground)
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(cardBorder, lineWidth: 1)
+
+            HStack(spacing: 0) {
+                canvasColumn
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider().background(theme.textSecondary.opacity(0.06))
+
+                inspectorColumn
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // MARK: - Editor
+    // MARK: - Canvas Column (video + filmstrip + scrub)
 
-    private var editor: some View {
-        VStack(spacing: 14) {
-            videoPlayer
-            scrubBar
+    private var canvasColumn: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                headerRow
+                    .padding(.horizontal, 24)
+                    .padding(.top, 16)
+                    .padding(.bottom, 10)
 
-            if videoDuration > 0 {
-                timeReadout
-                markControls
+                videoPlayer(maxVideoHeight: max(200, geo.size.height - 272))
+                    .padding(.horizontal, 24)
+
+                Divider().background(theme.textSecondary.opacity(0.06))
+                    .padding(.vertical, 12)
+
                 filmStrip
-                presetRow
-                nudgeRow
-                exportRow
+                    .padding(.horizontal, 24)
 
-                if let error = errorMessage {
-                    Text(error).font(.system(size: 13, design: .rounded)).foregroundStyle(.red)
-                }
-                if let msg = successMessage {
-                    Text(msg).font(.system(size: 13, design: .rounded)).foregroundStyle(.green)
-                }
+                Divider().background(theme.textSecondary.opacity(0.06))
+                    .padding(.vertical, 12)
+
+                scrubBar
+                    .padding(.horizontal, 24)
+
+                Spacer(minLength: 0)
+                    .frame(height: 14)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(CardStyle.padding)
-        .frame(maxWidth: 640)
-        .background(theme.screenBackground)
-        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
-        .overlay(
-            RoundedRectangle(cornerRadius: CardStyle.radius)
-                .stroke(cardBorder, lineWidth: 1)
-        )
     }
 
-    // MARK: - Video Player
+    // MARK: - Header Row
 
-    private var videoPlayer: some View {
-        VideoPlayer(player: player)
-            .aspectRatio(16/9, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .frame(maxWidth: 560)
-            .overlay(alignment: .topTrailing) {
-                // Live time badge
-                Text(now)
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(theme.textPrimary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Capsule().fill(theme.tabBarBackground))
-                    .padding(8)
+    private var headerRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "film")
+                .font(.system(size: 13))
+                .foregroundStyle(theme.dotActive)
+            Text(viewModel.sourceURL?.lastPathComponent ?? "Video")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Text("BOOMERANG")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.dotActive)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().fill(theme.dotActive.opacity(0.15)))
+            Button {
+                viewModel.clearVideo()
+            } label: {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 12, weight: .medium))
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(theme.textSecondary)
+            .help("Clear and start over")
+        }
     }
 
-    private var now: String {
-        formatTime(currentTime)
+    // MARK: - Video Player (scales to card width, capped by viewport)
+
+    private func videoPlayer(maxVideoHeight: CGFloat) -> some View {
+        VideoPlayer(player: viewModel.player)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .aspectRatio(16/9, contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: maxVideoHeight)
+            .background(theme.appBackground)
     }
 
     // MARK: - Scrub Bar
 
     private var scrubBar: some View {
-        VStack(spacing: 2) {
-            Slider(
-                value: Binding(
-                    get: { currentTime },
-                    set: { seekTo($0) }
-                ),
-                in: 0...max(0, videoDuration),
-                onEditingChanged: { editing in
-                    if editing { player?.pause(); isPlaying = false }
-                }
-            )
-            .frame(maxWidth: 560)
+        VStack(spacing: 6) {
+            HStack(spacing: 12) {
+                Text(viewModel.formatTime(viewModel.currentTime))
+                    .font(.system(size: 13, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(minWidth: 60, alignment: .trailing)
 
-            HStack {
-                Text(formatTime(0))
-                Spacer()
-                Text("/ \(formatTime(videoDuration))")
+                ThinScrubBar(
+                    duration: viewModel.videoDuration,
+                    currentTime: viewModel.currentTime,
+                    theme: theme,
+                    onSeek: { viewModel.seekTo($0) },
+                    onSeekStarted: { viewModel.beginScrub() }
+                )
+                .frame(height: 28)
+
+                Text(viewModel.formatTime(viewModel.videoDuration))
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(minWidth: 60, alignment: .leading)
             }
-            .font(.system(size: 9, design: .monospaced))
-            .foregroundStyle(theme.textSecondary.opacity(0.6))
-            .frame(maxWidth: 560)
-        }
-    }
 
-    // MARK: - Time Readout
-
-    private var timeReadout: some View {
-        HStack(spacing: 14) {
-            readoutCell("In", formatTime(trimStart))
-            readoutCell("Dur", String(format: "%.2fs", trimEnd - trimStart))
-            readoutCell("Out", formatTime(trimEnd))
+            HStack(spacing: 16) {
+                readoutCell("In", viewModel.formatTime(viewModel.trimStart))
+                readoutCell("Dur", String(format: "%.2fs", viewModel.trimEnd - viewModel.trimStart))
+                readoutCell("Out", viewModel.formatTime(viewModel.trimEnd))
+            }
         }
-        .frame(maxWidth: 560)
     }
 
     private func readoutCell(_ label: String, _ value: String) -> some View {
-        VStack(spacing: 2) {
+        HStack(spacing: 6) {
             Text(label)
-                .font(.system(size: 9, weight: .medium, design: .rounded))
+                .font(.system(size: 10, weight: .medium, design: .rounded))
                 .foregroundStyle(theme.textSecondary.opacity(0.7))
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: .monospaced))
@@ -171,44 +202,8 @@ struct CellaMotionsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 6)
+        .padding(.horizontal, 10)
         .background(RoundedRectangle(cornerRadius: 8).fill(theme.tabBarBackground))
-    }
-
-    // MARK: - Mark Controls
-
-    private var markControls: some View {
-        HStack(spacing: 12) {
-            Button {
-                markIn()
-            } label: {
-                Label("Mark In", systemImage: "arrow.left.to.line")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.dotActive)
-            .help("Set clip start to current playhead")
-
-            Button {
-                markOut()
-            } label: {
-                Label("Mark Out", systemImage: "arrow.right.to.line")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(theme.dotActive)
-
-            Button {
-                toggleLoopPreview()
-            } label: {
-                Label(isLoopPreviewing ? "Stop Preview" : "Loop Preview",
-                      systemImage: isLoopPreviewing ? "stop.fill" : "repeat")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-            }
-            .buttonStyle(.bordered)
-            .tint(isLoopPreviewing ? theme.dotActive : theme.textSecondary)
-            .help("Preview the selection as a loop")
-        }
-        .frame(maxWidth: 560)
     }
 
     // MARK: - Filmstrip
@@ -216,370 +211,428 @@ struct CellaMotionsView: View {
     private var filmStrip: some View {
         VStack(spacing: 4) {
             HStack {
-                Text("Drag the white playhead or tap to scrub")
-                    .font(.system(size: 9, design: .rounded))
+                Text(viewModel.zoomed ? "Detail view" : "Tap or drag to scrub")
+                    .font(.system(size: 10, design: .rounded))
                     .foregroundStyle(theme.textSecondary.opacity(0.8))
                 Spacer()
-                Text("\(formatTime(trimStart)) — \(formatTime(trimEnd))")
-                    .font(.system(size: 9, design: .monospaced))
+
+                Button {
+                    viewModel.toggleZoom()
+                } label: {
+                    Image(systemName: viewModel.zoomed ? "arrow.up.left.and.arrow.down.right" : "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(theme.dotActive)
+                }
+                .buttonStyle(.plain)
+                .help(viewModel.zoomed ? "Zoom out" : "Zoom in to selection")
+
+                Text("\(viewModel.formatTime(viewModel.trimStart)) — \(viewModel.formatTime(viewModel.trimEnd))")
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(theme.dotActive)
             }
-            .frame(maxWidth: 600)
 
             FilmstripBar(
-                duration: videoDuration,
-                trimStart: $trimStart,
-                trimEnd: $trimEnd,
-                currentTime: currentTime,
-                thumbnails: overviewThumbs,
+                duration: viewModel.zoomed ? viewModel.zoomDuration : viewModel.videoDuration,
+                trimStart: $viewModel.trimStart,
+                trimEnd: $viewModel.trimEnd,
+                currentTime: viewModel.currentTime,
+                thumbnails: viewModel.zoomed ? viewModel.zoomThumbs : viewModel.overviewThumbs,
                 theme: theme,
-                onScrub: { position in
-                    seekTo(position)
-                },
-                onMoveSelectionTo: { position in
-                    placeClip(at: position, keepDuration: true)
-                }
+                visibleRange: viewModel.zoomed ? viewModel.zoomRange : nil,
+                onScrub: { viewModel.seekTo($0) },
+                onMoveSelectionTo: { viewModel.placeClip(at: $0, keepDuration: true) }
             )
-            .frame(maxWidth: 600)
             .frame(height: 64)
         }
     }
 
-    // MARK: - Presets
+    // MARK: - Inspector Column
 
-    private var presetRow: some View {
-        HStack(spacing: 8) {
-            Text("Length:")
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(theme.textSecondary)
+    private var inspectorColumn: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            inspectorSectionLabel("MARK")
+                .padding(.bottom, 8)
+            inspectorMarkRow
 
-            ForEach(presetDurations, id: \.self) { secs in
-                Button("\(formatPreset(secs))s") {
-                    setTargetDuration(secs)
+            inspectorSpacer
+            inspectorSectionLabel("CLIP")
+                .padding(.bottom, 8)
+            inspectorClipRow
+
+            inspectorSpacer
+            inspectorSectionLabel("PRECISION")
+                .padding(.bottom, 8)
+            inspectorPrecision
+
+            inspectorSpacer
+            inspectorSectionLabel("EXPORT")
+                .padding(.bottom, 8)
+            inspectorExport
+
+            Spacer(minLength: 12)
+
+            Text("I / O mark · Space play · ← → frame · [ ] trim · L loop")
+                .font(.system(size: 9, design: .rounded))
+                .foregroundStyle(theme.textSecondary.opacity(0.6))
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 22)
+        .padding(.vertical, 18)
+        .frame(width: 292)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var inspectorSpacer: some View {
+        Divider().background(theme.textSecondary.opacity(0.06))
+            .padding(.vertical, 14)
+    }
+
+    private func inspectorSectionLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold, design: .rounded))
+            .kerning(1.2)
+            .foregroundStyle(theme.textSecondary.opacity(0.5))
+    }
+
+    private var inspectorMarkRow: some View {
+        HStack(spacing: 10) {
+            Button { viewModel.markIn() } label: {
+                Label("In", systemImage: "arrow.left.to.line")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(theme.dotActive)
+            .help("Mark start (I)")
+
+            Button { viewModel.markOut() } label: {
+                Label("Out", systemImage: "arrow.right.to.line")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(theme.dotActive)
+            .help("Mark end (O)")
+
+            Button { viewModel.toggleLoopPreview() } label: {
+                Image(systemName: viewModel.isLoopPreviewing ? "stop.fill" : "repeat")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(viewModel.isLoopPreviewing ? theme.dotActive : theme.textSecondary)
+            .help("Loop preview (L)")
+        }
+    }
+
+    private var inspectorClipRow: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                ForEach(presetDurations, id: \.self) { secs in
+                    Button(String(format: "%.1fs", secs)) {
+                        viewModel.setTargetDuration(secs)
+                    }
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .buttonStyle(.bordered)
+                    .tint(viewModel.targetDuration == secs ? theme.dotActive : theme.textSecondary)
+                    .frame(maxWidth: .infinity)
                 }
-                .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                .buttonStyle(.bordered)
-                .tint(targetDuration == secs ? theme.dotActive : theme.textSecondary)
+            }
+
+            HStack(spacing: 10) {
+                Text("Repeats")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textSecondary)
+
+                Button {
+                    withAnimation(.snappy) { viewModel.setLoopCount(viewModel.loopCount - 1) }
+                } label: {
+                    Image(systemName: "minus.circle.fill").font(.system(size: 15))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(viewModel.loopCount <= 1 ? theme.textSecondary.opacity(0.3) : theme.textSecondary)
+                .disabled(viewModel.loopCount <= 1)
+
+                Text("\(viewModel.loopCount)")
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(width: 22)
+                    .contentTransition(.numericText())
+                    .animation(.snappy, value: viewModel.loopCount)
+
+                Button {
+                    withAnimation(.snappy) { viewModel.setLoopCount(viewModel.loopCount + 1) }
+                } label: {
+                    Image(systemName: "plus.circle.fill").font(.system(size: 15))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(viewModel.loopCount >= 8 ? theme.textSecondary.opacity(0.3) : theme.textSecondary)
+                .disabled(viewModel.loopCount >= 8)
+
+                Spacer()
             }
         }
-        .frame(maxWidth: 560)
     }
 
-    // MARK: - Nudge Row
+    private var inspectorPrecision: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Text("Frame")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 46, alignment: .leading)
 
-    private var nudgeRow: some View {
-        HStack(spacing: 10) {
-            Text("Fine:")
-                .font(.system(size: 12, design: .rounded))
-                .foregroundStyle(theme.textSecondary)
+                Button { viewModel.stepFrame(by: -1) } label: {
+                    Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold))
+                }
+                .buttonStyle(.bordered).tint(theme.textSecondary)
+                .help("Previous frame (←)")
 
-            Button { nudgeTrimStart(-0.1) } label: { Text("◀◀ 0.1").font(.system(size: 10, design: .monospaced)) }
+                Button { viewModel.stepFrame(by: 1) } label: {
+                    Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                }
                 .buttonStyle(.bordered).tint(theme.textSecondary)
-            Button { nudgeTrimStart(0.1) } label: { Text("0.1 ▶").font(.system(size: 10, design: .monospaced)) }
-                .buttonStyle(.bordered).tint(theme.textSecondary)
+                .help("Next frame (→)")
 
-            Spacer()
+                Spacer()
+            }
 
-            Button { stepFrame(by: -1) } label: { Text("◀ frame").font(.system(size: 10, design: .monospaced)) }
+            HStack(spacing: 10) {
+                Text("Trim")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 46, alignment: .leading)
+
+                Button { viewModel.nudgeTrimStart(-0.1) } label: {
+                    Image(systemName: "chevron.left.2").font(.system(size: 10, weight: .semibold))
+                }
                 .buttonStyle(.bordered).tint(theme.textSecondary)
-            Button { stepFrame(by: 1) } label: { Text("frame ▶").font(.system(size: 10, design: .monospaced)) }
+                .help("Trim start −0.1s ([)")
+
+                Button { viewModel.nudgeTrimEnd(0.1) } label: {
+                    Image(systemName: "chevron.right.2").font(.system(size: 10, weight: .semibold))
+                }
                 .buttonStyle(.bordered).tint(theme.textSecondary)
+                .help("Trim end +0.1s (])")
+
+                Spacer()
+            }
         }
-        .frame(maxWidth: 560)
     }
 
-    // MARK: - Export
-
-    private var exportRow: some View {
-        HStack(spacing: 12) {
-            Button("Clear") { clearVideo() }
-                .buttonStyle(.bordered)
-                .tint(theme.textSecondary)
-
-            if !isExporting {
-                Button("Create Boomerang") { createBoomerang() }
+    private var inspectorExport: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if !viewModel.isExporting {
+                Button("Create Boomerang") { viewModel.createBoomerang() }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .buttonStyle(.borderedProminent)
                     .tint(theme.dotActive)
-                    .disabled(videoDuration <= 0)
+                    .disabled(viewModel.videoDuration <= 0)
+                    .frame(maxWidth: .infinity)
             } else {
-                ProgressView(value: exportProgress).frame(width: 160)
-                Text("\(Int(exportProgress * 100))%")
-                    .font(.system(size: 13, design: .monospaced))
+                ProgressView(value: viewModel.exportProgress).frame(maxWidth: .infinity)
+                Text("\(Int(viewModel.exportProgress * 100))%")
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
             }
 
-            if outputURL != nil {
-                Button("Show in Finder") {
-                    if let url = outputURL {
+            if viewModel.outputURL != nil {
+                Button {
+                    if let url = viewModel.outputURL {
                         NSWorkspace.shared.activateFileViewerSelecting([url])
                     }
+                } label: {
+                    Label("Show in Finder", systemImage: "folder")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .tint(theme.dotActive)
+                .help("Show in Finder")
             }
         }
-        .frame(maxWidth: 560)
+    }
+
+    // MARK: - Toast
+
+    private var toastOverlay: some View {
+        Group {
+            if let toast = viewModel.toast {
+                HStack(spacing: 6) {
+                    Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    Text(toast.text)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                }
+                .foregroundStyle(toast.isError ? .red : .green)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(.ultraThinMaterial))
+                .padding(.bottom, 12)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: viewModel.toast != nil)
     }
 
     // MARK: - Drop Zone
 
     private var dropZone: some View {
-        RoundedRectangle(cornerRadius: CardStyle.radius)
-            .stroke(theme.dotActive.opacity(0.4), style: StrokeStyle(lineWidth: 2, dash: [8, 6]))
-            .frame(maxWidth: 560, minHeight: 280)
-            .overlay(
-                VStack(spacing: 12) {
-                    Image(systemName: "film").font(.system(size: 48)).foregroundStyle(theme.dotActive.opacity(0.6))
-                    Text("Drop video here").font(.system(size: 16, weight: .medium, design: .rounded)).foregroundStyle(theme.textSecondary)
-                    Text("MP4, MOV").font(.system(size: 12, design: .rounded)).foregroundStyle(theme.textSecondary.opacity(0.6))
+        ScrollView {
+            VStack(alignment: .leading, spacing: gridSpacing) {
+                dropCard
+            }
+            .padding(.horizontal, 96)
+            .padding(.vertical, 64)
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(theme.appBackground)
+    }
+
+    private var dropCard: some View {
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: cardRadius)
+                .fill(theme.screenBackground)
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(cardBorder, lineWidth: 1)
+
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "film")
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.dotActive)
+                    Text("Boomerang")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    Text("MP4 · MOV")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(theme.dotInactive.opacity(0.25)))
                 }
-            )
-            .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                guard let provider = providers.first else { return false }
-                _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                    if let url = url as? URL {
-                        DispatchQueue.main.async { loadVideo(url) }
+                .padding(.horizontal, 28)
+                .padding(.top, 24)
+                .padding(.bottom, 16)
+
+                dropTarget
+                    .frame(maxHeight: .infinity)
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 24)
+            }
+        }
+        .frame(height: 460)
+    }
+
+    private var dropTarget: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cardRadius)
+                .fill(theme.dotActive.opacity(isDragOver ? 0.06 : 0))
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(
+                    isDragOver ? theme.dotActive : theme.dotActive.opacity(0.35),
+                    style: StrokeStyle(lineWidth: isDragOver ? 3 : 2, dash: [8, 6])
+                )
+
+            VStack(spacing: 14) {
+                Image(systemName: "film")
+                    .font(.system(size: 44))
+                    .foregroundStyle(theme.dotActive.opacity(0.6))
+                Text("Drop video here")
+                    .font(.system(size: 16, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                Text("Drag a clip in, or browse")
+                    .font(.system(size: 12, design: .rounded))
+                    .foregroundStyle(theme.textSecondary)
+
+                Button("Browse…") {
+                    let panel = NSOpenPanel()
+                    panel.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
+                    panel.allowsMultipleSelection = false
+                    if panel.runModal() == .OK, let url = panel.url {
+                        viewModel.loadVideo(url)
                     }
                 }
-                return true
+                .buttonStyle(.bordered)
+                .tint(theme.dotActive)
             }
-    }
-
-    // MARK: - Video Loading
-
-    private func loadVideo(_ url: URL) {
-        sourceURL = url
-        outputURL = nil
-        errorMessage = nil
-        successMessage = nil
-        overviewThumbs = []
-        stopPlaybackTimer()
-
-        let asset = AVURLAsset(url: url)
-        Task {
-            let dur = try await asset.load(.duration)
-            let secs = CMTimeGetSeconds(dur)
-            await MainActor.run {
-                videoDuration = secs
-                trimStart = 0
-                trimEnd = min(targetDuration, secs)
-            }
-
-            if let track = try? await asset.loadTracks(withMediaType: .video).first,
-               let fr = try? await track.load(.nominalFrameRate) {
-                let f = Double(fr)
-                await MainActor.run { if f > 0 { frameRate = f } }
-            }
-
-            let thumbs = await FilmstripGenerator.generateThumbnails(
-                from: url, count: 30, height: 64
-            )
-            await MainActor.run { overviewThumbs = thumbs }
+            .padding(24)
         }
-        player = AVPlayer(url: url)
-        startTimeObserver(on: player!)
-    }
-
-    private func startTimeObserver(on avPlayer: AVPlayer) {
-        timeObserver = avPlayer.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 1.0 / 30.0, preferredTimescale: 60000),
-            queue: .main
-        ) { time in
-            currentTime = CMTimeGetSeconds(time)
-        }
-    }
-
-    // MARK: - Mark Selection
-
-    /// Set start = playhead; end = playhead + target duration (clamped).
-    private func markIn() {
-        let dur = min(targetDuration, videoDuration)
-        let s = min(currentTime, videoDuration - dur)
-        trimStart = s
-        trimEnd = s + dur
-        playSelection()
-    }
-
-    /// Set end = playhead; start = playhead - target duration (clamped).
-    private func markOut() {
-        let dur = min(targetDuration, videoDuration)
-        let e = max(currentTime, dur)
-        trimStart = e - dur
-        trimEnd = e
-        playSelection()
-    }
-
-    private func setTargetDuration(_ secs: Double) {
-        targetDuration = secs
-        placeClip(at: currentTime, keepDuration: false)
-    }
-
-    /// Move a clip (of current or target duration) to start at `position`.
-    private func placeClip(at position: Double, keepDuration: Bool) {
-        let dur = keepDuration ? (trimEnd - trimStart) : min(targetDuration, videoDuration)
-        let s = min(max(0, position), videoDuration - dur)
-        trimStart = s
-        trimEnd = s + dur
-        seekTo(trimStart)
-    }
-
-    private func nudgeTrimStart(_ delta: Double) {
-        trimStart = max(0, min(trimStart + delta, trimEnd - 0.05))
-        seekTo(trimStart)
-    }
-
-    private func nudgeTrimEnd(_ delta: Double) {
-        trimEnd = min(videoDuration, max(trimEnd + delta, trimStart + 0.05))
-    }
-
-    // MARK: - Playback
-
-    private func playSelection() {
-        guard let player = player else { return }
-        let start = CMTime(seconds: trimStart, preferredTimescale: 60000)
-        player.seek(to: start)
-        player.play()
-        isPlaying = true
-        startPlaybackTimer()
-    }
-
-    private func toggleLoopPreview() {
-        guard player != nil else { return }
-        isLoopPreviewing.toggle()
-        if isLoopPreviewing {
-            playSelection()
-        } else {
-            player?.pause()
-            isPlaying = false
-            stopPlaybackTimer()
-        }
-    }
-
-    private func seekTo(_ position: Double) {
-        guard let player = player else { return }
-        let p = max(0, min(position, videoDuration))
-        let time = CMTime(seconds: p, preferredTimescale: 60000)
-        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        currentTime = p
-    }
-
-    private func stepFrame(by direction: Int) {
-        player?.pause()
-        isPlaying = false
-        stopPlaybackTimer()
-        let frameDur = 1.0 / frameRate
-        seekTo(max(0, min(videoDuration, currentTime + frameDur * Double(direction))))
-    }
-
-    private func startPlaybackTimer() {
-        stopPlaybackTimer()
-        playbackTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
-            guard let player = player else { return }
-            let t = CMTimeGetSeconds(player.currentTime())
-            currentTime = t
-            if t >= trimEnd {
-                if isLoopPreviewing {
-                    player.seek(to: CMTime(seconds: trimStart, preferredTimescale: 60000))
-                    player.play()
-                } else {
-                    player.pause()
-                    isPlaying = false
-                    stopPlaybackTimer()
+        .contentShape(RoundedRectangle(cornerRadius: cardRadius))
+        .scaleEffect(isDragOver ? 1.01 : 1.0)
+        .animation(.snappy, value: isDragOver)
+        .onDrop(of: [.fileURL], isTargeted: $isDragOver) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                if let url = url as? URL {
+                    DispatchQueue.main.async { viewModel.loadVideo(url) }
                 }
             }
+            return true
         }
     }
+}
 
-    private func stopPlaybackTimer() {
-        playbackTimer?.invalidate()
-        playbackTimer = nil
-    }
+// MARK: - Thin Scrub Bar
 
-    /// Cleanly tear down the current player: remove observer, stop timer, pause.
-    private func teardownPlayer() {
-        if let player = player, let obs = timeObserver {
-            player.removeTimeObserver(obs)
-        }
-        timeObserver = nil
-        stopPlaybackTimer()
-        isPlaying = false
-        isLoopPreviewing = false
-        player?.pause()
-    }
+struct ThinScrubBar: View {
+    let duration: Double
+    let currentTime: Double
+    let theme: Theme
+    var onSeek: ((Double) -> Void)?
+    var onSeekStarted: (() -> Void)?
 
-    // MARK: - Export
+    @State private var isDragging = false
 
-    private func createBoomerang() {
-        guard let source = sourceURL else { return }
-        let outName = source.deletingPathExtension().lastPathComponent + ".cma"
-        let outURL = source.deletingLastPathComponent().appendingPathComponent(outName)
+    private let barHeight: CGFloat = 5
+    private let hitHeight: CGFloat = 24
+    private let knobSize: CGFloat = 14
 
-        isExporting = true
-        exportProgress = 0
-        errorMessage = nil
-        successMessage = nil
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let progress = duration > 0 ? currentTime / duration : 0
+            let knobX = CGFloat(progress) * w
 
-        BoomerangMaker.createBoomerang(
-            from: source, outputURL: outURL,
-            trimStart: trimStart, trimEnd: trimEnd,
-            loopCount: loopCount,
-            progress: { p in
-                DispatchQueue.main.async { exportProgress = p }
-            },
-            completion: { result in
-                DispatchQueue.main.async { handleExportResult(result) }
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: barHeight / 2)
+                    .fill(theme.textSecondary.opacity(0.2))
+                    .frame(height: barHeight)
+                    .frame(maxHeight: .infinity)
+
+                RoundedRectangle(cornerRadius: barHeight / 2)
+                    .fill(theme.dotActive)
+                    .frame(width: max(0, knobX), height: barHeight)
+                    .frame(maxHeight: .infinity)
+
+                Circle()
+                    .fill(.white)
+                    .frame(width: knobSize, height: knobSize)
+                    .position(x: knobX, y: geo.size.height / 2)
+                    .shadow(color: .black.opacity(0.5), radius: 3)
+                    .scaleEffect(isDragging ? 1.3 : 1.0)
+                    .animation(.snappy, value: isDragging)
             }
-        )
-    }
-
-    private func handleExportResult(_ result: Result<URL, Error>) {
-        isExporting = false
-        switch result {
-        case .success(let url):
-            outputURL = url
-            successMessage = "Saved: \(url.lastPathComponent)"
-            let tmpPreview = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString + "_preview.mp4")
-            try? FileManager.default.copyItem(at: url, to: tmpPreview)
-            teardownPlayer()
-            let previewPlayer = AVPlayer(url: tmpPreview)
-            previewPlayer.pause()
-            player = previewPlayer
-            startTimeObserver(on: previewPlayer)
-        case .failure(let err):
-            errorMessage = err.localizedDescription
+            .frame(width: w, height: hitHeight)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if !isDragging { onSeekStarted?() }
+                        isDragging = true
+                        let p = Double(value.location.x / w) * duration
+                        onSeek?(max(0, min(p, duration)))
+                    }
+                    .onEnded { _ in
+                        isDragging = false
+                    }
+            )
         }
-    }
-
-    private func clearVideo() {
-        teardownPlayer()
-        sourceURL = nil
-        outputURL = nil
-        player = nil
-        overviewThumbs = []
-        errorMessage = nil
-        successMessage = nil
-        videoDuration = 0
-        stopPlaybackTimer()
-    }
-
-    // MARK: - Formatting
-
-    private func formatTime(_ s: Double) -> String {
-        let m = Int(s) / 60
-        let sec = Int(s) % 60
-        let ms = Int((s - Double(Int(s))) * 10)
-        return String(format: "%d:%02d.%d", m, sec, ms)
-    }
-
-    private func formatPreset(_ secs: Double) -> String {
-        secs == 0.3 ? "0.3" : secs == 0.5 ? "0.5" : "\(Int(secs))"
     }
 }
 
 // MARK: - Filmstrip Bar
 
-/// Full-video filmstrip for scrubbing and selection visual.
-/// Drag playhead to scrub; grab selection band middle to move a placed clip.
 struct FilmstripBar: View {
     let duration: Double
     @Binding var trimStart: Double
@@ -587,12 +640,11 @@ struct FilmstripBar: View {
     let currentTime: Double
     let thumbnails: [NSImage]
     let theme: Theme
+    var visibleRange: ClosedRange<Double>?
     var onScrub: ((Double) -> Void)?
     var onMoveSelectionTo: ((Double) -> Void)?
 
     @State private var dragOrigin: Double?
-
-    private let handleWidth: CGFloat = 18
 
     var body: some View {
         GeometryReader { geo in
@@ -601,11 +653,12 @@ struct FilmstripBar: View {
             let sx = x(trimStart, w)
             let ex = x(trimEnd, w)
             let px = x(currentTime, w)
+            let selWidth = max(8, ex - sx)
 
             ZStack(alignment: .leading) {
-                // Filmstrip
                 if thumbnails.isEmpty {
-                    RoundedRectangle(cornerRadius: 4).fill(theme.dotInactive.opacity(0.3))
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(theme.dotInactive.opacity(0.3))
                 } else {
                     HStack(spacing: 0) {
                         ForEach(thumbnails.indices, id: \.self) { i in
@@ -619,89 +672,116 @@ struct FilmstripBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
 
-                // Dim outside selection
                 if sx > 0 {
                     Rectangle().fill(.black.opacity(0.55)).frame(width: sx, height: h)
                         .clipShape(RoundedRectangle(cornerRadius: 4))
                 }
                 if ex < w {
                     Rectangle().fill(.black.opacity(0.55)).frame(width: w - ex, height: h)
-                        .offset(x: ex)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .offset(x: ex).clipShape(RoundedRectangle(cornerRadius: 4))
                 }
 
-                // Selection band (normal + larger hit area)
                 RoundedRectangle(cornerRadius: 4)
                     .stroke(theme.dotActive, lineWidth: 3)
                     .background(RoundedRectangle(cornerRadius: 4).fill(theme.dotActive.opacity(0.1)))
-                    .frame(width: max(8, ex - sx), height: h)
+                    .frame(width: selWidth, height: h)
                     .position(x: (sx + ex) / 2, y: h / 2)
 
-                // Left edge marker
+                if selWidth > 60 {
+                    Text(String(format: "%.1fs", trimEnd - trimStart))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(theme.dotActive)
+                        .position(x: (sx + ex) / 2, y: h / 2)
+                        .allowsHitTesting(false)
+                }
+
                 edgeMarker(x: sx, h: h)
-                // Right edge marker
                 edgeMarker(x: ex, h: h)
 
-                // Whole-selection move (large hit area)
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .frame(width: max(8, ex - sx), height: h)
+                // Left handle
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .frame(width: 18, height: h).position(x: sx, y: h / 2)
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                        let wd = visibleRange.map { $0.upperBound - $0.lowerBound } ?? duration
+                        trimStart = max(0, min(trimStart + Double(value.translation.width) * wd / max(Double(w), 1), trimEnd - 0.05))
+                    })
+
+                // Right handle
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .frame(width: 18, height: h).position(x: ex, y: h / 2)
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                        let wd = visibleRange.map { $0.upperBound - $0.lowerBound } ?? duration
+                        trimEnd = min(duration, max(trimEnd + Double(value.translation.width) * wd / max(Double(w), 1), trimStart + 0.05))
+                    })
+
+                // Selection move
+                Rectangle().fill(.clear).contentShape(Rectangle())
+                    .frame(width: selWidth, height: h)
                     .position(x: (sx + ex) / 2, y: h / 2)
                     .gesture(moveDrag(width: w))
 
-                // Playhead — draggable for scrubbing, taller than strip
-                Rectangle()
-                    .fill(.white)
-                    .frame(width: 3, height: h + 12)
-                    .position(x: px, y: h / 2)
-                    .shadow(color: .black.opacity(0.7), radius: 2)
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let p = Double(value.location.x / w) * duration
-                                onScrub?(max(0, min(p, duration)))
-                            }
-                    )
+                // Playhead
+                VStack(spacing: 0) {
+                    Path { p in
+                        p.move(to: CGPoint(x: 0, y: 0))
+                        p.addLine(to: CGPoint(x: 8, y: 0))
+                        p.addLine(to: CGPoint(x: 4, y: 6))
+                        p.closeSubpath()
+                    }
+                    .fill(.white).frame(width: 8, height: 6)
+                    Rectangle().fill(.white).frame(width: 1.5, height: h - 6)
+                }
+                .position(x: px, y: h / 2)
+                .shadow(color: .black.opacity(0.7), radius: 2)
+                .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                    onScrub?(timeFromPixel(value.location.x, w))
+                })
+                .allowsHitTesting(true)
             }
             .frame(width: w, height: h)
             .clipShape(RoundedRectangle(cornerRadius: 4))
             .contentShape(Rectangle())
             .onTapGesture { location in
-                let p = Double(location.x / w) * duration
-                onScrub?(max(0, min(p, duration)))
+                onScrub?(timeFromPixel(location.x, w))
             }
         }
     }
 
     private func edgeMarker(x: CGFloat, h: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 3)
-            .fill(theme.dotActive)
-            .frame(width: 3, height: h)
-            .position(x: x, y: h / 2)
+        RoundedRectangle(cornerRadius: 3).fill(theme.dotActive)
+            .frame(width: 3, height: h).position(x: x, y: h / 2)
     }
 
     private func moveDrag(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if dragOrigin == nil {
-                    dragOrigin = trimStart
-                }
-                let secsPerPx = duration / max(Double(width), 1)
-                let delta = Double(value.translation.width) * secsPerPx
+                if dragOrigin == nil { dragOrigin = trimStart }
+                let wd = visibleRange.map { $0.upperBound - $0.lowerBound } ?? duration
+                let delta = Double(value.translation.width) * wd / max(Double(width), 1)
                 let sel = trimEnd - trimStart
                 let s = max(0, min((dragOrigin ?? 0) + delta, duration - sel))
-                trimStart = s
-                trimEnd = s + sel
+                trimStart = s; trimEnd = s + sel
             }
-            .onEnded { _ in
-                dragOrigin = nil
-                onMoveSelectionTo?(trimStart)
-            }
+            .onEnded { _ in dragOrigin = nil; onMoveSelectionTo?(trimStart) }
     }
 
     private func x(_ time: Double, _ w: CGFloat) -> CGFloat {
         guard duration > 0 else { return 0 }
+        if let range = visibleRange {
+            let d = range.upperBound - range.lowerBound
+            guard d > 0 else { return 0 }
+            return CGFloat((time - range.lowerBound) / d) * w
+        }
         return CGFloat(time / duration) * w
+    }
+
+    private func timeFromPixel(_ px: CGFloat, _ w: CGFloat) -> Double {
+        guard w > 0 else { return 0 }
+        let f = Double(px / w)
+        if let range = visibleRange {
+            let lo = range.lowerBound, hi = range.upperBound
+            return max(lo, min(lo + f * (hi - lo), hi))
+        }
+        return max(0, min(f * duration, duration))
     }
 }

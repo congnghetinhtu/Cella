@@ -187,6 +187,7 @@ final class AlbumPillScrollCoordinator: ObservableObject {
 
 struct BottomTabBar: View {
     @Binding var selectedTab: AppTab
+    @ObservedObject var motionsViewModel: MotionsViewModel
     @StateObject private var coordinator = ScrollCoordinator()
     @Environment(\.theme) private var theme
 
@@ -283,24 +284,50 @@ struct BottomTabBar: View {
                 selectedTab = tab
             }
         } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(isActive ? tabCol : theme.tabUnselectedText)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 12)
-                .background(
-                    ZStack {
-                        if isActive {
-                            Capsule()
-                                .fill(tabCol.opacity(0.2))
-                                .matchedGeometryEffect(id: "pill", in: animation)
-                                .offset(x: dragOffset)
-                        }
+            HStack(spacing: 6) {
+                Text(tab.rawValue)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(isActive ? tabCol : theme.tabUnselectedText)
+
+                if tab == .motions, motionsViewModel.hasUnsavedChanges, selectedTab != .motions {
+                    unsavedPill
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 12)
+            .background(
+                ZStack {
+                    if isActive {
+                        Capsule()
+                            .fill(tabCol.opacity(0.2))
+                            .matchedGeometryEffect(id: "pill", in: animation)
+                            .offset(x: dragOffset)
                     }
-                )
-                .contentShape(Rectangle())
+                }
+            )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .animation(.smooth, value: motionsViewModel.hasUnsavedChanges)
+    }
+
+    // MARK: - Unsaved Pill
+
+    private var unsavedPill: some View {
+        let amber = Color(red: 1.0, green: 0.72, blue: 0.28)
+        return HStack(spacing: 3) {
+            Circle()
+                .fill(amber)
+                .frame(width: 5, height: 5)
+            Text("Unsaved")
+                .font(.system(size: 8, weight: .bold, design: .monospaced))
+                .foregroundStyle(amber)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(amber.opacity(0.14)))
+        .overlay(Capsule().stroke(amber.opacity(0.4), lineWidth: 1))
     }
 }
 
