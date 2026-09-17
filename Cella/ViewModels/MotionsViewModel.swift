@@ -21,6 +21,14 @@ final class MotionsViewModel: ObservableObject {
     @Published var isExporting = false
     @Published var exportProgress: Double = 0
 
+    /// Finished boomerang waiting for the user to pick album + artist.
+    @Published var pendingExportURL: URL?
+
+    /// Default .cluster library scanned for album choice at export time.
+    @Published var libraryURL: URL? = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Downloads")
+        .appendingPathComponent("musicLiblary.cluster")
+
     // MARK: - Playback
 
     private(set) var player: AVPlayer?
@@ -123,6 +131,7 @@ final class MotionsViewModel: ObservableObject {
     func loadVideo(_ url: URL) {
         sourceURL = url
         outputURL = nil
+        discardExport()
         toast = nil
         overviewThumbs = []
         zoomThumbs = []
@@ -350,8 +359,8 @@ final class MotionsViewModel: ObservableObject {
 
     func createBoomerang() {
         guard let source = sourceURL else { return }
-        let outName = source.deletingPathExtension().lastPathComponent + ".cma"
-        let outURL = source.deletingLastPathComponent().appendingPathComponent(outName)
+        let outURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".cma")
 
         isExporting = true
         exportProgress = 0
@@ -374,21 +383,145 @@ final class MotionsViewModel: ObservableObject {
         isExporting = false
         switch result {
         case .success(let url):
-            outputURL = url
-            showToast("Saved: \(url.lastPathComponent)", isError: false)
             // Keep the source video playing — do NOT replace player.
             // Seek back to trimStart so user can make another CMA.
             seekTo(trimStart)
-            commitSavedBaseline()
+            // Hold in temp until the user chooses album + artist.
+            pendingExportURL = url
         case .failure(let err):
             showToast(err.localizedDescription, isError: true)
         }
+    }
+
+    // MARK: - Export Destination
+
+    /// Packs discovered in the default library, for the save sheet.
+    var exportPacks: [CellaPack] {
+        guard let libraryURL else { return [] }
+        return ClusterLibrary.scan(libraryURL).packs
+    }
+
+    /// Artist to pre-fill: album's `lrc/<song>.lrc` `[ar:]` tag first, then the
+    /// `Artist - Title` filename pattern. Nil when neither yields a name.
+    func suggestedArtist(for packURL: URL) -> String? {
+        guard let source = sourceURL else { return nil }
+        let base = source.deletingPathExtension().lastPathComponent
+        let fm = FileManager.default
+        let lrcDir = packURL.appendingPathComponent("lrc")
+        let entries = (try? fm.contentsOfDirectory(at: lrcDir, includingPropertiesForKeys: nil)) ?? []
+
+        if let exact = entries.first(where: {
+            $0.pathExtension.lowercased() == "lrc"
+                && $0.deletingPathExtension().lastPathComponent == base
+        }), let artist = parseArtistTag(in: exact) {
+            return artist
+        }
+
+        for entry in entries where entry.pathExtension.lowercased() == "lrc" {
+            let name = entry.deletingPathExtension().lastPathComponent
+            guard let sep = name.range(of: " - ") else { continue }
+            let title = String(name[sep.upperBound...]).trimmingCharacters(in: .whitespaces)
+            let artist = String(name[..<sep.lowerBound]).trimmingCharacters(in: .whitespaces)
+            if title == base, !artist.isEmpty {
+                return artist
+            }
+        }
+
+        if let sep = base.range(of: " - ") {
+            let artist = String(base[..<sep.lowerBound]).trimmingCharacters(in: .whitespaces)
+            if !artist.isEmpty { return artist }
+        }
+        return nil
+    }
+
+    /// Artist folders already present under `<pack>/cma/` — quick-pick options.
+    func existingArtists(in packURL: URL) -> [String] {
+        let cma = packURL.appendingPathComponent("cma")
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: cma, includingPropertiesForKeys: nil
+        )) ?? []
+        return entries
+            .filter { $0.hasDirectoryPath }
+            .map { $0.lastPathComponent }
+            .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Move the completed export into `<pack>/cma/<artist>/videoN.cma`.
+    @discardableResult
+    func saveExport(to packURL: URL, artist raw: String) -> Bool {
+        guard let temp = pendingExportURL else { return false }
+        let artist = cleanedArtist(raw)
+        guard !artist.isEmpty else { return false }
+
+        let albumName = packURL.deletingPathExtension().lastPathComponent
+        let dir = packURL.appendingPathComponent("cma").appendingPathComponent(artist)
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let fileName = nextVideoName(in: dir)
+            let dest = dir.appendingPathComponent(fileName)
+            if fm.fileExists(atPath: dest.path) {
+                try fm.removeItem(at: dest)
+            }
+            try fm.moveItem(at: temp, to: dest)
+            outputURL = dest
+            pendingExportURL = nil
+            commitSavedBaseline()
+            showToast("Saved: \(albumName) / cma / \(artist) / \(fileName)", isError: false)
+            return true
+        } catch {
+            showToast(error.localizedDescription, isError: true)
+            return false
+        }
+    }
+
+    /// User cancelled the save sheet — drop the temp export.
+    func discardExport() {
+        if let url = pendingExportURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        pendingExportURL = nil
+    }
+
+    private func cleanedArtist(_ raw: String) -> String {
+        raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    }
+
+    private func nextVideoName(in dir: URL) -> String {
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        )) ?? []
+        var maxN = 0
+        for entry in entries {
+            let base = entry.deletingPathExtension().lastPathComponent
+            guard base.hasPrefix("video"), base.count > 5,
+                  let n = Int(base.dropFirst(5)) else { continue }
+            maxN = max(maxN, n)
+        }
+        return "video\(maxN + 1).cma"
+    }
+
+    private func parseArtistTag(in lrcURL: URL) -> String? {
+        guard let content = try? String(contentsOf: lrcURL, encoding: .utf8) else { return nil }
+        for line in content.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("[ar:"), let end = trimmed.firstIndex(of: "]") else { continue }
+            let start = trimmed.index(trimmed.startIndex, offsetBy: 4)
+            let value = String(trimmed[start..<end])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+            if !value.isEmpty { return value }
+        }
+        return nil
     }
 
     // MARK: - Clear
 
     func clearVideo() {
         teardownPlayer()
+        discardExport()
         sourceURL = nil
         outputURL = nil
         player = nil

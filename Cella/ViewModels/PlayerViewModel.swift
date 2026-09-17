@@ -2144,8 +2144,6 @@ queue.currentIndex = index
         streamEngine = blend ? nil : StreamAudioEngine()
         streamEngine?.setVolume(currentVolume)
 
-        openMixBridge.start()
-
         // Only send the played album's tracks to Python OpenMix (not entire pack)
         let fm2 = FileManager.default
         var albumForOpenMix = audioFiles
@@ -2159,8 +2157,21 @@ queue.currentIndex = index
                 }
             }
         }
-        print("[PlayerViewModel] OpenMix analyzing \(albumForOpenMix.count) tracks (of \(audioFiles.count) total)")
-        openMixBridge.analyze(tracks: albumForOpenMix)
+
+        // OpenMix requires at least 2 tracks (analyze + mix both reject fewer).
+        // A single-song album needs no crossfade engine — the real-time engine
+        // already plays it. Skipping avoids an error that would otherwise
+        // trigger a full-playlist re-analysis fallback.
+        if albumForOpenMix.count >= 2 {
+            print("[PlayerViewModel] OpenMix analyzing \(albumForOpenMix.count) tracks (of \(audioFiles.count) total)")
+            openMixBridge.start()
+            openMixBridge.analyze(tracks: albumForOpenMix)
+        } else {
+            print("[PlayerViewModel] Single-track album (\(albumForOpenMix.count)) — OpenMix skipped, real-time engine stays")
+            openMixImportURL = nil
+            streamEngine = nil
+            openMixBridge.stop()
+        }
 
         // Background: generate .cellax cache files for the played album only
         cacheTask = Task.detached(priority: .utility) { [weak self] in
@@ -2316,8 +2327,9 @@ queue.currentIndex = index
                 // The real-time engine already plays the user's chosen track.
                 // Only fall back to a full re-import when nothing is playing —
                 // otherwise it replays from track 0 over the current selection.
+                // Blend ("OpenMix to") must never full re-import the playlist.
                 openMixImportURL = nil
-                if playerState != .playing {
+                if playerState != .playing && !blendStreamingDisabled {
                     log("Falling back to real-time engine")
                     importFolder(url: url)
                 } else {

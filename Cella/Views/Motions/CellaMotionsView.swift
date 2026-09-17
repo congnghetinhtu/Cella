@@ -29,6 +29,12 @@ struct CellaMotionsView: View {
     private let cardRadius: CGFloat = CardStyle.radius
     private let gridSpacing: CGFloat = 28
 
+    /// True while a text field owns the field editor (e.g. artist name in the
+    /// save sheet) — block editor shortcuts so typing stays typing.
+    private var isEditingText: Bool {
+        NSApp.keyWindow?.firstResponder is NSTextView
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.sourceURL != nil {
@@ -39,18 +45,26 @@ struct CellaMotionsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.smooth, value: viewModel.sourceURL != nil)
-        .onKeyPress(.space) { viewModel.playPause(); return .handled }
-        .onKeyPress(.leftArrow) { viewModel.stepFrame(by: -1); return .handled }
-        .onKeyPress(.rightArrow) { viewModel.stepFrame(by: 1); return .handled }
-        .onKeyPress("i") { viewModel.markIn(); return .handled }
-        .onKeyPress("o") { viewModel.markOut(); return .handled }
-        .onKeyPress("l") { viewModel.toggleLoopPreview(); return .handled }
-        .onKeyPress("[") { viewModel.nudgeTrimStart(-0.1); return .handled }
-        .onKeyPress("]") { viewModel.nudgeTrimEnd(0.1); return .handled }
+        .onKeyPress(.space) { if isEditingText { return .ignored }; viewModel.playPause(); return .handled }
+        .onKeyPress(.leftArrow) { if isEditingText { return .ignored }; viewModel.stepFrame(by: -1); return .handled }
+        .onKeyPress(.rightArrow) { if isEditingText { return .ignored }; viewModel.stepFrame(by: 1); return .handled }
+        .onKeyPress("i") { if isEditingText { return .ignored }; viewModel.markIn(); return .handled }
+        .onKeyPress("o") { if isEditingText { return .ignored }; viewModel.markOut(); return .handled }
+        .onKeyPress("l") { if isEditingText { return .ignored }; viewModel.toggleLoopPreview(); return .handled }
+        .onKeyPress("[") { if isEditingText { return .ignored }; viewModel.nudgeTrimStart(-0.1); return .handled }
+        .onKeyPress("]") { if isEditingText { return .ignored }; viewModel.nudgeTrimEnd(0.1); return .handled }
         .onChange(of: viewModel.trimStart) { _, _ in viewModel.noteClipChanged() }
         .onChange(of: viewModel.trimEnd) { _, _ in viewModel.noteClipChanged() }
         .onChange(of: viewModel.loopCount) { _, _ in viewModel.noteClipChanged() }
         .onChange(of: viewModel.targetDuration) { _, _ in viewModel.noteClipChanged() }
+        .sheet(isPresented: Binding(
+            get: { viewModel.pendingExportURL != nil },
+            set: { if !$0 { viewModel.discardExport() } }
+        )) {
+            if let exportURL = viewModel.pendingExportURL {
+                BoomerangSaveSheet(viewModel: viewModel, exportURL: exportURL)
+            }
+        }
     }
 
     // MARK: - Editor (canvas + split inspector, no scroll)
@@ -569,6 +583,194 @@ struct CellaMotionsView: View {
                 }
             }
             return true
+        }
+    }
+}
+
+// MARK: - Boomerang Save Sheet
+
+/// Shown after a boomerang finishes exporting. The user picks the target album
+/// (.cella pack) and an artist; the file lands in `<album>/cma/<Artist>/videoN.cma`.
+struct BoomerangSaveSheet: View {
+    @ObservedObject var viewModel: MotionsViewModel
+    let exportURL: URL
+
+    @Environment(\.theme) private var theme
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var packs: [CellaPack] = []
+    @State private var selectedPack: CellaPack?
+    @State private var artist: String = ""
+    @State private var hasSeeded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 8) {
+                Image(systemName: "film.stack")
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.dotActive)
+                Text("Where to save?")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                Spacer()
+                Text("Boomerang ready")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.dotActive)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(theme.dotActive.opacity(0.15)))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ALBUM")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .kerning(1.2)
+                    .foregroundStyle(theme.textSecondary.opacity(0.5))
+                if packs.isEmpty {
+                    Text("No .cella albums found in the library")
+                        .font(.system(size: 12, design: .rounded))
+                        .foregroundStyle(theme.textSecondary)
+                } else {
+                    Menu {
+                        ForEach(packs) { pack in
+                            Button(pack.name) {
+                                selectPack(pack)
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(selectedPack?.name ?? "Choose album")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(selectedPack != nil ? theme.textPrimary : theme.textSecondary)
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(theme.textSecondary.opacity(0.6))
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(theme.tabBarBackground))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+                        .contentShape(Rectangle())
+                    }
+                    .menuStyle(.borderlessButton)
+                    .buttonStyle(.plain)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ARTIST")
+                    .font(.system(size: 9, weight: .semibold, design: .rounded))
+                    .kerning(1.2)
+                    .foregroundStyle(theme.textSecondary.opacity(0.5))
+                TextField("Artist name", text: $artist)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(theme.tabBarBackground))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+
+                if let selectedPack, !existingArtists.isEmpty {
+                    Text("In this album:")
+                        .font(.system(size: 9, design: .rounded))
+                        .foregroundStyle(theme.textSecondary.opacity(0.6))
+                        .padding(.top, 2)
+                    FlowCapsules(items: existingArtists, highlight: artist) { name in
+                        artist = name
+                    }
+                }
+            }
+
+            Text("Saves to \(selectedPackName)/cma/\(artistName)/videoN.cma")
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundStyle(theme.textSecondary.opacity(0.7))
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 10) {
+                Spacer()
+                Button("Cancel") { viewModel.discardExport() }
+                    .buttonStyle(.bordered)
+                    .tint(theme.textSecondary)
+                Button("Save") {
+                    if let pack = selectedPack, viewModel.saveExport(to: pack.url, artist: artist) {
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(theme.dotActive)
+                .disabled(selectedPack == nil || artist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 380)
+        .background(theme.screenBackground)
+        .onAppear(perform: seed)
+    }
+
+    private var existingArtists: [String] {
+        guard let pack = selectedPack else { return [] }
+        return viewModel.existingArtists(in: pack.url)
+    }
+
+    private var selectedPackName: String {
+        selectedPack?.name ?? "…"
+    }
+
+    private var artistName: String {
+        let trimmed = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "…" : trimmed
+    }
+
+    private func selectPack(_ pack: CellaPack) {
+        let previous = selectedPack
+        selectedPack = pack
+        guard let suggested = viewModel.suggestedArtist(for: pack.url) else {
+            if previous == nil { artist = "" }
+            return
+        }
+        if previous == nil || artist.isEmpty {
+            artist = suggested
+        } else if let prevPack = previous,
+                  let prevSuggestion = viewModel.suggestedArtist(for: prevPack.url),
+                  artist == prevSuggestion {
+            artist = suggested
+        }
+    }
+
+    private func seed() {
+        hasSeeded = true
+        packs = viewModel.exportPacks
+        guard let defaultPack = packs.first(where: {
+            viewModel.suggestedArtist(for: $0.url) != nil
+        }) ?? packs.first else { return }
+        selectPack(defaultPack)
+    }
+}
+
+// MARK: - Artist Quick-Pick Capsules
+
+private struct FlowCapsules: View {
+    let items: [String]
+    let highlight: String
+    let onPick: (String) -> Void
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(items, id: \.self) { item in
+                Button(item) { onPick(item) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(item == highlight ? theme.dotActive : theme.textSecondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(item == highlight ? theme.dotActive.opacity(0.16) : theme.textSecondary.opacity(0.08)))
+                    .overlay(Capsule().stroke(item == highlight ? theme.dotActive.opacity(0.4) : theme.textSecondary.opacity(0.15), lineWidth: 1))
+                    .onTapGesture { onPick(item) }
+            }
         }
     }
 }

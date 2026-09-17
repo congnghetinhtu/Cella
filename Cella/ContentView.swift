@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import Combine
 
 struct ContentView: View {
     @State private var selectedTab: AppTab = .cluster
@@ -13,6 +14,7 @@ struct ContentView: View {
     @State private var cellaVolume: Float = 1.0
     @State private var viewModel = PlayerViewModel()
     @StateObject private var motionsViewModel = MotionsViewModel()
+    @StateObject private var commandInput = CommandInputController()
     @State private var detailPack: CellaPack?
     @State private var displayedPack: CellaPack?
     @State private var pendingLRCAudioURL: URL?
@@ -32,6 +34,12 @@ struct ContentView: View {
 
     private var preferredScheme: ColorScheme? {
         .dark
+    }
+
+    /// True while a text field (artist name, rename, etc.) owns the field editor.
+    /// Prevents global player shortcuts from firing mid-typing.
+    private var isEditingText: Bool {
+        NSApp.keyWindow?.firstResponder is NSTextView
     }
 
     private var theme: Theme {
@@ -198,11 +206,17 @@ struct ContentView: View {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             if showCommandPalette {
                 switch event.keyCode {
-                case 126, 123: // Up / Left
+                case 126: // Up — suggestions up
                     moveSuggestionSelection(-1)
                     return nil
-                case 125, 124: // Down / Right
+                case 125: // Down — suggestions down
                     moveSuggestionSelection(1)
+                    return nil
+                case 123, 124: // Left / Right — move text caret in command input
+                    let delta = event.keyCode == 124 ? 1 : -1
+                    if !commandInput.moveCaret(delta) {
+                        moveSuggestionSelection(delta)
+                    }
                     return nil
                 default:
                     break
@@ -228,6 +242,7 @@ struct ContentView: View {
             }
             bloomAnchor = paletteBloomAnchor()
             selectedSuggestion = 0
+            commandInput.reset()
             withAnimation(.snappy) {
                 showCommandPalette = true
                 commandText = ""
@@ -370,6 +385,7 @@ struct ContentView: View {
                     theme: theme,
                     focus: $isCommandFocused,
                     origin: commandOrigin,
+                    input: commandInput,
                     suggestions: { commandSuggestions(for: $0) },
                     selectedSuggestion: effectiveSuggestion,
                     placeholder: viewModel.currentLyrics.isEmpty
@@ -428,7 +444,8 @@ struct ContentView: View {
         .focused($isFocused)
         .onKeyPress(.space) {
             if showCommandPalette { return .ignored }
-            if selectedTab == .enhancedLRC || selectedTab == .cluster {
+            if isEditingText { return .ignored }
+            if selectedTab != .cella {
                 return .ignored
             }
             viewModel.togglePlayPause()
@@ -436,10 +453,11 @@ struct ContentView: View {
         }
         .onKeyPress(.leftArrow) {
             if showCommandPalette {
-                moveSuggestionSelection(-1)
+                if !commandInput.moveCaret(-1) { moveSuggestionSelection(-1) }
                 return .handled
             }
-            if selectedTab == .enhancedLRC || selectedTab == .cluster {
+            if isEditingText { return .ignored }
+            if selectedTab != .cella {
                 return .ignored
             }
             viewModel.skipBackward()
@@ -447,10 +465,11 @@ struct ContentView: View {
         }
         .onKeyPress(.rightArrow) {
             if showCommandPalette {
-                moveSuggestionSelection(1)
+                if !commandInput.moveCaret(1) { moveSuggestionSelection(1) }
                 return .handled
             }
-            if selectedTab == .enhancedLRC || selectedTab == .cluster {
+            if isEditingText { return .ignored }
+            if selectedTab != .cella {
                 return .ignored
             }
             viewModel.skipForward()
@@ -458,7 +477,8 @@ struct ContentView: View {
         }
         .onKeyPress(.init("l")) {
             if showCommandPalette { return .ignored }
-            if selectedTab == .enhancedLRC || selectedTab == .cluster {
+            if isEditingText { return .ignored }
+            if selectedTab != .cella {
                 return .ignored
             }
             withAnimation(.snappy) {
@@ -471,6 +491,7 @@ struct ContentView: View {
                 moveSuggestionSelection(-1)
                 return .handled
             }
+            if isEditingText { return .ignored }
             return .ignored
         }
         .onKeyPress(.downArrow) {
@@ -478,6 +499,7 @@ struct ContentView: View {
                 moveSuggestionSelection(1)
                 return .handled
             }
+            if isEditingText { return .ignored }
             return .ignored
         }
         .onKeyPress(.escape) {
@@ -490,6 +512,7 @@ struct ContentView: View {
                 restoreMainFocus()
                 return .handled
             }
+            if isEditingText { return .ignored }
             return .ignored
         }
         .onAppear {
@@ -601,6 +624,7 @@ private struct CommandPaletteBar: View {
     let theme: Theme
     let focus: FocusState<Bool>.Binding
     let origin: CGPoint
+    let input: CommandInputController
     let suggestions: (String) -> [CommandSuggestion]
     let selectedSuggestion: Int
     let placeholder: String
@@ -628,6 +652,7 @@ private struct CommandPaletteBar: View {
                     text: $text,
                     theme: theme,
                     focus: focus,
+                    input: input,
                     placeholder: "",
                     onSubmit: onSubmit
                 )
@@ -787,6 +812,7 @@ private struct SmoothCommandInput: View {
     @Binding var text: String
     let theme: Theme
     let focus: FocusState<Bool>.Binding
+    let input: CommandInputController
     let placeholder: String
     let onSubmit: () -> Void
 
@@ -805,27 +831,17 @@ private struct SmoothCommandInput: View {
         min(0, Self.fieldWidth - contentWidth - 2)
     }
 
+    private var cursor: Int {
+        min(input.cursorIndex, chars.count)
+    }
+
     var body: some View {
         TimelineView(.animation) { timeline in
             ZStack(alignment: .leading) {
                 HStack(spacing: 0) {
-                    HStack(spacing: 0) {
-                        if chars.isEmpty {
-                            Text(placeholder)
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(theme.textSecondary.opacity(0.45))
-                        } else {
-                            ForEach(chars) { cell in
-                                Text(cell.ch)
-                                    .font(.system(size: 15, weight: .medium))
-                                    .foregroundColor(theme.textPrimary)
-                                    .transition(.opacity)
-                            }
-                        }
-                    }
-                    .fixedSize()
-
-                    caret(at: timeline.date.timeIntervalSinceReferenceDate)
+                    charRow(at: timeline.date.timeIntervalSinceReferenceDate)
+                        .fixedSize()
+                        .animation(.easeOut(duration: 0.12), value: cursor)
                 }
                 .offset(x: glideOffset)
                 .background(
@@ -855,6 +871,54 @@ private struct SmoothCommandInput: View {
         }
         .onChange(of: text) { _, newValue in
             syncChars(to: newValue)
+            if newValue.isEmpty {
+                input.reset()
+                return
+            }
+            syncCursorFromEditor()
+        }
+        .onChange(of: focus.wrappedValue) { _, isOpen in
+            if isOpen {
+                input.placeCaretAtEnd()
+            }
+        }
+    }
+
+    // MARK: - Caret sync
+
+    private func syncCursorFromEditor() {
+        DispatchQueue.main.async {
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else {
+                input.cursorIndex = chars.count
+                return
+            }
+            input.cursorIndex = max(0, min(editor.selectedRange.location, chars.count))
+        }
+    }
+
+    @ViewBuilder
+    private func charRow(at time: TimeInterval) -> some View {
+        HStack(spacing: 0) {
+            if chars.isEmpty {
+                Text(placeholder)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(theme.textSecondary.opacity(0.45))
+            } else {
+                ForEach(chars.indices, id: \.self) { index in
+                    let cell = chars[index]
+                    if index == cursor {
+                        caret(at: time)
+                            .transition(.opacity)
+                    }
+                    Text(cell.ch)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(theme.textPrimary)
+                        .transition(.opacity)
+                }
+            }
+            if chars.isEmpty || cursor == chars.count {
+                caret(at: time)
+            }
         }
     }
 
@@ -890,6 +954,47 @@ private struct SmoothCommandInput: View {
         } else {
             chars.removeLast(chars.count - newChars.count)
         }
+    }
+}
+
+// MARK: - Command input caret controller
+
+/// Shared between the key monitor and the command input view so arrow keys
+/// move the text caret (left/right) instead of the suggestion highlight.
+private final class CommandInputController: ObservableObject {
+    @Published var cursorIndex = 0
+
+    @discardableResult
+    func moveCaret(_ delta: Int) -> Bool {
+        guard let editor = fieldEditor() else { return false }
+        let location = max(0, min(editor.string.count, editor.selectedRange.location + delta))
+        editor.setSelectedRange(NSRange(location: location, length: 0))
+        cursorIndex = location
+        return true
+    }
+
+    func placeCaretAtEnd() {
+        if placeCaretAtEndNow() { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            self.placeCaretAtEndNow()
+        }
+    }
+
+    func reset() {
+        cursorIndex = 0
+    }
+
+    @discardableResult
+    private func placeCaretAtEndNow() -> Bool {
+        guard let editor = fieldEditor() else { return false }
+        let location = editor.string.count
+        editor.setSelectedRange(NSRange(location: location, length: 0))
+        cursorIndex = location
+        return true
+    }
+
+    private func fieldEditor() -> NSTextView? {
+        NSApp.keyWindow?.firstResponder as? NSTextView
     }
 }
 
