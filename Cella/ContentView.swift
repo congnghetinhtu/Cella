@@ -355,6 +355,13 @@ struct ContentView: View {
                     }
                     detailPack = nil
                 },
+                onPlayArtist: { artist in
+                    if let detailPack {
+                        selectedTab = .cella
+                        viewModel.importViaOpenMix(url: detailPack.url, startFileName: artist.files.first, blend: false, artistFilter: artist.name)
+                    }
+                    detailPack = nil
+                },
                 onClose: {
                     detailPack = nil
                 },
@@ -841,22 +848,27 @@ private struct SmoothCommandInput: View {
                 HStack(spacing: 0) {
                     charRow(at: timeline.date.timeIntervalSinceReferenceDate)
                         .fixedSize()
-                        .animation(.easeOut(duration: 0.12), value: cursor)
+                        // caret moves instantly — no ease, prevents text push jitter
+                        .animation(nil, value: cursor)
                 }
                 .offset(x: glideOffset)
+                .animation(nil, value: glideOffset)
                 .background(
                     GeometryReader { geo in
                         Color.clear
                             .onAppear { contentWidth = geo.size.width }
                             .onChange(of: geo.size.width) { _, w in
-                                withAnimation(.smooth) { contentWidth = w }
+                                // no spring for width — prevents jump, glide is instant
+                                contentWidth = w
                             }
                     }
                 )
             }
             .frame(width: Self.fieldWidth, alignment: .leading)
             .clipped()
-            .animation(.easeOut(duration: 0.12), value: chars.count)
+            // layout must not animate — only opacity fades
+            .animation(nil, value: chars.count)
+            .animation(nil, value: contentWidth)
         }
         .frame(height: 24)
         .contentShape(Rectangle())
@@ -913,7 +925,7 @@ private struct SmoothCommandInput: View {
                     Text(cell.ch)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundColor(theme.textPrimary)
-                        .transition(.opacity)
+                        .transition(.opacity.animation(.linear(duration: 0.08)))
                 }
             }
             if chars.isEmpty || cursor == chars.count {

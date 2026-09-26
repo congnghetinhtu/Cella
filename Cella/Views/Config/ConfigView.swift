@@ -211,7 +211,7 @@ struct ConfigView: View {
                     Text("Cella")
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(theme.textPrimary)
-                    Text("OpenMix player")
+                    Text("Music player")
                         .font(.system(size: 11))
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -230,7 +230,7 @@ struct ConfigView: View {
 
             aboutGroup {
                 aboutRow(icon: "shippingbox.fill", label: "Version", value: "Cella 1.0")
-                aboutRow(icon: "waveform.path", label: "Engine", value: "OpenMix")
+                aboutRow(icon: "waveform.path", label: "Engine", value: "Real-Time")
                 aboutRow(icon: "doc.text", label: "License", value: "MIT")
             }
 
@@ -244,7 +244,7 @@ struct ConfigView: View {
 
             Spacer(minLength: 0)
 
-            Text("Built with Swift, SwiftUI, and Python.")
+            Text("Built with Swift and SwiftUI.")
                 .font(.system(size: 10))
                 .foregroundStyle(theme.textSecondary.opacity(0.6))
                 .lineLimit(1)

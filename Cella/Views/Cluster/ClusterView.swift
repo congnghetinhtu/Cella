@@ -10,6 +10,7 @@
 
 import SwiftUI
 import AppKit
+import AVFoundation
 
 // MARK: - Cella-style context menu (floating panel)
 
@@ -243,6 +244,17 @@ final class RightClickCatcherView: NSView {
     }
 }
 
+enum PackSort: String, CaseIterable {
+    case name = "Name"
+    case tracks = "Tracks"
+    case cached = "Cached"
+}
+
+enum ClusterMode: String, CaseIterable {
+    case playlists = "Playlists"
+    case artists = "Artists"
+}
+
 struct ClusterView: View {
     var viewModel: PlayerViewModel?
     var onPlay: (() -> Void)? = nil
@@ -251,6 +263,27 @@ struct ClusterView: View {
     @AppStorage("clusterLibraryPath") private var libraryPath: String = ""
     @State private var library: ClusterLibrary?
     @State private var loadingPackURL: URL?
+    @State private var searchText = ""
+    @State private var sortMode: PackSort = .name
+    @State private var showNewPack = false
+    @State private var newPackName = ""
+    @State private var packToRename: CellaPack?
+    @State private var renameText = ""
+    @State private var packToDelete: CellaPack?
+    @State private var libraryArtists: [LibraryArtist] = []
+    @State private var artistThumbs: [String: NSImage] = [:]
+    @State private var loadingArtistKey: String?
+    @State private var clusterMode: ClusterMode = .playlists
+    @State private var artistSearch = ""
+    @State private var selectedArtistKey: String?
+    @State private var collapsedPacks: Set<String> = []
+    @State private var collapsedAlbums: Set<String> = []
+    @State private var packArtistsCache: [String: [PackArtist]] = [:]
+    @State private var expandedArtistPacks: Set<String> = []
+    @State private var activeRailPack: String?
+    @State private var artistPackFilter: String?
+    @State private var showAllArtists = false
+    @State private var openedPackPath: String?
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -279,30 +312,427 @@ struct ClusterView: View {
                 lib.refreshCacheCounts()
                 library = lib
             }
+            reloadLibraryArtists()
         }
+        .onChange(of: library?.url) { _, _ in reloadLibraryArtists() }
     }
 
     // MARK: - Library
 
+    private var filteredPacks: [CellaPack] {
+        guard let lib = library else { return [] }
+        var packs = lib.packs
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !q.isEmpty {
+            packs = packs.filter {
+                $0.name.lowercased().contains(q)
+                || $0.url.lastPathComponent.lowercased().contains(q)
+            }
+        }
+        switch sortMode {
+        case .name:
+            packs.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .tracks:
+            packs.sort { $0.trackCount > $1.trackCount }
+        case .cached:
+            packs.sort {
+                let a = $0.trackCount > 0 ? Double($0.cachedTrackCount) / Double($0.trackCount) : 0
+                let b = $1.trackCount > 0 ? Double($1.cachedTrackCount) / Double($1.trackCount) : 0
+                return a > b
+            }
+        }
+        return packs
+    }
+
+    private var libraryStats: (packs: Int, albums: Int, tracks: Int, cached: Int) {
+        guard let lib = library else { return (0, 0, 0, 0) }
+        let albums = lib.packs.reduce(0) { $0 + $1.albumCount }
+        let tracks = lib.packs.reduce(0) { $0 + $1.trackCount }
+        let cached = lib.packs.reduce(0) { $0 + $1.cachedTrackCount }
+        return (lib.packs.count, albums, tracks, cached)
+    }
+
     private func libraryContent(_ lib: ClusterLibrary) -> some View {
         VStack(spacing: 0) {
             header(lib)
+            statsBar
+            discoveryBar
 
-            ScrollView {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 280), spacing: 20)],
-                    spacing: 20
-                ) {
-                    ForEach(lib.packs) { pack in
-                        packCard(pack)
+            if clusterMode == .playlists {
+                ScrollView {
+                    if filteredPacks.isEmpty {
+                        Text(searchText.isEmpty ? "No playlists yet" : "No matches for \"\(searchText)\"")
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.textSecondary)
+                            .padding(.top, 40)
+                    } else {
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 280), spacing: 20)],
+                            spacing: 20
+                        ) {
+                            ForEach(filteredPacks) { pack in
+                                packCard(pack)
+                            }
+                        }
+                        .padding(.horizontal, CardStyle.horizontalPadding)
+                        .padding(.top, 8)
+                        .padding(.bottom, 40)
                     }
                 }
-                .padding(.horizontal, CardStyle.horizontalPadding)
-                .padding(.top, 8)
-                .padding(.bottom, 40)
+            } else {
+                artistsTimeline(lib)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .alert("New Playlist", isPresented: $showNewPack) {
+            TextField("Name", text: $newPackName)
+            Button("Create") { createPack(named: newPackName) }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Rename Playlist", isPresented: Binding(get: { packToRename != nil }, set: { if !$0 { packToRename = nil } })) {
+            TextField("Name", text: $renameText)
+            Button("Rename") { if let p = packToRename { renamePack(p, to: renameText) } }
+            Button("Cancel", role: .cancel) { packToRename = nil }
+        }
+        .alert("Delete Playlist?", isPresented: Binding(get: { packToDelete != nil }, set: { if !$0 { packToDelete = nil } })) {
+            Button("Delete", role: .destructive) { if let p = packToDelete { deletePack(p) } }
+            Button("Cancel", role: .cancel) { packToDelete = nil }
+        } message: {
+            Text("Move \(packToDelete?.name ?? "") to Trash? Cannot undo.")
+        }
+    }
+
+    private var statsBar: some View {
+        let s = libraryStats
+        return HStack(spacing: 14) {
+            statChip("\(s.packs)", "playlists")
+            statChip("\(s.albums)", "albums")
+            statChip("\(s.tracks)", "tracks")
+            if s.tracks > 0 {
+                let pct = Int(Double(s.cached) / Double(max(1, s.tracks)) * 100)
+                statChip("\(pct)%", "cached")
+            }
+            Spacer()
+        }
+        .padding(.horizontal, CardStyle.horizontalPadding)
+        .padding(.bottom, 10)
+    }
+
+    private func statChip(_ value: String, _ label: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value).font(.system(size: 13, weight: .bold, design: .rounded)).foregroundStyle(theme.textPrimary)
+            Text(label).font(.system(size: 11)).foregroundStyle(theme.textSecondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 8).fill(theme.textSecondary.opacity(0.08)))
+    }
+
+    private var discoveryBar: some View {
+        HStack(spacing: 12) {
+            ClusterModeSwitch(mode: $clusterMode)
+
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+                TextField(clusterMode == .playlists ? "Search playlists" : "Search artists", text: clusterMode == .playlists ? $searchText : $artistSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textPrimary)
+                if !(clusterMode == .playlists ? searchText.isEmpty : artistSearch.isEmpty) {
+                    Button { if clusterMode == .playlists { searchText = "" } else { artistSearch = "" } } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 12)).foregroundStyle(theme.textSecondary) }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 10).fill(theme.screenBackground))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+            .frame(maxWidth: 280)
+
+            if clusterMode == .playlists {
+                Menu {
+                    ForEach(PackSort.allCases, id: \.self) { s in
+                        Button(s.rawValue) { withAnimation(.snappy) { sortMode = s } }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.up.arrow.down").font(.system(size: 11, weight: .semibold))
+                        Text(sortMode.rawValue).font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .semibold)).opacity(0.6)
+                    }
+                    .foregroundStyle(theme.tabSelectedText)
+                    .padding(.horizontal, 14).padding(.vertical, 7)
+                    .background(Capsule().fill(theme.tabBarBackground))
+                    .overlay(Capsule().stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+                }
+                .menuStyle(.borderlessButton)
+                .frame(width: 150, alignment: .leading)
+            } else {
+                Text("\(libraryArtists.count) artists")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textSecondary)
+                    .frame(width: 150, alignment: .leading)
+            }
+
+            Spacer()
+
+            Button {
+                newPackName = ""
+                showNewPack = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
+                    Text("New").font(.system(size: 12, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(theme.tabSelectedText)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(RoundedRectangle(cornerRadius: 10).fill(theme.tabSelectedBackground))
+            }
+            .buttonStyle(.plain)
+
+            Button { rescan() } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 12))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(7)
+                    .background(Circle().fill(theme.textSecondary.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .help("Rescan library")
+        }
+        .padding(.horizontal, CardStyle.horizontalPadding)
+        .padding(.bottom, 12)
+    }
+
+    // MARK: - Artists (clean redo): pack chips top + deduped big circles. No rail, no repeats.
+    private var displayedArtists: [LibraryArtist] {
+        var list = filteredLibraryArtists
+        if let filter = artistPackFilter,
+           let packArtists = packArtistsCache[filter] {
+            let keys = Set(packArtists.map { $0.key })
+            list = list.filter { keys.contains($0.key) }
+        }
+        return list
+    }
+
+    private var visibleArtists: [LibraryArtist] {
+        if showAllArtists { return displayedArtists }
+        return Array(displayedArtists.prefix(24))
+    }
+
+    // Android app folder style: packs as folders with stacked preview, tap opens folder.
+    private func artistsTimeline(_ lib: ClusterLibrary) -> some View {
+        let packs = lib.packs.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
+        return ZStack {
+            ScrollView {
+                if packs.isEmpty {
+                    artistsEmptyState
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 20)], spacing: 22) {
+                        ForEach(packs) { pack in
+                            packFolderCell(pack, libraryURL: lib.url)
+                        }
+                    }
+                    .padding(.horizontal, CardStyle.horizontalPadding)
+                    .padding(.vertical, 18)
+                    .padding(.bottom, 30)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Folder open overlay (Android folder expand)
+            if let path = openedPackPath,
+               let pack = packs.first(where: { $0.url.path == path }) {
+                Color.black.opacity(0.45).ignoresSafeArea()
+                    .onTapGesture { withAnimation(.snappy) { openedPackPath = nil } }
+                packFolderOpen(pack, libraryURL: lib.url)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: openedPackPath)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func packFolderCell(_ pack: CellaPack, libraryURL: URL) -> some View {
+        let artists = filteredPackArtists(pack)
+        return VStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22)
+                    .fill(theme.screenBackground)
+                    .frame(width: 150, height: 150)
+                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(theme.textSecondary.opacity(0.15), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.25), radius: 10)
+                // Stacked preview 2x2 (top 4 artists)
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
+                    ForEach(artists.prefix(4)) { pa in
+                        if let libArtist = libraryArtists.first(where: { $0.key == pa.key }) {
+                            ZStack {
+                                Circle().fill(theme.textSecondary.opacity(0.12)).frame(width: 56, height: 56)
+                                if let thumb = artistThumbs[libArtist.key] {
+                                    Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
+                                        .frame(width: 56, height: 56).clipShape(Circle())
+                                } else {
+                                    Text(String(libArtist.name.prefix(1)).uppercased())
+                                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                                        .foregroundStyle(theme.dotActive)
+                                }
+                            }
+                            .onAppear { loadArtistThumb(libArtist) }
+                        }
+                    }
+                }
+                .frame(width: 120, height: 120)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.snappy) { openedPackPath = pack.url.path }
+            }
+            Text(pack.name)
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.textPrimary).lineLimit(1).frame(width: 150)
+            Text("\(artists.count) artists")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(theme.textSecondary)
+        }
+        .frame(width: 150)
+    }
+
+    private func filteredPackArtists(_ pack: CellaPack) -> [PackArtist] {
+        let all = packArtistsCache[pack.url.path] ?? []
+        let q = ArtistMatcher.normKey(artistSearch)
+        if q.isEmpty { return all }
+        return all.filter { $0.key.contains(q) || $0.name.lowercased().contains(artistSearch.lowercased()) }
+    }
+
+    private func packFolderOpen(_ pack: CellaPack, libraryURL: URL) -> some View {
+        let artists = filteredPackArtists(pack)
+        return VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                Text(pack.name)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary).lineLimit(1)
+                Spacer()
+                Button { withAnimation(.snappy) { openedPackPath = nil } } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 18)).foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20).padding(.vertical, 14)
+            Divider().background(theme.textSecondary.opacity(0.12))
+            ScrollView {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), spacing: 16)], spacing: 18) {
+                    ForEach(artists) { pa in
+                        if let libArtist = libraryArtists.first(where: { $0.key == pa.key }) {
+                            bigLibraryCircle(libArtist, libraryURL: libraryURL)
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .frame(width: 560, height: 420)
+        }
+        .frame(width: 560)
+        .background(theme.screenBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+        .shadow(color: .black.opacity(0.5), radius: 30)
+    }
+
+    private var artistsEmptyState: some View {
+        VStack(spacing: 12) {
+            if libraryArtists.isEmpty && packArtistsCache.isEmpty {
+                ProgressView().controlSize(.large).tint(theme.dotActive)
+                Text("Loading artists…")
+                    .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
+                HStack(spacing: 14) {
+                    ForEach(0..<6, id: \.self) { _ in
+                        Circle().fill(theme.textSecondary.opacity(0.12)).frame(width: 88, height: 88)
+                    }
+                }
+                .opacity(0.7)
+            } else {
+                Image(systemName: "person.2.slash").font(.system(size: 28)).foregroundStyle(theme.textSecondary.opacity(0.6))
+                Text("No artists match \"\(artistSearch)\"")
+                    .font(.system(size: 13, weight: .medium, design: .rounded)).foregroundStyle(theme.textPrimary)
+                Button("Clear search") { artistSearch = "" }
+                    .buttonStyle(.bordered).tint(theme.dotActive)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 60)
+    }
+
+    private var filteredLibraryArtists: [LibraryArtist] {
+        let q = ArtistMatcher.normKey(artistSearch)
+        if q.isEmpty { return libraryArtists }
+        return libraryArtists.filter {
+            $0.key.contains(q) || $0.name.lowercased().contains(artistSearch.lowercased())
+        }
+    }
+
+    private func bigLibraryCircle(_ artist: LibraryArtist, libraryURL: URL) -> some View {
+        let isLoading = loadingArtistKey == artist.key
+        let isNowPlaying = viewModel?.activeArtistFilter.map { ArtistMatcher.normKey($0) == artist.key } ?? false
+        return ArtistCircleCell(
+            name: artist.name,
+            thumb: artistThumbs[artist.key],
+            theme: theme,
+            isLoading: isLoading,
+            isNowPlaying: isNowPlaying
+        )
+        .onAppear { loadArtistThumb(artist) }
+        .opacity(isLoading ? 0.6 : 1)
+        .allowsHitTesting(!isLoading)
+        .onTapGesture { playLibraryArtist(artist, libraryURL: libraryURL) }
+    }
+
+    private func reloadLibraryArtists() {
+        guard let lib = library else { libraryArtists = []; packArtistsCache = [:]; return }
+        let url = lib.url
+        let packs = lib.packs
+        DispatchQueue.global(qos: .utility).async {
+            let artists = ClusterLibrary.libraryArtists(in: url)
+            var perPack: [String: [PackArtist]] = [:]
+            for pack in packs {
+                perPack[pack.url.path] = ClusterLibrary.artists(in: pack.url)
+            }
+            DispatchQueue.main.async {
+                // Stale check
+                guard library?.url == url else { return }
+                libraryArtists = artists
+                packArtistsCache = perPack
+                // Preload first snapshots
+                for a in artists.prefix(12) { loadArtistThumb(a) }
+            }
+        }
+    }
+
+    private func loadArtistThumb(_ artist: LibraryArtist) {
+        guard artistThumbs[artist.key] == nil else { return }
+        guard let videoURL = artist.videoURL else { return }
+        // Snapshot from cma video (current source; AI analysis hook later)
+        DispatchQueue.global(qos: .utility).async {
+            let img = ArtistSnapshot.snapshot(videoURL: videoURL)
+            if let img {
+                DispatchQueue.main.async { artistThumbs[artist.key] = img }
+            }
+        }
+    }
+
+    private func playLibraryArtist(_ artist: LibraryArtist, libraryURL: URL) {
+        guard let viewModel, loadingArtistKey == nil else { return }
+        loadingArtistKey = artist.key
+        selectedArtistKey = artist.key
+        viewModel.playLibraryArtist(artist, libraryURL: libraryURL)
+        viewModel.log("Playing \(artist.name) — \(artist.trackCount) songs")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            loadingArtistKey = nil
+        }
+        onPlay?()
+    }
+
+    private func revealArtistVideos(_ artist: LibraryArtist) {
+        guard let videoURL = artist.videoURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([videoURL])
     }
 
     private func header(_ lib: ClusterLibrary) -> some View {
@@ -344,6 +774,29 @@ struct ClusterView: View {
             onTap: { onOpenDetail?(pack) }
         )
         .animation(.snappy, value: loadingPackURL)
+        .contextMenu {
+            Button("Open") { onOpenDetail?(pack) }
+            Button("Play") { playPack(pack) }
+            Divider()
+            Button("Reveal in Finder") { revealPack(pack) }
+            Button("Rename…") {
+                renameText = pack.name
+                packToRename = pack
+            }
+            Button("Rescan") { rescan() }
+            Divider()
+            Button("Move to Trash…", role: .destructive) { packToDelete = pack }
+        }
+    }
+
+    private func playArtist(_ pack: CellaPack, artist: PackArtist) {
+        guard let viewModel else { return }
+        loadingPackURL = pack.url
+        viewModel.importViaOpenMix(url: pack.url, startFileName: artist.files.first, blend: false, artistFilter: artist.name)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            loadingPackURL = nil
+        }
+        onPlay?()
     }
 
     // MARK: - Empty state (first open)
@@ -444,15 +897,87 @@ struct ClusterView: View {
         lib.url.deletingPathExtension().lastPathComponent
     }
 
+    private func rescan() {
+        guard !libraryPath.isEmpty else { return }
+        let url = URL(fileURLWithPath: libraryPath)
+        withAnimation(.snappy) {
+            var lib = ClusterLibrary.scan(url)
+            lib.refreshCacheCounts()
+            library = lib
+        }
+        reloadLibraryArtists()
+    }
+
+    private func createPack(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !libraryPath.isEmpty else { return }
+        let libURL = URL(fileURLWithPath: libraryPath)
+        let packURL = libURL.appendingPathComponent(trimmed + ".cella")
+        do {
+            try FileManager.default.createDirectory(at: packURL, withIntermediateDirectories: true)
+            rescan()
+        } catch {
+            print("[Cluster] create pack failed: \(error)")
+        }
+    }
+
+    private func renamePack(_ pack: CellaPack, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { packToRename = nil; return }
+        let dest = pack.url.deletingLastPathComponent().appendingPathComponent(trimmed + ".cella")
+        do {
+            try FileManager.default.moveItem(at: pack.url, to: dest)
+            packToRename = nil
+            rescan()
+        } catch {
+            print("[Cluster] rename failed: \(error)")
+            packToRename = nil
+        }
+    }
+
+    private func deletePack(_ pack: CellaPack) {
+        do {
+            try FileManager.default.trashItem(at: pack.url, resultingItemURL: nil)
+            packToDelete = nil
+            rescan()
+        } catch {
+            print("[Cluster] delete failed: \(error)")
+            packToDelete = nil
+        }
+    }
+
+    private func revealPack(_ pack: CellaPack) {
+        NSWorkspace.shared.activateFileViewerSelecting([pack.url])
+    }
+
     private func autoLoadDefault() -> Bool {
         let fm = FileManager.default
-        let defaultURL = fm.homeDirectoryForCurrentUser
-            .appendingPathComponent("Downloads")
-            .appendingPathComponent("musicLiblary.cluster")
-        guard fm.fileExists(atPath: defaultURL.path) else { return false }
-        libraryPath = defaultURL.path
+        let home = fm.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent("Downloads/Cella Projects/musicLiblary.cluster"),
+            home.appendingPathComponent("Downloads/musicLiblary.cluster"),
+            home.appendingPathComponent("Music/musicLiblary.cluster"),
+        ]
+        var defaultURL: URL?
+        for url in candidates where fm.fileExists(atPath: url.path) { defaultURL = url; break }
+        if defaultURL == nil {
+            let downloads = home.appendingPathComponent("Downloads")
+            if let contents = try? fm.contentsOfDirectory(at: downloads, includingPropertiesForKeys: nil),
+               let found = contents.first(where: { $0.pathExtension.lowercased() == "cluster" && fm.fileExists(atPath: $0.path) }) {
+                defaultURL = found
+            } else {
+                for sub in (try? fm.contentsOfDirectory(at: downloads, includingPropertiesForKeys: nil)) ?? [] where sub.hasDirectoryPath {
+                    guard let subContents = try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil) else { continue }
+                    if let found = subContents.first(where: { $0.pathExtension.lowercased() == "cluster" && fm.fileExists(atPath: $0.path) }) {
+                        defaultURL = found; break
+                    }
+                }
+            }
+        }
+        guard let url = defaultURL else { return false }
+        libraryPath = url.path
         withAnimation(.snappy) {
-            library = ClusterLibrary.scan(defaultURL)
+            library = ClusterLibrary.scan(url)
         }
         return true
     }
@@ -474,6 +999,7 @@ private struct PackCardView: View {
     @State private var isPressed = false
     @State private var hasAppeared = false
     @State private var loadedImages: [URL: NSImage] = [:]
+    @State private var topArtists: [PackArtist] = []
 
     private let entranceDelay: Double = Double.random(in: 0...0.12)
     private let joySpring: Animation = .spring(response: 0.35, dampingFraction: 0.65)
@@ -545,6 +1071,29 @@ private struct PackCardView: View {
                         .font(.system(size: 15))
                         .foregroundStyle(theme.textSecondary.opacity(0.6))
                 }
+
+                if !topArtists.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(topArtists.prefix(4)) { a in
+                                HStack(spacing: 4) {
+                                    Image(systemName: "person.fill")
+                                        .font(.system(size: 8))
+                                    Text(a.name)
+                                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                                        .lineLimit(1)
+                                    Text("\(a.trackCount)")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .opacity(0.7)
+                                }
+                                .foregroundStyle(theme.textSecondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(theme.textSecondary.opacity(0.08)))
+                            }
+                        }
+                    }
+                }
             }
         }
         .padding(16)
@@ -581,6 +1130,12 @@ private struct PackCardView: View {
         }
         .onAppear {
             loadImages()
+            DispatchQueue.global(qos: .utility).async {
+                let artists = ClusterLibrary.artists(in: pack.url)
+                DispatchQueue.main.async {
+                    topArtists = Array(artists.prefix(4))
+                }
+            }
             guard !reduceMotion else {
                 hasAppeared = true
                 return
@@ -741,6 +1296,7 @@ struct PackDetailView: View {
     var viewModel: PlayerViewModel?
     var onPlay: (_ startFileName: String?) -> Void
     var onAutoMix: (_ startFileName: String?, _ album: CellaAlbum) -> Void = { _, _ in }
+    var onPlayArtist: ((PackArtist) -> Void)? = nil
     var onClose: () -> Void = {}
     var onOpenLRC: ((URL) -> Void)? = nil
     @Environment(\.theme) private var theme
@@ -762,7 +1318,15 @@ struct PackDetailView: View {
                     .tint(theme.dotActive)
                 Spacer()
             } else {
-                albumList
+                ScrollView {
+                    LazyVStack(spacing: 12) {
+                        ForEach(albums) { album in
+                            albumCard(album)
+                        }
+                    }
+                    .padding(.horizontal, 26)
+                    .padding(.bottom, 26)
+                }
             }
         }
         .frame(width: 860, height: 620)
@@ -834,15 +1398,7 @@ struct PackDetailView: View {
     }
 
     private var albumList: some View {
-        ScrollView {
-            LazyVStack(spacing: 12) {
-                ForEach(albums) { album in
-                    albumCard(album)
-                }
-            }
-            .padding(.horizontal, 26)
-            .padding(.bottom, 26)
-        }
+        EmptyView()
     }
 
     private func albumCard(_ album: CellaAlbum) -> some View {
@@ -1082,6 +1638,169 @@ struct PackDetailView: View {
         }
     }
 
+}
+
+// MARK: - Polished Artist Circle (hover play, now-playing ring, fade-in thumb)
+
+private struct ArtistCircleCell: View {
+    let name: String
+    let thumb: NSImage?
+    let theme: Theme
+    let isLoading: Bool
+    let isNowPlaying: Bool
+    @State private var isHovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(theme.screenBackground)
+                    .frame(width: 88, height: 88)
+                    .overlay(
+                        Circle().stroke(
+                            isNowPlaying ? theme.dotActive : theme.textSecondary.opacity(0.15),
+                            lineWidth: isNowPlaying ? 2.5 : 1
+                        )
+                    )
+                    .shadow(
+                        color: isNowPlaying ? theme.dotActive.opacity(0.4) : (isHovering ? theme.dotActive.opacity(0.25) : .clear),
+                        radius: isNowPlaying ? 10 : 8
+                    )
+                    .scaleEffect(isHovering && !isLoading ? 1.05 : 1.0)
+                    .animation(reduceMotion ? .none : .snappy, value: isHovering)
+                if let thumb {
+                    Image(nsImage: thumb)
+                        .resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: 88, height: 88).clipShape(Circle())
+                        .transition(.opacity)
+                } else {
+                    Text(String(name.prefix(1)).uppercased())
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.dotActive)
+                }
+                if isLoading {
+                    Circle().fill(.black.opacity(0.35)).frame(width: 88, height: 88)
+                    ProgressView().controlSize(.small).tint(.white)
+                } else if isHovering {
+                    Circle().fill(.black.opacity(0.35)).frame(width: 88, height: 88)
+                    Image(systemName: "play.fill").font(.system(size: 20)).foregroundStyle(.white)
+                        .transition(.scale(scale: 0.7).combined(with: .opacity))
+                }
+                if isNowPlaying && !isLoading {
+                    HStack(spacing: 3) {
+                        Circle().fill(.white).frame(width: 4, height: 4)
+                        Text("PLAYING").font(.system(size: 7, weight: .bold, design: .monospaced)).foregroundStyle(.white)
+                    }
+                    .padding(.horizontal, 7).padding(.vertical, 3)
+                    .background(Capsule().fill(theme.dotActive))
+                    .offset(y: 34)
+                }
+            }
+            .contentShape(Circle())
+            .onHover { isHovering = $0 }
+            Text(name)
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(isNowPlaying ? theme.dotActive : theme.textPrimary)
+                .lineLimit(1).frame(width: 100).truncationMode(.tail)
+        }
+        .frame(width: 100)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Cluster Mode Switch (Cella capsule, not original segmented)
+
+private struct ClusterModeSwitch: View {
+    @Binding var mode: ClusterMode
+    @Environment(\.theme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var anim
+
+    private let spring: Animation = .spring(response: 0.35, dampingFraction: 0.8)
+
+    var body: some View {
+        HStack(spacing: 0) {
+            modeButton(.playlists, icon: "books.vertical.fill")
+            modeButton(.artists, icon: "person.2.fill")
+        }
+        .padding(4)
+        .background(theme.tabBarBackground)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(theme.textSecondary.opacity(0.15), lineWidth: 1))
+    }
+
+    private func modeButton(_ m: ClusterMode, icon: String) -> some View {
+        let active = mode == m
+        return Button {
+            withAnimation(reduceMotion ? .none : spring) { mode = m }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(m.rawValue)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(active ? theme.tabSelectedText : theme.tabUnselectedText)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 7)
+            .background(
+                ZStack {
+                    if active {
+                        Capsule()
+                            .fill(theme.tabSelectedBackground)
+                            .matchedGeometryEffect(id: "clusterMode", in: anim)
+                    }
+                }
+            )
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Show \(m.rawValue.lowercased())")
+    }
+}
+
+// MARK: - Artist Snapshot (cma video frame; AI hook later)
+
+/// Current source: first cma video frame for artist.
+/// Later: replace with AI-analyzed portrait / best frame.
+enum ArtistSnapshot {
+    private static var cache: [String: NSImage] = [:]
+    private static let lock = NSLock()
+
+    static func snapshot(videoURL: URL) -> NSImage? {
+        let key = videoURL.path
+        lock.lock()
+        if let hit = cache[key] { lock.unlock(); return hit }
+        lock.unlock()
+        // Resolve .cma → temp .mp4 for AVFoundation
+        let playURL: URL
+        if videoURL.pathExtension.lowercased() == "cma" {
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent("cella_\(videoURL.deletingPathExtension().lastPathComponent)_\(abs(videoURL.path.hashValue)).mp4")
+            if !FileManager.default.fileExists(atPath: tmp.path) {
+                try? FileManager.default.copyItem(at: videoURL, to: tmp)
+            }
+            playURL = tmp
+        } else {
+            playURL = videoURL
+        }
+        let asset = AVURLAsset(url: playURL)
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = CGSize(width: 256, height: 256)
+        let time = CMTime(seconds: 0.5, preferredTimescale: 600)
+        do {
+            let cg = try gen.copyCGImage(at: time, actualTime: nil)
+            let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
+            lock.lock()
+            cache[key] = img
+            lock.unlock()
+            return img
+        } catch {
+            return nil
+        }
+    }
 }
 
 #Preview {

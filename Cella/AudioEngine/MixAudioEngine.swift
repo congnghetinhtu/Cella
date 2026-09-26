@@ -340,7 +340,7 @@ class MixAudioEngine {
         stop()
 
         // Ensure the audio engine is running — may have been stopped by
-        // StreamAudioEngine or a device configuration change while idle.
+        // a device configuration change while idle.
         if !engine.isRunning {
             try? engine.start()
         }

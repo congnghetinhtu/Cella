@@ -334,8 +334,7 @@ struct BottomTabBar: View {
 // MARK: - AlbumPill (album pill, clone of the playing-info pill)
 
 /// Shows which album the playing track is from, with its folder cover image.
-/// Slides in from the left (leading) next to the playing-info pill, mimicking
-/// the OpenMix / Lyric-Supported badge motion.
+/// Slides in from the left (leading) next to the playing-info pill.
 struct AlbumPill: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
@@ -484,7 +483,11 @@ struct AlbumPill: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 5)
                     .fill(theme.dotInactiveDeep)
-                if let cover = viewModel.albumPillCover {
+                if viewModel.isArtistMode {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.dotActive.opacity(0.9))
+                } else if let cover = viewModel.albumPillCover {
                     Image(nsImage: cover)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -498,19 +501,32 @@ struct AlbumPill: View {
             .frame(width: 26, height: 26)
 
             VStack(alignment: .leading, spacing: 1) {
-                Text("Picked from")
+                Text(viewModel.isArtistMode ? "Artist" : "Picked from")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                     .foregroundStyle(theme.textSecondary)
-                Text(viewModel.albumPillTitle)
+                Text(viewModel.isArtistMode ? (viewModel.activeArtistFilter ?? "") : viewModel.albumPillTitle)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(theme.textPrimary)
                     .fixedSize(horizontal: true, vertical: false)
                 if !viewModel.albumPillSourceName.isEmpty {
-                    Text("\(viewModel.albumPillSourceName).cella")
+                    Text(viewModel.isArtistMode
+                        ? "\(viewModel.mixQueue?.count ?? 0) songs • \(viewModel.albumPillSourceName).cella"
+                        : "\(viewModel.albumPillSourceName).cella")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundStyle(theme.dotActive.opacity(0.8))
                         .fixedSize(horizontal: true, vertical: false)
                 }
+            }
+            if viewModel.isArtistMode {
+                Button {
+                    viewModel.clearArtistFilter()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear artist filter — back to full pack")
             }
 
             if viewModel.albumPillHiSoVisible {
@@ -550,42 +566,48 @@ struct AlbumSongsPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Header
-            HStack(spacing: 10) {
-                if selectedAlbum != nil {
-                    Button {
-                        withAnimation(.snappy) {
-                            selectedAlbum = nil
-                        }
-                    } label: {
-                        Label("Albums", systemImage: "chevron.left")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(theme.dotActive)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-                Text(selectedAlbum?.name ?? "Albums")
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1)
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 12)
-            .padding(.bottom, 6)
-
-            Divider().background(theme.textSecondary.opacity(0.12))
-
-            if let selectedAlbum {
-                songList(for: selectedAlbum)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            if viewModel.isArtistMode {
+                artistHeader
+                Divider().background(theme.textSecondary.opacity(0.12))
+                artistSongList
             } else {
-                albumList
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                // Header
+                HStack(spacing: 10) {
+                    if selectedAlbum != nil {
+                        Button {
+                            withAnimation(.snappy) {
+                                selectedAlbum = nil
+                            }
+                        } label: {
+                            Label("Albums", systemImage: "chevron.left")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(theme.dotActive)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Text(selectedAlbum?.name ?? "Albums")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 6)
+
+                Divider().background(theme.textSecondary.opacity(0.12))
+
+                if let selectedAlbum {
+                    songList(for: selectedAlbum)
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                } else {
+                    albumList
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
             }
         }
         .animation(.snappy, value: selectedAlbum?.id)
@@ -596,11 +618,90 @@ struct AlbumSongsPopover: View {
                 .stroke(theme.textSecondary.opacity(0.15), lineWidth: 1)
         )
         .onAppear {
-            // Open on the current album's songs first.
-            if selectedAlbum == nil {
+            // Open on the current album's songs first (skip in artist mode — flat list).
+            if !viewModel.isArtistMode, selectedAlbum == nil {
                 selectedAlbum = initialAlbum
             }
         }
+    }
+
+    private var artistHeader: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "person.fill")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.dotActive)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(viewModel.activeArtistFilter ?? "Artist")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                Text("\(viewModel.mixQueue?.count ?? 0) songs • pack order • \(viewModel.albumPillSourceName).cella")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button {
+                viewModel.clearArtistFilter()
+                dismiss()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 10))
+                    Text("All").font(.system(size: 11, weight: .semibold, design: .rounded))
+                }
+                .foregroundStyle(theme.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(theme.textSecondary.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .help("Clear artist filter — back to full pack")
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 12)
+        .padding(.bottom, 6)
+    }
+
+    private var artistSongList: some View {
+        ScrollView {
+            VStack(spacing: 2) {
+                ForEach(Array((viewModel.mixQueue?.tracks ?? []).enumerated()), id: \.element.id) { index, track in
+                    let isCurrent = track.url == viewModel.mixQueue?.currentTrack?.url
+                    PickerRow(highlighted: isCurrent) {
+                        onSelect(track)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(theme.textSecondary)
+                                .frame(width: 24, alignment: .trailing)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(track.trackTitle)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(isCurrent ? theme.dotActive : theme.textPrimary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                if !track.displayArtist.isEmpty {
+                                    Text(track.displayArtist)
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(theme.textSecondary)
+                                        .lineLimit(1)
+                                }
+                            }
+                            Spacer()
+                            if isCurrent {
+                                Image(systemName: "speaker.wave.2.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(theme.dotActive)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(6)
+        }
+        .frame(width: 300, height: min(CGFloat(viewModel.mixQueue?.count ?? 0) * 40 + 12, 340))
     }
 
     // MARK: - Album List
@@ -715,7 +816,7 @@ private struct PickerRow<Content: View>: View {
     }
 }
 
-// MARK: - NowPlayingBar (top center pill + OpenMix badge)
+// MARK: - NowPlayingBar (top center pill + mix badge)
 
 struct NowPlayingBar: View {
     var viewModel: PlayerViewModel
@@ -785,7 +886,7 @@ struct NowPlayingBar: View {
             }
             .onChange(of: shouldAnimateGradient) { _, _ in updateGradientTimer() }
             .onChange(of: viewModel.mixQueue?.currentTrack?.url) { _, _ in
-                // During OpenMix, wait until crossfade finishes (state -> playing) to show
+                // During crossfade, wait until finishes (state -> playing) to show
                 if viewModel.playerState == .autoMix { return }
                 if hasLyricSupported { hideQualityPills(); triggerLyricBadgeIfNeeded() }
                 else { hideLyricBadge(); scheduleQualityPills() }
@@ -795,13 +896,13 @@ struct NowPlayingBar: View {
             }
             .onChange(of: viewModel.playerState) { old, new in
                 if new == .playing && old == .autoMix {
-                    // OpenMix crossfade landed on this song — show badge/pills again
+                    // Crossfade landed on this song — show badge/pills again
                     if hasLyricSupported { triggerLyricBadgeIfNeeded(force: true, forcePillsAfter: true) }
                     else { showQualityPills(force: true) }
                 } else if new == .playing && old != .paused && hasLyricSupported {
                     hideQualityPills(); triggerLyricBadgeIfNeeded()
                 } else if new == .playing && old != .paused && !hasLyricSupported {
-                    // Non-lyric: appear right after the OpenMixing badge (autoMix -> playing)
+                    // Non-lyric: appear right after the mixing badge (autoMix -> playing)
                     showQualityPills()
                 }
                 if new == .paused { hideLyricBadgeKeepPills() }
@@ -843,9 +944,9 @@ struct NowPlayingBar: View {
     @ViewBuilder
     private func normalPill(track: TrackAsset?, lyrics: String?) -> some View {
         HStack(spacing: 10) {
-            // OpenMix badge — left of track info
+            // Mix badge — left of track info
             if isAutoMixing {
-                openMixBadge
+                mixBadge
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
@@ -951,47 +1052,10 @@ struct NowPlayingBar: View {
         }
     }
 
-    // MARK: - OpenMix Badge
+    // MARK: - Mix Badge
 
-    private var openMixBadge: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(.white)
-                .frame(width: 5, height: 5)
-                .shadow(color: theme.haloPrimary, radius: 3)
-
-            Text("OpenMixing to")
-                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                .foregroundStyle(.white)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [theme.haloPrimary, theme.haloSecondary, theme.haloPrimary.opacity(0.85)],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
-                .overlay(
-                    AngularGradient(
-                        colors: [
-                            .clear, .clear,
-                            .white.opacity(0.3),
-                            .clear, .clear,
-                            .white.opacity(0.2),
-                            .clear, .clear
-                        ],
-                        center: .center,
-                        angle: .degrees(gradientAngle)
-                    )
-                    .blendMode(.overlay)
-                )
-        )
-        .clipShape(Capsule())
-        .shadow(color: .green.opacity(0.5), radius: 6)
+    private var mixBadge: some View {
+        OrbMixBadge(theme: theme)
     }
 
     // MARK: - Lyric Supported Badge
@@ -1388,5 +1452,76 @@ private struct TabButtonLabel: View {
         if isActive { return color }
         if isHovering { return color.opacity(0.6) }
         return unselectedText
+    }
+}
+
+// MARK: - Orb Mixing Pill (thinking-orbs rings, Canvas — no MetalForge export needed)
+
+/// Dark pill with slow-orbiting cream dots (depth size + fade), like the reference image.
+/// Replaces gradient mixBadge during autoMix.
+private struct OrbMixBadge: View {
+    let theme: Theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private struct Orb: Hashable {
+        let ring: Double      // 0 inner … 1 outer
+        let angle0: Double    // start angle
+        let speed: Double     // revs per second (signed)
+        let size: Double      // base diameter
+        let depth: Double     // 0 far … 1 near
+    }
+
+    private var orbs: [Orb] {
+        var rng = SeededRandomGenerator(seed: 20260927)
+        return (0..<42).map { _ in
+            Orb(
+                ring: Double.random(in: 0.15...1.0, using: &rng),
+                angle0: Double.random(in: 0..<(.pi * 2), using: &rng),
+                speed: Double.random(in: -0.25...0.35, using: &rng),
+                size: Double.random(in: 2...7, using: &rng),
+                depth: Double.random(in: 0...1, using: &rng)
+            )
+        }
+    }
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            // Theme-following: pill = tab bar surface, dots = accent, label = primary.
+            // Dark Seafoam/Bipolar/Mint all adapt (no fixed cream).
+            let dotBase = theme.dotActive
+            HStack(spacing: 7) {
+                Canvas { context, size in
+                    let cx = 14.0
+                    let cy = size.height / 2
+                    let maxR = min(size.height / 2 - 2, 13)
+                    for (idx, orb) in orbs.enumerated() {
+                        let ang = orb.angle0 + (reduceMotion ? 0 : t * orb.speed * .pi * 2)
+                        let rx = maxR * orb.ring
+                        let ry = maxR * orb.ring * 0.82
+                        let x = cx + cos(ang) * rx
+                        let y = cy + sin(ang) * ry
+                        let d = 0.35 + 0.65 * orb.depth
+                        let dotR = orb.size * 0.5 * (0.5 + d)
+                        let opacity = 0.25 + 0.65 * d
+                        // Alternate accent / halo for depth variety, all theme-driven
+                        let c = idx % 4 == 0 ? theme.haloSecondary : dotBase
+                        let rect = CGRect(x: x - dotR, y: y - dotR, width: dotR * 2, height: dotR * 2)
+                        context.fill(Path(ellipseIn: rect), with: .color(c.opacity(opacity)))
+                    }
+                }
+                .frame(width: 30, height: 20)
+                Text("Mixing")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(theme.textPrimary)
+            }
+            .padding(.leading, 6)
+            .padding(.trailing, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(theme.tabBarBackground))
+            .overlay(Capsule().stroke(theme.textSecondary.opacity(0.25), lineWidth: 1))
+            .clipShape(Capsule())
+            .shadow(color: theme.dotActive.opacity(0.35), radius: 6)
+        }
     }
 }

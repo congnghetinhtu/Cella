@@ -43,25 +43,16 @@ class PlayerViewModel {
     private let crossfader: Crossfader
     private let config: AudioConfig
 
-    // MARK: - OpenMix Integration
+    // MARK: - Import State
 
-    private let openMixBridge = OpenMixBridge()
-    private var streamEngine: StreamAudioEngine?
-    private var openMixImportURL: URL?
     private var requestedStartFileName: String?
     private var cacheTask: Task<Void, Never>?
 
-    /// Blend (smooth "OpenMix to") state. When set, the currently playing track
-    /// keeps playing while the target pack is analyzed; on analysis completion we
-    /// crossfade the current track straight into the requested track.
+    /// Blend (smooth crossfade to) state. When set, the currently playing track
+    /// keeps playing while the target pack is prepared; we crossfade directly
+    /// into the requested track.
     private var blendSourceTrack: TrackAsset?
     private var blendPending = false
-    /// When a blend-mode import is active, the OpenMix stream must not take over
-    /// playback — the realtime engine already blends into the requested track and
-    /// keeps transitioning serially. Letting the stream kick in later (analysis
-    /// completes in the background) would REPLAY the just-blended song from its
-    /// start on a second playback engine.
-    private var blendStreamingDisabled = false
 
     // MARK: - Engine Log
 
@@ -99,8 +90,14 @@ class PlayerViewModel {
     var currentAudioMetadataURL: URL?
     private var playlistFolderURL: URL?
     private var cueSheet: CueSheet?
-    private var caPlaylist: CaPlaylist?
+    private var cueTracksByFile: [String: CueTrack] = [:]
+    private var cueAlbumNames: [String: String] = [:]
     private var albumCueArtists: [String: String] = [:]
+
+    /// Artist mode: non-nil when queue filtered to single artist via Cluster Artist tab.
+    /// Cella tab shows flat artist songs + Artist pill instead of albums.
+    var activeArtistFilter: String?
+    var activeArtistPackURL: URL?
 
     // MARK: - Artist Images
 
@@ -157,7 +154,6 @@ class PlayerViewModel {
     var hasTracks: Bool { mixQueue?.isEmpty == false }
 
     var activeEngine: String {
-        if streamEngine != nil { return "OpenMix" }
         return "Real-Time"
     }
 
@@ -263,8 +259,6 @@ class PlayerViewModel {
         if let obs = videoObservation {
             NotificationCenter.default.removeObserver(obs)
         }
-        openMixBridge.stop()
-        streamEngine?.stop()
     }
 
     // MARK: - Setup
@@ -522,7 +516,141 @@ class PlayerViewModel {
         }
     }
 
-    /// Crossfade (OpenMix) from the current track straight to a chosen album song.
+    /// True when queue filtered to single artist (Cluster Artist play).
+    var isArtistMode: Bool { activeArtistFilter != nil }
+
+    /// Flat artist songs in pack order (queue already filtered, same order).
+    var artistSongs: [TrackAsset] { mixQueue?.tracks ?? [] }
+
+    /// Exit artist mode: re-import full pack. Auto-called on full pack play,
+    /// manual via clear chip in Cella (both, per user choice).
+    /// Library-wide (.cluster) mode just clears flag — queue stays, pill returns to album.
+    func clearArtistFilter() {
+        guard let url = activeArtistPackURL ?? playlistFolderURL else {
+            activeArtistFilter = nil
+            activeArtistPackURL = nil
+            return
+        }
+        if url.pathExtension.lowercased() == "cluster" {
+            activeArtistFilter = nil
+            activeArtistPackURL = nil
+            syncAlbumPillState()
+            return
+        }
+        let currentURL = mixQueue?.currentTrack?.url
+        let startFile = currentURL?.lastPathComponent
+        importViaOpenMix(url: url, startFileName: startFile, blend: false, artistFilter: nil)
+    }
+
+    /// Library-wide artist play: all songs by artist across all packs, pack order.
+    /// Builds TrackAssets with per-file pack context (cue → lrc → filename), no filename collision.
+    func playLibraryArtist(_ artist: LibraryArtist, libraryURL: URL) {
+        cancelPendingMoodTransition()
+        stopAnimationLoop()
+        audioEngine.stop()
+        cacheTask?.cancel()
+        importError = nil
+        analysisProgress = 0
+        activeArtistFilter = artist.name
+        activeArtistPackURL = libraryURL
+        playlistFolderURL = libraryURL
+        albumPillSourceName = libraryURL.deletingPathExtension().lastPathComponent
+        artistImages = []
+        currentArtistImage = nil
+
+        var tracks: [TrackAsset] = []
+        for fileURL in artist.trackURLs {
+            // Owning pack = nearest parent *.cella, fallback library root
+            var packURL = fileURL.deletingLastPathComponent()
+            while packURL.pathExtension.lowercased() != "cella" && packURL.path != libraryURL.path && packURL.path != "/" {
+                packURL = packURL.deletingLastPathComponent()
+            }
+            if packURL.pathExtension.lowercased() != "cella" { packURL = libraryURL }
+            var t = TrackAsset(url: fileURL)
+            // Per-file cue lookup (album folder first, then pack root)
+            let albumDir = fileURL.deletingLastPathComponent()
+            var foundTitle: String?
+            var foundPerformer: String?
+            var foundAlbum: String?
+            let fm = FileManager.default
+            let albumContents = (try? fm.contentsOfDirectory(at: albumDir, includingPropertiesForKeys: nil)) ?? []
+            if let cueURL = albumContents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+               let sheet = CueParser.load(from: cueURL) {
+                if let c = sheet.tracks.first(where: { $0.fileName.lowercased() == fileURL.lastPathComponent.lowercased() }) {
+                    if !c.title.isEmpty { foundTitle = c.title }
+                    if !c.performer.isEmpty { foundPerformer = c.performer }
+                }
+                if !sheet.title.isEmpty { foundAlbum = sheet.title }
+            }
+            if (foundTitle == nil || foundPerformer == nil),
+               let packContents = try? fm.contentsOfDirectory(at: packURL, includingPropertiesForKeys: nil),
+               let rootCueURL = packContents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+               let sheet = CueParser.load(from: rootCueURL),
+               let c = sheet.tracks.first(where: { $0.fileName.lowercased() == fileURL.lastPathComponent.lowercased() }) {
+                if foundTitle == nil && !c.title.isEmpty { foundTitle = c.title }
+                if foundPerformer == nil && !c.performer.isEmpty { foundPerformer = c.performer }
+            }
+            if let t1 = foundTitle { t.title = t1 }
+            if let p1 = foundPerformer { t.artist = p1 }
+            if let a1 = foundAlbum { t.albumName = a1 }
+            // LRC fallback
+            let meta = LrcParser.metadata(for: fileURL, in: packURL)
+            if (t.title == nil || t.title!.isEmpty) && !meta.title.isEmpty { t.title = meta.title }
+            if (t.artist == nil || t.artist!.isEmpty) && !meta.artist.isEmpty { t.artist = meta.artist }
+            if (t.albumName == nil || t.albumName!.isEmpty) && !meta.album.isEmpty { t.albumName = meta.album }
+            if t.albumName == nil || t.albumName!.isEmpty {
+                t.albumName = albumDir.lastPathComponent
+            }
+            tracks.append(t)
+        }
+        guard !tracks.isEmpty else {
+            importError = "No tracks found for artist \(artist.name)"
+            return
+        }
+        // Validate playable
+        tracks = tracks.filter { (try? AudioHelpers.readAudio(url: $0.url)) != nil }
+        guard !tracks.isEmpty else {
+            importError = "No playable tracks for \(artist.name)"
+            return
+        }
+        totalTrackCount = tracks.count
+        analyzedTrackCount = 0
+        mixQueue = MixQueue(tracks: tracks, transitions: Array(repeating: nil, count: max(0, tracks.count - 1)), currentIndex: 0)
+        loadArtistImages(from: libraryURL)
+        do {
+            try loadTrackAndRestore(url: tracks[0].url, barTimestamps: [], analysis: nil)
+            audioEngine.play()
+            playerState = .playing
+            startAnimationLoop()
+            startVideoPlayback()
+            log("Playing artist \(artist.name): \(tracks.count) tracks")
+        } catch {
+            importError = "Failed to play \(artist.name): \(error.localizedDescription)"
+        }
+    }
+
+    /// Library subset play: same as playLibraryArtist but with explicit URLs
+    /// (pack/album/song level from timeline). Preserves pack order of input.
+    func playLibraryTrackURLs(_ name: String, urls: [URL], libraryURL: URL, startURL: URL? = nil) {
+        guard !urls.isEmpty else { return }
+        // Reuse per-file enrichment by faking an Artist
+        let fake = Artist(name: name, key: ArtistMatcher.normKey(name), trackCount: urls.count, packCount: 0, albumCount: 0, trackURLs: urls, files: urls.map { $0.lastPathComponent }, videoURL: nil, coverURL: nil)
+        // Temporarily swap to play subset starting at startURL
+        let savedFirst = fake.trackURLs
+        playLibraryArtist(fake, libraryURL: libraryURL)
+        if let s = startURL,
+           let idx = mixQueue?.tracks.firstIndex(where: { $0.url == s }) {
+            mixQueue?.currentIndex = idx
+            if let track = mixQueue?.currentTrack {
+                try? loadTrackAndRestore(url: track.url, barTimestamps: [], analysis: nil)
+                audioEngine.play()
+                playerState = .playing
+            }
+        }
+        _ = savedFirst
+    }
+
+    /// Crossfade from the current track straight to a chosen album song.
     func crossfadeToTrack(at index: Int) {
         guard var queue = mixQueue, index >= 0, index < queue.tracks.count else {
             print("[PlayerViewModel] crossfadeToTrack GUARD FAIL idx=\(index)")
@@ -619,7 +747,7 @@ queue.currentIndex = index
     }
 
     /// Recomputes album pill visibility from current playback state.
-    /// Hidden while OpenMix is mid-crossfade or no track is loaded.
+    /// Hidden while crossfade or no track is loaded.
     func syncAlbumPillState() {
         // A config-queue delayed reveal is in flight — let its tick finish
         // instead of overriding it with an immediate recompute.
@@ -692,17 +820,11 @@ queue.currentIndex = index
     func setVolume(_ volume: Float) {
         currentVolume = volume
         audioEngine.smoothVolume(to: volume)
-        applySecondaryVolume(volume)
     }
 
     func setVolumeImmediate(_ volume: Float) {
         currentVolume = volume
         audioEngine.setVolumeImmediate(volume)
-        applySecondaryVolume(volume)
-    }
-
-    private func applySecondaryVolume(_ volume: Float) {
-        streamEngine?.setVolume(volume)
     }
 
     /// Scroll-driven volume: engine updates immediately, UI throttled to 60Hz to avoid stuttering video
@@ -791,12 +913,20 @@ queue.currentIndex = index
 
         let lrcName = trackURL.deletingPathExtension().lastPathComponent + ".lrc"
 
-        // Find lrc file: try album's lrc/ subfolder first, then root lrc/, then legacy (same dir)
+        // Follow cella playlist structure: owning pack for second fallback
+        // (library mode folder is *.cluster, LRCs live in pack/lrc).
+        let effectiveFolder: URL
+        if folder.pathExtension.lowercased() == "cluster" {
+            effectiveFolder = owningPack(for: trackURL, fallback: folder)
+        } else {
+            effectiveFolder = folder
+        }
+        // Find lrc file: try album's lrc/ subfolder first, then pack lrc/, then legacy (same dir)
         let albumDir = trackURL.deletingLastPathComponent()
         let candidates = [
             albumDir.appendingPathComponent("lrc").appendingPathComponent(lrcName),
-            folder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
-            folder.appendingPathComponent(lrcName)
+            effectiveFolder.appendingPathComponent("lrc").appendingPathComponent(lrcName),
+            effectiveFolder.appendingPathComponent(lrcName)
         ]
 
         var found = false
@@ -815,10 +945,11 @@ queue.currentIndex = index
         if let nextTrack = mixQueue?.nextTrack {
             let nextLrcName = nextTrack.url.deletingPathExtension().lastPathComponent + ".lrc"
             let nextAlbumDir = nextTrack.url.deletingLastPathComponent()
+            let nextEffective: URL = folder.pathExtension.lowercased() == "cluster" ? owningPack(for: nextTrack.url, fallback: folder) : folder
             let nextCandidates = [
                 nextAlbumDir.appendingPathComponent("lrc").appendingPathComponent(nextLrcName),
-                folder.appendingPathComponent("lrc").appendingPathComponent(nextLrcName),
-                folder.appendingPathComponent(nextLrcName)
+                nextEffective.appendingPathComponent("lrc").appendingPathComponent(nextLrcName),
+                nextEffective.appendingPathComponent(nextLrcName)
             ]
             var nextFound = false
             for lrcURL in nextCandidates where FileManager.default.fileExists(atPath: lrcURL.path) {
@@ -839,9 +970,40 @@ queue.currentIndex = index
 
     // MARK: - Artist Images
 
+    /// Owning .cella pack for a track (walks up to nearest *.cella). Falls back to folder.
+    private func owningPack(for trackURL: URL, fallback: URL) -> URL {
+        var dir = trackURL.deletingLastPathComponent()
+        // Check track dir itself (flat pack root is .cella)
+        if dir.pathExtension.lowercased() == "cella" { return dir }
+        // Walk up max 4 levels (album → pack → library)
+        for _ in 0..<4 {
+            if dir.pathExtension.lowercased() == "cella" { return dir }
+            let parent = dir.deletingLastPathComponent()
+            if parent.path == dir.path { break }
+            dir = parent
+        }
+        return fallback
+    }
+
     private func loadArtistImages(from folder: URL) {
-        let cmaDir = folder.appendingPathComponent("cma")
-        guard FileManager.default.fileExists(atPath: cmaDir.path) else {
+        // Library artist mode: folder is *.cluster → resolve owning *.cella pack
+        // so structure follows cella playlist (pack/cma/<Artist>/...).
+        var cmaRoots: [URL] = []
+        if folder.pathExtension.lowercased() == "cluster",
+           let trackURL = mixQueue?.currentTrack?.url {
+            let pack = owningPack(for: trackURL, fallback: folder)
+            cmaRoots = [pack.appendingPathComponent("cma")]
+        } else if folder.pathExtension.lowercased() == "cluster" {
+            // No current track yet (initial library play): collect all packs' cma
+            // so first-frame CMA still shows. Filtered per-track on next songs.
+            let packs = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil))?.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() == "cella" } ?? []
+            cmaRoots = packs.map { $0.appendingPathComponent("cma") }
+        } else {
+            cmaRoots = [folder.appendingPathComponent("cma")]
+        }
+        // Use first existing cma dir as primary; library mode aggregates across packs below
+        let cmaDir = cmaRoots.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? folder.appendingPathComponent("cma")
+        guard FileManager.default.fileExists(atPath: cmaDir.path) || folder.pathExtension.lowercased() == "cluster" else {
             artistImages = []
             currentArtistImage = nil
             artistVideoURLs = []
@@ -853,16 +1015,17 @@ queue.currentIndex = index
         let animatedExtensions = Set(["gif", "mp4", "mov", "cma"])
         let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
 
-        // Get artist names from .ca metadata, then album CUE files, then filename parsing
+        // Get artist names from cue metadata, then filename parsing
         var trackArtists: [String] = []
 
-        // .ca is authoritative — split "Artist 1 & Artist 2" into separate names
         if let track = mixQueue?.currentTrack, !track.artists.isEmpty {
             trackArtists = track.artists.map { $0.lowercased() }
         } else if let trackURL = mixQueue?.currentTrack?.url {
             let fileName = trackURL.lastPathComponent
-            if let artist = albumCueArtists[fileName], !artist.isEmpty {
+            if let artist = albumCueArtists[fileName.lowercased()], !artist.isEmpty {
                 trackArtists.append(artist)
+            } else if let cue = cueTracksByFile[fileName.lowercased()], !cue.performer.isEmpty {
+                trackArtists.append(cue.performer.lowercased())
             }
         }
 
@@ -877,21 +1040,28 @@ queue.currentIndex = index
             }
         }
 
-        print("[PlayerViewModel] CMA artists: \(trackArtists)")
+        print("[PlayerViewModel] CMA artists: \(trackArtists) roots=\(cmaRoots.map { $0.path })")
 
-        // Scan cma/ directory
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: cmaDir, includingPropertiesForKeys: nil
-        )) ?? []
-
-        let allFiles = contents.filter {
-            allExtensions.contains($0.pathExtension.lowercased())
-        }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-
-        let animatedFiles = allFiles.filter { animatedExtensions.contains($0.pathExtension.lowercased()) }
-        let staticFiles = allFiles.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
+        // Scan cma/ directories (library mode aggregates across packs, primary first)
+        var scanDirs: [URL] = []
+        scanDirs.append(cmaDir)
+        for r in cmaRoots where r.path != cmaDir.path {
+            if FileManager.default.fileExists(atPath: r.path) { scanDirs.append(r) }
+        }
+        var allFiles: [URL] = []
+        var animatedFiles: [URL] = []
+        var staticFiles: [URL] = []
+        for dir in scanDirs {
+            let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+            let files = contents.filter { allExtensions.contains($0.pathExtension.lowercased()) }
+                .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+            allFiles.append(contentsOf: files)
+            animatedFiles.append(contentsOf: files.filter { animatedExtensions.contains($0.pathExtension.lowercased()) })
+            staticFiles.append(contentsOf: files.filter { staticExtensions.contains($0.pathExtension.lowercased()) })
+        }
 
         // Match artist names to video/image files in cma/<artist>/ subfolders
+        // Primary (owning pack) first so structure follows cella playlist.
         artistVideoURLs = []
         let videoExtensions = Set(["mp4", "mov", "cma"])
 
@@ -901,27 +1071,34 @@ queue.currentIndex = index
             let nfd = artist.precomposedStringWithCanonicalMapping
                 .decomposedStringWithCanonicalMapping
             let titleCase = nfd.split(separator: " ").map(\.capitalized).joined(separator: " ")
-            // Try various folder name formats: "artist", "Artist", "artist-name"
-            let candidates = [
-                cmaDir.appendingPathComponent(nfd),
-                cmaDir.appendingPathComponent(titleCase),
-                cmaDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "-")),
-                cmaDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "_"))
-            ]
-            for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
-                let subContents = (try? FileManager.default.contentsOfDirectory(
-                    at: dir, includingPropertiesForKeys: nil
-                )) ?? []
-                let videos = subContents.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
-                    .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-                artistVideoURLs.append(contentsOf: videos)
-
-                // Also grab static images from artist subfolder
-                let images = subContents.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
-                    .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-                if !images.isEmpty {
-                    artistImages = images.compactMap { NSImage(contentsOf: $0) }
+            for baseDir in scanDirs {
+                // Try various folder name formats: "artist", "Artist", "artist-name"
+                let candidates = [
+                    baseDir.appendingPathComponent(nfd),
+                    baseDir.appendingPathComponent(titleCase),
+                    baseDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "-")),
+                    baseDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "_"))
+                ]
+                for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
+                    let subContents = (try? FileManager.default.contentsOfDirectory(
+                        at: dir, includingPropertiesForKeys: nil
+                    )) ?? []
+                    let videos = subContents.filter { videoExtensions.contains($0.pathExtension.lowercased()) }
+                        .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+                    // Primary pack wins; other packs only fill if primary empty
+                    if baseDir.path == cmaDir.path {
+                        artistVideoURLs.append(contentsOf: videos)
+                    } else if artistVideoURLs.isEmpty {
+                        artistVideoURLs.append(contentsOf: videos)
+                    }
+                    // Also grab static images from artist subfolder (primary first)
+                    let images = subContents.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
+                        .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+                    if !images.isEmpty && artistImages.isEmpty {
+                        artistImages = images.compactMap { NSImage(contentsOf: $0) }
+                    }
                 }
+                if !artistVideoURLs.isEmpty && baseDir.path == cmaDir.path { break }
             }
         }
 
@@ -941,9 +1118,15 @@ queue.currentIndex = index
             }
         }
 
-        // Fallback: if no match, use all videos
+        // Fallback: if no match, use primary pack videos (not library-wide mix)
         if artistVideoURLs.isEmpty {
-            artistVideoURLs = animatedFiles.filter { $0.pathExtension.lowercased() != "gif" }
+            let primaryAnimated: [URL]
+            let primaryContents = (try? FileManager.default.contentsOfDirectory(at: cmaDir, includingPropertiesForKeys: nil)) ?? []
+            primaryAnimated = primaryContents.filter {
+                let e = $0.pathExtension.lowercased()
+                return animatedExtensions.contains(e) && e != "gif"
+            }
+            artistVideoURLs = primaryAnimated
         }
         artistVideoIndex = 0
 
@@ -1213,7 +1396,6 @@ queue.currentIndex = index
         case .playing:
             playerState = .paused
             audioEngine.pause()
-            streamEngine?.pause()
             stopVideoPlayback()
             stopAnimationLoop()
             syncPlaybackTime()
@@ -1222,9 +1404,6 @@ queue.currentIndex = index
             guard let queue = mixQueue, !queue.isEmpty else { return }
             playerState = .playing
             audioEngine.play()
-            if let stream = streamEngine, stream.isPlaying {
-                stream.resume()
-            }
             startVideoPlayback()
             syncPlaybackTime()
             // Apply any pending mood immediately on resume
@@ -1333,21 +1512,22 @@ queue.currentIndex = index
 
     // MARK: - Import & Analysis
 
-    /// Builds a TrackAsset, attaching title / artist / album name from the .ca playlist
+    /// Builds a TrackAsset, attaching title / artist / album name from per-album .cue sheets
     /// when the audio file has a matching entry. Falls back to .lrc metadata tags,
-    /// then to filename parsing.
-    private func makeTrackAsset(from url: URL, playlist: CaPlaylist?, playlistFolder: URL? = nil) -> TrackAsset {
+    /// then to filename parsing (cue → lrc → filename).
+    private func makeTrackAsset(from url: URL, playlistFolder: URL? = nil) -> TrackAsset {
         var track = TrackAsset(url: url)
 
-        // 1. Try .ca metadata
-        if let playlist {
-            if let album = CaParser.albumInfo(for: url, playlist: playlist) {
-                track.albumName = album.name
-            }
-            if let info = CaParser.trackInfo(for: url, playlist: playlist) {
-                track.title = info.title
-                track.artist = info.artist
-            }
+        // 1. Try per-album cue metadata
+        let fileKey = url.lastPathComponent.lowercased()
+        if let cueTrack = cueTracksByFile[fileKey] {
+            if !cueTrack.title.isEmpty { track.title = cueTrack.title }
+            if !cueTrack.performer.isEmpty { track.artist = cueTrack.performer }
+        }
+        let albumKey = url.deletingLastPathComponent().lastPathComponent.lowercased()
+        let packKey = url.deletingLastPathComponent().path.lowercased()
+        if let albumName = cueAlbumNames[albumKey] ?? cueAlbumNames[packKey], !albumName.isEmpty {
+            track.albumName = albumName
         }
 
         // 2. Fall back to .lrc metadata for any still-empty fields
@@ -1393,70 +1573,67 @@ queue.currentIndex = index
                 at: url, includingPropertiesForKeys: nil
             )) ?? []
 
-            // Read .ca file for album structure
-            let caFiles = contents.filter { $0.pathExtension.lowercased() == "ca" }
-            var parsedCa: CaPlaylist?
-            if let caURL = caFiles.first, let playlist = CaParser.load(from: caURL) {
-                print("[PlayerViewModel] .ca playlist: \(playlist.name ?? "?"), \(playlist.albums.count) albums")
-                parsedCa = playlist
-            }
-
-            // Collect audio files
+            // Collect audio files via per-album .cue sheets (cue → lrc → filename)
+            var parsedCueTracks: [String: CueTrack] = [:]
+            var parsedCueAlbumNames: [String: String] = [:]
+            var parsedCueSheets: [String: CueSheet] = [:]
             var audioFiles: [URL] = []
 
-            if let playlist = parsedCa {
-                audioFiles = CaParser.audioFiles(from: playlist, in: url)
-            }
+            let sortedSubfolders = contents.filter { $0.hasDirectoryPath }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
 
-            if audioFiles.isEmpty {
-                audioFiles = contents.filter {
-                    audioExtensions.contains($0.pathExtension.lowercased())
-                }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-
-                if audioFiles.isEmpty {
-                    let subfolders = contents.filter { $0.hasDirectoryPath }
-                    for subfolder in subfolders {
-                        let subContents = (try? fileManager.contentsOfDirectory(
-                            at: subfolder, includingPropertiesForKeys: nil
-                        )) ?? []
-                        let subAudio = subContents.filter {
-                            audioExtensions.contains($0.pathExtension.lowercased())
-                        }
-                        audioFiles.append(contentsOf: subAudio)
+            for subfolder in sortedSubfolders {
+                let subContents = (try? fileManager.contentsOfDirectory(at: subfolder, includingPropertiesForKeys: nil)) ?? []
+                let subAudioAll = subContents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                guard !subAudioAll.isEmpty || subContents.contains(where: { $0.pathExtension.lowercased() == "cue" }) else { continue }
+                if let cueURL = subContents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+                   let sheet = CueParser.load(from: cueURL) {
+                    let keyFolder = subfolder.lastPathComponent.lowercased()
+                    let keyPath = subfolder.path.lowercased()
+                    parsedCueSheets[keyFolder] = sheet
+                    parsedCueSheets[keyPath] = sheet
+                    let albumName = sheet.title.isEmpty ? subfolder.lastPathComponent : sheet.title
+                    parsedCueAlbumNames[keyFolder] = albumName
+                    parsedCueAlbumNames[keyPath] = albumName
+                    for track in sheet.tracks {
+                        parsedCueTracks[track.fileName.lowercased()] = track
                     }
+                    let ordered = sheet.trackOrder(for: subAudioAll)
+                    audioFiles.append(contentsOf: ordered)
+                } else {
+                    let sortedAudio = subAudioAll.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+                    audioFiles.append(contentsOf: sortedAudio)
                 }
             }
 
-            // Scan album subfolders for CUE files and build artist mapping
+            // Root-level audio (flat packs like english.cella / nhactre.cella)
+            let rootAudioAll = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+                .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            var parsedRootCue: CueSheet?
+            if !rootAudioAll.isEmpty {
+                if let rootCueURL = contents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+                   let sheet = CueParser.load(from: rootCueURL) {
+                    parsedRootCue = sheet
+                    let albumName = sheet.title.isEmpty ? url.lastPathComponent : sheet.title
+                    parsedCueAlbumNames[url.path.lowercased()] = albumName
+                    parsedCueAlbumNames[url.lastPathComponent.lowercased()] = albumName
+                    for track in sheet.tracks {
+                        parsedCueTracks[track.fileName.lowercased()] = track
+                    }
+                    audioFiles.append(contentsOf: sheet.trackOrder(for: rootAudioAll))
+                } else {
+                    audioFiles.append(contentsOf: rootAudioAll)
+                }
+            }
+
             var parsedAlbumCueArtists: [String: String] = [:]
-            let subfolders = contents.filter { $0.hasDirectoryPath }
-            for subfolder in subfolders {
-                let subContents = (try? fileManager.contentsOfDirectory(
-                    at: subfolder, includingPropertiesForKeys: nil
-                )) ?? []
-                let subCueFiles = subContents.filter { $0.pathExtension.lowercased() == "cue" }
-                for cueURL in subCueFiles {
-                    if let sheet = CueParser.load(from: cueURL) {
-                        for track in sheet.tracks {
-                            parsedAlbumCueArtists[track.fileName] = track.performer.lowercased()
-                        }
-                    }
-                }
+            for (file, track) in parsedCueTracks {
+                parsedAlbumCueArtists[file] = track.performer.lowercased()
+                parsedAlbumCueArtists[file.lowercased()] = track.performer.lowercased()
             }
-            print("[PlayerViewModel] Album CUE artists: \(parsedAlbumCueArtists)")
-
-            // Also check root CUE
-            let cueFiles = contents.filter { $0.pathExtension.lowercased() == "cue" }
-            var orderedFiles = audioFiles
-            var parsedCue: CueSheet?
-            if let cueURL = cueFiles.first, let sheet = CueParser.load(from: cueURL) {
-                print("[PlayerViewModel] CUE sheet: \(sheet.trackCount) tracks")
-                parsedCue = sheet
-                for track in sheet.tracks {
-                    parsedAlbumCueArtists[track.fileName] = track.performer.lowercased()
-                }
-                orderedFiles = sheet.trackOrder(for: audioFiles)
-            }
+            print("[PlayerViewModel] Per-album cue tracks: \(parsedCueTracks.count), album names: \(parsedCueAlbumNames.count)")
+            let parsedCue = parsedRootCue
+            let orderedFiles = audioFiles
 
             print("[PlayerViewModel] Audio files found: \(orderedFiles.count)")
 
@@ -1469,14 +1646,32 @@ queue.currentIndex = index
             }
 
             // Validate off main thread — reads audio headers, not full files
+            // Build TrackAsset using local cue maps (cue → lrc → filename) to avoid MainActor hop
             var validTracks: [TrackAsset] = []
             for rawURL in orderedFiles {
-                let rawTrack = self.makeTrackAsset(from: rawURL, playlist: parsedCa, playlistFolder: url)
+                var track = TrackAsset(url: rawURL)
+                let fileKey = rawURL.lastPathComponent.lowercased()
+                if let cueTrack = parsedCueTracks[fileKey] {
+                    if !cueTrack.title.isEmpty { track.title = cueTrack.title }
+                    if !cueTrack.performer.isEmpty { track.artist = cueTrack.performer }
+                }
+                let albumKey = rawURL.deletingLastPathComponent().lastPathComponent.lowercased()
+                let packKey = rawURL.deletingLastPathComponent().path.lowercased()
+                if let albumName = parsedCueAlbumNames[albumKey] ?? parsedCueAlbumNames[packKey], !albumName.isEmpty {
+                    track.albumName = albumName
+                }
+                // LRC fallback
+                let meta = LrcParser.metadata(for: rawURL, in: url)
+                if !meta.isEmpty {
+                    if track.title == nil || track.title!.isEmpty { track.title = meta.title }
+                    if track.artist == nil || track.artist!.isEmpty { track.artist = meta.artist }
+                    if track.albumName == nil || track.albumName!.isEmpty { track.albumName = meta.album }
+                }
                 do {
-                    _ = try AudioHelpers.readAudio(url: rawTrack.url)
-                    validTracks.append(rawTrack)
+                    _ = try AudioHelpers.readAudio(url: track.url)
+                    validTracks.append(track)
                 } catch {
-                    print("[PlayerViewModel] Skipping unplayable: \(rawTrack.fileName) — \(error.localizedDescription)")
+                    print("[PlayerViewModel] Skipping unplayable: \(track.fileName) — \(error.localizedDescription)")
                 }
             }
 
@@ -1493,7 +1688,8 @@ queue.currentIndex = index
             // Switch back to main actor for state updates and playback
             await MainActor.run {
                 self.cueSheet = parsedCue
-                self.caPlaylist = parsedCa
+                self.cueTracksByFile = parsedCueTracks
+                self.cueAlbumNames = parsedCueAlbumNames
                 self.albumCueArtists = parsedAlbumCueArtists
                 self.totalTrackCount = tracks.count
                 self.analyzedTrackCount = 0
@@ -1614,7 +1810,7 @@ queue.currentIndex = index
         } // Task.detached
     }
 
-    // MARK: - Blend ("OpenMix to")
+    // MARK: - Blend
 
     /// Crossfades the still-playing source track straight into the requested
     /// target track (queued by `importViaOpenMix(blend: true)`).
@@ -1942,9 +2138,9 @@ queue.currentIndex = index
         pendingMood = nil
     }
 
-    // MARK: - OpenMix Streaming Integration
+    // MARK: - Import
 
-    func importViaOpenMix(url: URL, startFileName: String? = nil, blend: Bool = false) {
+    func importViaOpenMix(url: URL, startFileName: String? = nil, blend: Bool = false, artistFilter: String? = nil) {
         // Only accept .cella folders
         guard url.pathExtension.lowercased() == "cella" else {
             importError = "Not a .cella playlist. Rename folder with .cella extension."
@@ -1952,7 +2148,6 @@ queue.currentIndex = index
         }
 
         // Capture the source track for a smooth blend into the requested song.
-        blendStreamingDisabled = blend
         if blend, let source = mixQueue?.currentTrack {
             blendSourceTrack = source
             blendPending = true
@@ -1967,21 +2162,24 @@ queue.currentIndex = index
             stopAnimationLoop()
             audioEngine.stop()
         }
-        openMixBridge.stop()
-        streamEngine?.stop()
-        streamEngine = nil
         playlistFolderURL = url
         albumPillSourceName = url.deletingPathExtension().lastPathComponent
+        if let f = artistFilter?.trimmingCharacters(in: .whitespacesAndNewlines), !f.isEmpty {
+            activeArtistFilter = f
+            activeArtistPackURL = url
+        } else {
+            activeArtistFilter = nil
+            activeArtistPackURL = nil
+        }
         artistImages = []
         currentArtistImage = nil
         loadArtistImages(from: url)
 
         importError = nil
         analysisProgress = 0
-        openMixImportURL = url
         requestedStartFileName = startFileName
 
-        print("[PlayerViewModel] Import via OpenMix: \(url.path) blend=\(blend) blendPending=\(blendPending) thread=\(Thread.isMainThread ? "main" : "bg")")
+        print("[PlayerViewModel] Import: \(url.path) blend=\(blend) blendPending=\(blendPending) artist=\(activeArtistFilter ?? "nil") thread=\(Thread.isMainThread ? "main" : "bg")")
 
         // Capture start file for background cache task (before it's cleared)
         let capturedStartFile = startFileName
@@ -1995,102 +2193,99 @@ queue.currentIndex = index
             at: url, includingPropertiesForKeys: nil
         )) ?? []
 
-        // Read .ca file for album structure
-        let caFiles = contents.filter { $0.pathExtension.lowercased() == "ca" }
-        if let caURL = caFiles.first, let playlist = CaParser.load(from: caURL) {
-            print("[PlayerViewModel] .ca playlist: \(playlist.name ?? "?"), \(playlist.albums.count) albums")
-            caPlaylist = playlist
-        } else {
-            caPlaylist = nil
-        }
-
-        // Collect audio files: from .ca album folders, or scan subfolders, or root
-        var audioFiles: [URL] = []
-
-        if let playlist = caPlaylist {
-            // Use .ca structure: scan each album subfolder
-            audioFiles = CaParser.audioFiles(from: playlist, in: url)
-            print("[PlayerViewModel] Found \(audioFiles.count) tracks from .ca albums")
-        }
-
-        if audioFiles.isEmpty {
-            // Fallback: scan root for audio files (flat structure)
-            audioFiles = contents.filter {
-                audioExtensions.contains($0.pathExtension.lowercased())
-            }.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-
-            // Also scan one-level-deep subfolders for audio (album folders)
-            if audioFiles.isEmpty {
-                let subfolders = contents.filter { $0.hasDirectoryPath }
-                for subfolder in subfolders {
-                    let subContents = (try? fileManager.contentsOfDirectory(
-                        at: subfolder, includingPropertiesForKeys: nil
-                    )) ?? []
-                    let subAudio = subContents.filter {
-                        audioExtensions.contains($0.pathExtension.lowercased())
-                    }
-                    audioFiles.append(contentsOf: subAudio)
-                }
-            }
-        }
-
-        // Scan album subfolders for CUE files and build artist mapping
+        // Collect audio files via per-album .cue sheets (cue → lrc → filename)
+        cueTracksByFile = [:]
+        cueAlbumNames = [:]
         albumCueArtists = [:]
+        var audioFiles: [URL] = []
+        var cueSheetsByAlbum: [String: CueSheet] = [:]
 
-        // Use .ca to know which albums exist, otherwise scan all subfolders
-        var albumFolders: [URL] = []
-        if let playlist = caPlaylist {
-            for album in playlist.albums {
-                let albumDir = url.appendingPathComponent(album.folder)
-                if FileManager.default.fileExists(atPath: albumDir.path) {
-                    albumFolders.append(albumDir)
+        let sortedSubfolders = contents.filter { $0.hasDirectoryPath }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+
+        for subfolder in sortedSubfolders {
+            let subContents = (try? fileManager.contentsOfDirectory(at: subfolder, includingPropertiesForKeys: nil)) ?? []
+            let subAudioAll = subContents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+            guard !subAudioAll.isEmpty || subContents.contains(where: { $0.pathExtension.lowercased() == "cue" }) else { continue }
+            if let cueURL = subContents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+               let sheet = CueParser.load(from: cueURL) {
+                let keyFolder = subfolder.lastPathComponent.lowercased()
+                let keyPath = subfolder.path.lowercased()
+                cueSheetsByAlbum[keyFolder] = sheet
+                cueSheetsByAlbum[keyPath] = sheet
+                let albumName = sheet.title.isEmpty ? subfolder.lastPathComponent : sheet.title
+                cueAlbumNames[keyFolder] = albumName
+                cueAlbumNames[keyPath] = albumName
+                cueAlbumNames[subfolder.path.lowercased()] = albumName
+                for track in sheet.tracks {
+                    cueTracksByFile[track.fileName.lowercased()] = track
+                    albumCueArtists[track.fileName.lowercased()] = track.performer.lowercased()
                 }
+                let ordered = sheet.trackOrder(for: subAudioAll)
+                audioFiles.append(contentsOf: ordered)
+            } else {
+                let sortedAudio = subAudioAll.sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+                audioFiles.append(contentsOf: sortedAudio)
             }
-        } else {
-            albumFolders = contents.filter { $0.hasDirectoryPath }.map { url.appendingPathComponent($0.lastPathComponent) }
         }
 
-        for albumDir in albumFolders {
-            let subContents = (try? fileManager.contentsOfDirectory(
-                at: albumDir, includingPropertiesForKeys: nil
-            )) ?? []
-            let cueFiles = subContents.filter { $0.pathExtension.lowercased() == "cue" }
-            for cueURL in cueFiles {
-                if let sheet = CueParser.load(from: cueURL) {
-                    for track in sheet.tracks {
-                        albumCueArtists[track.fileName] = track.performer.lowercased()
-                    }
+        let rootAudioAll = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+        var rootCue: CueSheet?
+        if !rootAudioAll.isEmpty {
+            if let rootCueURL = contents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+               let sheet = CueParser.load(from: rootCueURL) {
+                rootCue = sheet
+                let albumName = sheet.title.isEmpty ? url.lastPathComponent : sheet.title
+                cueAlbumNames[url.path.lowercased()] = albumName
+                cueAlbumNames[url.lastPathComponent.lowercased()] = albumName
+                for track in sheet.tracks {
+                    cueTracksByFile[track.fileName.lowercased()] = track
+                    albumCueArtists[track.fileName.lowercased()] = track.performer.lowercased()
                 }
+                audioFiles.append(contentsOf: sheet.trackOrder(for: rootAudioAll))
+            } else {
+                audioFiles.append(contentsOf: rootAudioAll)
             }
         }
-        print("[PlayerViewModel] Album CUE artists: \(albumCueArtists)")
+        cueSheet = rootCue
+        print("[PlayerViewModel] Per-album cue tracks: \(cueTracksByFile.count), album names: \(cueAlbumNames.count)")
 
-        // Also check root CUE
-        let rootCueFiles = contents.filter { $0.pathExtension.lowercased() == "cue" }
-        if let cueURL = rootCueFiles.first, let sheet = CueParser.load(from: cueURL) {
-            cueSheet = sheet
-            for track in sheet.tracks {
-                albumCueArtists[track.fileName] = track.performer.lowercased()
-            }
-        } else {
-            cueSheet = nil
-        }
-
-        // Order tracks using root CUE if available
+        // Ordered files already reflect per-album cue ordering
         var orderedFiles = audioFiles
-        if let sheet = cueSheet {
-            orderedFiles = sheet.trackOrder(for: audioFiles)
+
+        // Artist filter via unified ArtistMatcher (single source).
+        if let filter = artistFilter?.trimmingCharacters(in: .whitespacesAndNewlines), !filter.isEmpty {
+            let needle = ArtistMatcher.normKey(filter)
+            let allTracks = orderedFiles.map { makeTrackAsset(from: $0, playlistFolder: url) }
+            let matched = allTracks.filter { t in
+                ArtistMatcher.matches(trackArtist: t.artist, file: t.url.lastPathComponent, needleKey: needle, displayArtist: t.displayArtist, rawArtist: t.artistName)
+                || {
+                    let fileKey = t.url.lastPathComponent.lowercased()
+                    if let cue = cueTracksByFile[fileKey], !cue.performer.isEmpty {
+                        return ArtistMatcher.splitNames(trackArtist: cue.performer, file: t.url.lastPathComponent).map { ArtistMatcher.normKey($0) }.contains(needle)
+                    }
+                    return false
+                }()
+            }
+            if matched.isEmpty {
+                importError = "No tracks found for artist \(filter)"
+                print("[PlayerViewModel] Artist filter '\(filter)' needle='\(needle)' → 0/\(audioFiles.count) MISS")
+                return
+            }
+            orderedFiles = matched.map { $0.url }
+            print("[PlayerViewModel] Artist filter '\(filter)' needle='\(needle)' → \(orderedFiles.count)/\(audioFiles.count)")
         }
 
-        guard orderedFiles.count >= 2 else {
-            importError = "Need at least 2 audio files"
+        guard orderedFiles.count >= 1 else {
+            importError = "Need at least 1 audio file"
             return
         }
 
         totalTrackCount = orderedFiles.count
         analyzedTrackCount = 0
 
-        let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlist: caPlaylist, playlistFolder: url) }
+        let tracks = orderedFiles.map { makeTrackAsset(from: $0, playlistFolder: url) }
         var startIndex = 0
         if let requestedStartFileName {
             // Match by full filename (with extension) or by base name.
@@ -2111,7 +2306,7 @@ queue.currentIndex = index
             currentIndex: startIndex
         )
 
-        // Play first track immediately while OpenMix analyzes
+        // Play first track immediately
         if !blend {
             do {
                 try loadTrackAndRestore(
@@ -2127,50 +2322,8 @@ queue.currentIndex = index
                 print("[PlayerViewModel] Failed to start playback: \(error)")
             }
         } else {
-            print("[PlayerViewModel] Blend mode: keeping current track, target '\(tracks[startIndex].fileName)' (idx \(startIndex)) when analysis completes")
-            // Blend immediately with the real-time engine — the OpenMix stream
-            // still analyzes in the background and takes over transitions as its
-            // chunks arrive. Do not block the transition on a full-pack analysis.
+            print("[PlayerViewModel] Blend mode: keeping current track, target '\(tracks[startIndex].fileName)' (idx \(startIndex))")
             blendIntoRequested()
-        }
-
-        openMixBridge.onStatus = { [weak self] status in
-            self?.handleOpenMixStatus(status)
-        }
-        openMixBridge.onChunkReady = { [weak self] data in
-            self?.handleOpenMixChunk(data)
-        }
-
-        streamEngine = blend ? nil : StreamAudioEngine()
-        streamEngine?.setVolume(currentVolume)
-
-        // Only send the played album's tracks to Python OpenMix (not entire pack)
-        let fm2 = FileManager.default
-        var albumForOpenMix = audioFiles
-        if let startName = capturedStartFile {
-            let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
-            for sub in subfolders {
-                let subFiles = (try? fm2.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
-                if subFiles.contains(where: { $0.lastPathComponent == startName }) {
-                    albumForOpenMix = subFiles.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-                    break
-                }
-            }
-        }
-
-        // OpenMix requires at least 2 tracks (analyze + mix both reject fewer).
-        // A single-song album needs no crossfade engine — the real-time engine
-        // already plays it. Skipping avoids an error that would otherwise
-        // trigger a full-playlist re-analysis fallback.
-        if albumForOpenMix.count >= 2 {
-            print("[PlayerViewModel] OpenMix analyzing \(albumForOpenMix.count) tracks (of \(audioFiles.count) total)")
-            openMixBridge.start()
-            openMixBridge.analyze(tracks: albumForOpenMix)
-        } else {
-            print("[PlayerViewModel] Single-track album (\(albumForOpenMix.count)) — OpenMix skipped, real-time engine stays")
-            openMixImportURL = nil
-            streamEngine = nil
-            openMixBridge.stop()
         }
 
         // Background: generate .cellax cache files for the played album only
@@ -2261,150 +2414,6 @@ queue.currentIndex = index
 
             print("[PlayerViewModel] Background cache done: \(totalAnalyzed) analyzed")
         }
-    }
-
-    private func handleOpenMixStatus(_ status: OpenMixStatus) {
-        switch status {
-        case .ready:
-            log("OpenMix ready")
-
-        case .analyzingProgress(let current, let total, let file):
-            analyzedTrackCount = current
-            totalTrackCount = total
-            analysisProgress = Double(current) / Double(total)
-            if !blendStreamingDisabled {
-                playerState = .analyzing(progress: analysisProgress)
-            }
-            log("Analyzing \(current)/\(total): \(file)")
-
-        case .mixingProgress(let current, let total, let file):
-            log("Mixing \(current)/\(total): \(file)")
-
-        case .chunkReady(let index, let bytes, let progress):
-            log("Chunk \(index) ready (\(bytes)B, \(Int(progress * 100))%)")
-            if !blendStreamingDisabled, index == 2 {
-                playerState = .playing
-                streamEngine?.startPlayback()
-            }
-
-        case .analysisDone(let tracks):
-            log("Analysis done: \(tracks.count) tracks")
-            applyOpenMixAnalysis(tracks)
-            guard !blendStreamingDisabled else {
-                // Blend-mode imports blended synchronously at import time; a late
-                // analysisDone from a PREVIOUS import must never blend again —
-                // blendPending may already be true for the NEWER import, and this
-                // stale event would replay the old track on the old queue.
-                print("[PlayerViewModel] ANALYSIS-DONE skip (blend mode) — no early blend")
-                if case .analyzing = playerState {
-                    playerState = .playing
-                }
-                return
-            }
-            // Smooth blend into the requested song, if that path was chosen.
-            if blendPending {
-                blendIntoRequested()
-            }
-            // Stream the mix starting at the current position (0 for full normal
-            // playback, requested index for "OpenMix to" / per-track starts).
-            let currentIndex = mixQueue?.currentIndex ?? 0
-            let order = currentIndex < tracks.count
-                ? Array(currentIndex..<tracks.count)
-                : Array(0..<tracks.count)
-            openMixBridge.mix(order: order)
-
-        case .done(let duration):
-            log("Mix done — \(String(format: "%.1f", duration))s")
-            playerState = .playing
-
-        case .error(let message):
-            log("Error: \(message)")
-            openMixBridge.stop()
-            streamEngine?.stop()
-            streamEngine = nil
-
-            if let url = openMixImportURL {
-                // The real-time engine already plays the user's chosen track.
-                // Only fall back to a full re-import when nothing is playing —
-                // otherwise it replays from track 0 over the current selection.
-                // Blend ("OpenMix to") must never full re-import the playlist.
-                openMixImportURL = nil
-                if playerState != .playing && !blendStreamingDisabled {
-                    log("Falling back to real-time engine")
-                    importFolder(url: url)
-                } else {
-                    importError = message
-                }
-            } else {
-                importError = message
-            }
-
-        case .cancelled:
-            log("Cancelled")
-        }
-    }
-
-    private func handleOpenMixChunk(_ data: Data) {
-        streamEngine?.scheduleChunk(data)
-    }
-
-    func cancelOpenMix() {
-        openMixBridge.stop()
-        streamEngine?.stop()
-        streamEngine = nil
-    }
-
-    // MARK: - OpenMix Analysis Sync
-
-    private func applyOpenMixAnalysis(_ tracks: [[String: Any]]) {
-        guard var queue = mixQueue else { return }
-
-        for trackData in tracks {
-            guard let path = trackData["path"] as? String,
-                  let fileName = trackData["file"] as? String else { continue }
-
-            let fileNameNoExt = (fileName as NSString).deletingPathExtension
-
-            guard let index = queue.tracks.firstIndex(where: { $0.url.path == path || $0.fileName == fileNameNoExt }) else { continue }
-
-            let tempo = trackData["tempo"] as? Double ?? 120.0
-            let keyName = trackData["key"] as? String ?? "C"
-            let duration = trackData["duration"] as? Double ?? 0
-            let energyArray = trackData["energy"] as? [Double] ?? []
-            let introEnd = trackData["intro_end"] as? Double ?? 0
-            let outroStart = trackData["outro_start"] as? Double ?? duration
-
-            let energyFloat = energyArray.map { Float($0) }
-
-            let analysis = TrackAnalysis(
-                bpm: tempo,
-                beatTimestamps: [],
-                barTimestamps: [],
-                keySignature: TrackAnalysis.KeySignature(tonic: keyName, mode: "major"),
-                loudnessIntegrated: nil,
-                structureSections: [],
-                energyProfile: energyFloat,
-                hasVocals: false,
-                vocalActivity: [],
-                duration: duration,
-                spectralCentroid: 0,
-                spectralRolloff: 0,
-                spectralBandwidth: 0,
-                spectralFlatness: 0,
-                averageRMS: Float(trackData["energy_avg"] as? Double ?? 0),
-                peakAmplitude: 0,
-                introRegion: introEnd > 0 ? TrackAnalysis.Region(start: 0, end: introEnd) : nil,
-                outroRegion: outroStart < duration ? TrackAnalysis.Region(start: outroStart, end: duration) : nil,
-                vocalOnsetTimestamps: [],
-                vocalOffsetTimestamps: []
-            )
-
-            queue.tracks[index].analysis = analysis
-        }
-
-        mixQueue = queue
-
-        log("Analysis synced to \(queue.tracks.filter { $0.analysis != nil }.count) tracks")
     }
 
 }

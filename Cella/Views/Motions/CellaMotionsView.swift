@@ -627,9 +627,27 @@ struct BoomerangSaveSheet: View {
                     .kerning(1.2)
                     .foregroundStyle(theme.textSecondary.opacity(0.5))
                 if packs.isEmpty {
-                    Text("No .cella albums found in the library")
-                        .font(.system(size: 12, design: .rounded))
-                        .foregroundStyle(theme.textSecondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("No .cella albums found")
+                            .font(.system(size: 12, design: .rounded))
+                            .foregroundStyle(theme.textSecondary)
+                        Button("Choose Library…") {
+                            let panel = NSOpenPanel()
+                            panel.canChooseFiles = false
+                            panel.canChooseDirectories = true
+                            panel.allowsMultipleSelection = false
+                            panel.prompt = "Choose Library"
+                            if panel.runModal() == .OK, let url = panel.url {
+                                UserDefaults.standard.set(url.path, forKey: "clusterLibraryPath")
+                                viewModel.libraryURL = url
+                                packs = viewModel.exportPacks
+                                if let first = packs.first { selectPack(first) }
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(theme.dotActive)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                    }
                 } else {
                     Menu {
                         ForEach(packs) { pack in

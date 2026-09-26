@@ -25,9 +25,40 @@ final class MotionsViewModel: ObservableObject {
     @Published var pendingExportURL: URL?
 
     /// Default .cluster library scanned for album choice at export time.
-    @Published var libraryURL: URL? = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Downloads")
-        .appendingPathComponent("musicLiblary.cluster")
+    /// Checks AppStorage "clusterLibraryPath" first, then known Downloads locations.
+    @Published var libraryURL: URL? = MotionsViewModel.resolveDefaultLibraryURL()
+
+    private static func resolveDefaultLibraryURL() -> URL? {
+        let fm = FileManager.default
+        // 1. User's chosen library from Cluster tab
+        if let stored = UserDefaults.standard.string(forKey: "clusterLibraryPath"), !stored.isEmpty {
+            let url = URL(fileURLWithPath: stored)
+            if fm.fileExists(atPath: url.path) { return url }
+        }
+        // 2. Known locations (new and legacy)
+        let home = fm.homeDirectoryForCurrentUser
+        let candidates = [
+            home.appendingPathComponent("Downloads/Cella Projects/musicLiblary.cluster"),
+            home.appendingPathComponent("Downloads/musicLiblary.cluster"),
+            home.appendingPathComponent("Music/musicLiblary.cluster"),
+        ]
+        for url in candidates where fm.fileExists(atPath: url.path) { return url }
+        // 3. Scan Downloads for any .cluster folder
+        let downloads = home.appendingPathComponent("Downloads")
+        if let contents = try? fm.contentsOfDirectory(at: downloads, includingPropertiesForKeys: nil) {
+            if let found = contents.first(where: { $0.pathExtension.lowercased() == "cluster" && fm.fileExists(atPath: $0.path) }) {
+                return found
+            }
+            // Check one level deep (e.g. Downloads/Cella Projects/*.cluster)
+            for sub in contents where sub.hasDirectoryPath {
+                guard let subContents = try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil) else { continue }
+                if let found = subContents.first(where: { $0.pathExtension.lowercased() == "cluster" && fm.fileExists(atPath: $0.path) }) {
+                    return found
+                }
+            }
+        }
+        return candidates.first
+    }
 
     // MARK: - Playback
 
@@ -396,7 +427,17 @@ final class MotionsViewModel: ObservableObject {
     // MARK: - Export Destination
 
     /// Packs discovered in the default library, for the save sheet.
+    /// Refreshes libraryURL if current one is missing (e.g. moved to Cella Projects).
     var exportPacks: [CellaPack] {
+        if let url = libraryURL, FileManager.default.fileExists(atPath: url.path) {
+            let packs = ClusterLibrary.scan(url).packs
+            if !packs.isEmpty { return packs }
+        }
+        // Re-resolve and update
+        if let resolved = Self.resolveDefaultLibraryURL() {
+            libraryURL = resolved
+            return ClusterLibrary.scan(resolved).packs
+        }
         guard let libraryURL else { return [] }
         return ClusterLibrary.scan(libraryURL).packs
     }
