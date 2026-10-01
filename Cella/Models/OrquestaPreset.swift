@@ -70,7 +70,20 @@ struct OrquestaPreset: Equatable, Sendable {
         accentColor: Color(hex: 0xFF5C8A)
     )
 
-    static let factoryPresets: [OrquestaPreset] = [natural, calido, oceano, aurora]
+    /// Frutiger Aurora: warm lush hall — gentle low warmth, full mids,
+    /// soft rolled top, theater staging. Pairs with the frutiger theme.
+    static let frutigerAurora = OrquestaPreset(
+        id: "frutigerAurora",
+        displayName: "Frutiger Aurora",
+        iconName: "leaf.fill",
+        themeID: "frutiger",
+        eqBands: [(31, 3), (62, 3), (125, 2), (250, 1), (500, 0),
+                  (1000, 0), (2000, 1), (4000, 1), (8000, 0), (16000, -1)],
+        surround: .teatro,
+        accentColor: Color(hex: 0x3ED598)
+    )
+
+    static let factoryPresets: [OrquestaPreset] = [natural, calido, oceano, aurora, frutigerAurora]
 
     // MARK: - Custom preset
 

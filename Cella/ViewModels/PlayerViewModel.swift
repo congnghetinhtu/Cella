@@ -215,6 +215,7 @@ class PlayerViewModel {
             return "Ready"
         case .playing:
             var text = "Playing: \(trackName)"
+            if soloMode { text = "Solo: \(trackName)" }
             if let analysis = track?.analysis {
                 if let bpm = analysis.bpm {
                     text += " • \(Int(bpm)) BPM"
@@ -225,7 +226,7 @@ class PlayerViewModel {
             }
             return text
         case .paused:
-            return "Paused: \(trackName)"
+            return soloMode ? "Solo paused: \(trackName)" : "Paused: \(trackName)"
         case .analyzing(let progress):
             return "Analyzing \(analyzedTrackCount)/\(totalTrackCount) • \(Int(progress * 100))%"
         case .loading:
@@ -359,10 +360,24 @@ class PlayerViewModel {
     }
 
     func insertBreak(at time: TimeInterval) -> Bool {
+        return insertLyricLine(at: time, text: "...")
+    }
+
+    /// Palette command: drops a lyric line at the current time.
+    /// `text` is what the user quoted in `addLy "…"`; empty falls back to the
+    /// placeholder so a bare `addLy` still marks a spot to fill in later.
+    func addLyric(at time: TimeInterval, text: String = "") -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return insertLyricLine(at: time, text: trimmed.isEmpty ? Self.lyricPlaceholder : trimmed)
+    }
+
+    static let lyricPlaceholder = "lyricGoeshere"
+
+    private func insertLyricLine(at time: TimeInterval, text: String) -> Bool {
         guard let trackURL = mixQueue?.currentTrack?.url,
               let lrcURL = resolveOrCreateLrcURL(for: trackURL) else { return false }
         var lines = (try? String(contentsOf: lrcURL))?.components(separatedBy: .newlines) ?? []
-        let newLine = "[\(lrcTimestamp(time))]..."
+        let newLine = "[\(lrcTimestamp(time))]\(text)"
         lines.append(newLine)
         let sorted = sortLrcLines(lines)
         try? sorted.joined(separator: "\n").write(to: lrcURL, atomically: true, encoding: .utf8)
@@ -435,6 +450,8 @@ class PlayerViewModel {
         if queue.tracks.isEmpty {
             mixQueue = nil
             playerState = .idle
+            soloMode = false
+            preSoloTracks = nil
             audioEngine.stop()
             stopAnimationLoop()
             return
@@ -513,6 +530,44 @@ class PlayerViewModel {
             let songs = groups[dir] ?? []
             let name = songs.first?.albumName ?? URL(fileURLWithPath: dir).lastPathComponent
             return AlbumGroup(name: name, dir: dir, songs: songs)
+        }
+    }
+
+    /// Solo Mode (S key in Cella): queue isolated to the current track only.
+    /// At track end playback stops and the queue clears. Second S restores.
+    var soloMode: Bool = false
+    private var preSoloTracks: [TrackAsset]?
+    private var preSoloIndex: Int = 0
+
+    /// Isolate the current track (enter solo) or restore the stashed queue (exit solo).
+    func toggleSolo() {
+        guard playerState == .playing || playerState == .paused else { return }
+        guard var queue = mixQueue, !queue.isEmpty, let current = queue.currentTrack else { return }
+        if !soloMode {
+            preSoloTracks = queue.tracks
+            preSoloIndex = queue.currentIndex
+            queue.tracks = [current]
+            queue.currentIndex = 0
+            mixQueue = queue
+            soloMode = true
+            // Play to the true end — no early crossfade trigger.
+            audioEngine.playThroughToEnd()
+            log("Solo on: \(current.fileName)")
+        } else {
+            if let saved = preSoloTracks, !saved.isEmpty {
+                let url = current.url
+                queue.tracks = saved
+                queue.currentIndex = saved.firstIndex(where: { $0.url == url }) ?? min(preSoloIndex, saved.count - 1)
+                mixQueue = queue
+            }
+            preSoloTracks = nil
+            soloMode = false
+            if playerState == .playing {
+                audioEngine.resumeAutoCrossfade()
+            } else {
+                audioEngine.cancelSoloPlayThrough()
+            }
+            log("Solo off — queue restored")
         }
     }
 
@@ -831,6 +886,53 @@ queue.currentIndex = index
     private var pendingScrollVolume: Float?
     private var lastScrollVolumeTime: CFAbsoluteTime = 0
 
+    // MARK: - LRC Editor Auto Fade
+
+    private var editorFadeGen = 0
+
+    /// Fade the engine out, then pause. currentVolume (user level) untouched.
+    func fadeOutForEditor(duration: TimeInterval = 1.0) {
+        guard playerState == .playing else { return }
+        editorFadeGen += 1
+        let gen = editorFadeGen
+        audioEngine.smoothVolume(to: 0, duration: duration)
+        log("Fading out for LRC editor")
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+            guard let self, gen == self.editorFadeGen, self.playerState == .playing else { return }
+            self.playerState = .paused
+            self.audioEngine.pause()
+            self.stopVideoPlayback()
+            self.stopAnimationLoop()
+            self.syncPlaybackTime()
+            self.updateNowPlayingInfo()
+            self.log("Paused for LRC editor")
+        }
+    }
+
+    /// Abort a pending fade and restore the user volume level.
+    func cancelEditorFade() {
+        editorFadeGen += 1
+        audioEngine.setVolumeImmediate(currentVolume)
+    }
+
+    /// Resume after leaving the editor. Only resumes if still paused —
+    /// a manual resume inside (remote/airpods) is left alone.
+    func resumeFromEditor() {
+        cancelEditorFade()
+        guard playerState == .paused, let queue = mixQueue, !queue.isEmpty else { return }
+        playerState = .playing
+        audioEngine.play()
+        startVideoPlayback()
+        syncPlaybackTime()
+        if pendingMood != nil {
+            applyPendingMood()
+        } else {
+            startAnimationLoop()
+        }
+        updateNowPlayingInfo()
+        log("Resumed from LRC editor")
+    }
+
     func setVolumeForScroll(_ volume: Float) {
         let v = min(1, max(0, volume))
         audioEngine.setVolumeImmediate(v)
@@ -1004,10 +1106,9 @@ queue.currentIndex = index
         // Use first existing cma dir as primary; library mode aggregates across packs below
         let cmaDir = cmaRoots.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? folder.appendingPathComponent("cma")
         guard FileManager.default.fileExists(atPath: cmaDir.path) || folder.pathExtension.lowercased() == "cluster" else {
-            artistImages = []
-            currentArtistImage = nil
-            artistVideoURLs = []
-            stopGifAnimation()
+            // No visuals here — full teardown so the previous pack's
+            // video/image can't keep showing.
+            resetPackVisuals()
             return
         }
 
@@ -1327,6 +1428,21 @@ queue.currentIndex = index
         videoPlayer = nil
     }
 
+    /// Clears every pack-visual state (video, GIF frames, images) so a
+    /// playlist switch never shows the previous pack's CMA.
+    func resetPackVisuals() {
+        destroyVideoPlayback()
+        stopGifAnimation()
+        gifFrames = []
+        gifFrameDurations = []
+        gifFrameIndex = 0
+        artistImages = []
+        currentArtistImage = nil
+        artistImageIndex = 0
+        artistVideoURLs = []
+        artistVideoIndex = 0
+    }
+
     private func boomerangSeek() {
         guard let player = videoPlayer, let item = player.currentItem else { return }
         let duration = item.duration
@@ -1403,6 +1519,8 @@ queue.currentIndex = index
         case .paused:
             guard let queue = mixQueue, !queue.isEmpty else { return }
             playerState = .playing
+            // Self-heal: an editor fade may have left the master down.
+            audioEngine.setVolumeImmediate(currentVolume)
             audioEngine.play()
             startVideoPlayback()
             syncPlaybackTime()
@@ -1438,6 +1556,13 @@ queue.currentIndex = index
     func skipForward() {
         showTemporaryPattern(MatrixPatterns.skipForward)
         cancelPendingMoodTransition()
+
+        // Solo Mode: skipping ends the solo now (stop + clear), never mixes.
+        if soloMode {
+            finishSolo(endReason: "skipped")
+            updateNowPlayingInfo()
+            return
+        }
 
         guard var queue = mixQueue, !queue.isEmpty else { return }
 
@@ -1499,6 +1624,7 @@ queue.currentIndex = index
                 )
                 if playerState == .playing {
                     audioEngine.play()
+                    if soloMode { audioEngine.playThroughToEnd() }
                     stopAnimationLoop()
                     startAnimationLoop()
                 }
@@ -1557,9 +1683,11 @@ queue.currentIndex = index
         analysisProgress = 0
         playlistFolderURL = url
         albumPillSourceName = url.deletingPathExtension().lastPathComponent
-        artistImages = []
-        currentArtistImage = nil
-        loadArtistImages(from: url)
+        soloMode = false
+        preSoloTracks = nil
+        // Fresh switch: tear down old pack visuals now; correct visuals
+        // load with the first track below (loadTrackAndRestore → loadLyrics).
+        resetPackVisuals()
 
         print("[PlayerViewModel] importFolder called: \(url.path)")
 
@@ -1881,8 +2009,28 @@ queue.currentIndex = index
 
     // MARK: - Track End Handling
 
+    /// Shared solo finish: stop playback and clear the queue.
+    private func finishSolo(endReason: String) {
+        log("Solo \(endReason) — clearing queue")
+        soloMode = false
+        preSoloTracks = nil
+        mixQueue = nil
+        playerState = .idle
+        audioEngine.stop()
+        stopAnimationLoop()
+        updateNowPlayingInfo()
+    }
+
     private func handleTrackEnd() {
         cancelPendingMoodTransition()
+
+        // Solo Mode first: nothing may crossfade or blend out of a solo track.
+        if soloMode {
+            let soloName = mixQueue?.currentTrack?.fileName ?? "?"
+            log("Track ended: \(soloName)")
+            finishSolo(endReason: "ended: \(soloName)")
+            return
+        }
 
         // If a blend into an "OpenMix to" target is pending, the old track just
         // ended — crossfade into the requested track now.
@@ -1893,6 +2041,18 @@ queue.currentIndex = index
 
         guard var queue = mixQueue, !queue.isEmpty else {
             print("[PlayerViewModel] handleTrackEnd: no queue or empty")
+            return
+        }
+
+        // Single-song playlist: play once, then stop. (nextTrack wraps to
+        // itself, so without this the song would crossfade into itself forever.)
+        if queue.count <= 1 {
+            let onlyName = queue.currentTrack?.fileName ?? "?"
+            log("Single track ended: \(onlyName) — stopping")
+            playerState = .idle
+            audioEngine.stop()
+            stopAnimationLoop()
+            updateNowPlayingInfo()
             return
         }
 
@@ -2171,9 +2331,16 @@ queue.currentIndex = index
             activeArtistFilter = nil
             activeArtistPackURL = nil
         }
-        artistImages = []
-        currentArtistImage = nil
-        loadArtistImages(from: url)
+        soloMode = false
+        preSoloTracks = nil
+        if blend {
+            loadArtistImages(from: url)
+        } else {
+            // Fresh switch: tear down old pack visuals now so the previous
+            // playlist's video/image can't linger. Correct visuals load with
+            // the first track below (loadTrackAndRestore → loadLyrics).
+            resetPackVisuals()
+        }
 
         importError = nil
         analysisProgress = 0

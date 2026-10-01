@@ -15,8 +15,9 @@ final class EnhancedLRCViewModel: ObservableObject {
     @Published var playbackSpeed: Float = 1.0
     @Published var isRecording = false
     @Published var recordingCursorIndex: Int = 0
+    @Published var loadError: String?
 
-    private var audioPlayer: AVAudioPlayer?
+    private var audioPlayer: AVPlayer?
     private var timer: Timer?
     private var lrcFileURL: URL?
     private var undoStack: [[EditableLrcLine]] = []
@@ -66,15 +67,20 @@ final class EnhancedLRCViewModel: ObservableObject {
 
         currentTrackURL = url
         trackName = url.deletingPathExtension().lastPathComponent
+        loadError = nil
 
-        do {
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.enableRate = true
-            audioPlayer?.rate = playbackSpeed
-            audioPlayer?.prepareToPlay()
-            print("[EnhancedLRC] Audio loaded successfully, duration: \(audioPlayer?.duration ?? 0)")
-        } catch {
-            print("[EnhancedLRC] Failed to load audio: \(error)")
+        // AVPlayer (not AVAudioPlayer): decodes m4a/alac/flac/ogg, keeps rate control.
+        let item = AVPlayerItem(url: url)
+        item.audioTimePitchAlgorithm = .timeDomain
+        let player = AVPlayer(playerItem: item)
+        audioPlayer = player
+        loadError = nil
+        if item.status == .failed, let err = item.error {
+            audioPlayer = nil
+            loadError = "Can't play this file (\(url.pathExtension.uppercased())): \(err.localizedDescription)"
+            print("[EnhancedLRC] Failed to load audio: \(err)")
+        } else {
+            print("[EnhancedLRC] Audio loaded successfully")
         }
 
         loadLrcIfExists(at: url)
@@ -127,24 +133,32 @@ final class EnhancedLRCViewModel: ObservableObject {
             player.pause()
             stopTimer()
         } else {
-            player.play()
+            if playbackSpeed == 1.0 {
+                player.play()
+            } else {
+                player.rate = playbackSpeed
+            }
             startTimer()
         }
         isPlaying.toggle()
     }
 
     func seek(to time: TimeInterval) {
-        audioPlayer?.currentTime = time
+        let cm = CMTime(seconds: max(0, time), preferredTimescale: 600)
+        audioPlayer?.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = time
     }
 
     func setSpeed(_ speed: Float) {
         playbackSpeed = speed
-        audioPlayer?.rate = speed
+        if isPlaying {
+            audioPlayer?.rate = speed
+        }
     }
 
     func stopPlayback() {
-        audioPlayer?.stop()
+        audioPlayer?.pause()
+        audioPlayer?.seek(to: .zero)
         isPlaying = false
         stopTimer()
         currentTime = 0
@@ -165,23 +179,46 @@ final class EnhancedLRCViewModel: ObservableObject {
     }
 
     private func updateTime() {
-        guard let player = audioPlayer, player.isPlaying else {
+        guard let player = audioPlayer else {
             if isPlaying {
                 isPlaying = false
                 stopTimer()
             }
             return
         }
-        currentTime = player.currentTime
+        let t = player.currentTime().seconds
+        if t.isFinite { currentTime = t }
+        // AVPlayer idles at rate 0 on track end — mirror the old did-finish stop.
+        if player.rate == 0, isPlaying {
+            isPlaying = false
+            stopTimer()
+        }
     }
 
     // MARK: - Line Operations
 
     func toggleRecording() {
+        guard currentTrackURL != nil else { return }
         isRecording.toggle()
         if isRecording {
             // Start filling from the first untimed line.
             recordingCursorIndex = lines.firstIndex { $0.time <= 0 } ?? 0
+            // Roll audio so M stamps follow the song.
+            if let player = audioPlayer, player.rate == 0, !isPlaying {
+                let dur = player.currentItem?.duration.seconds ?? 0
+                let pos = player.currentTime().seconds
+                if dur > 0, pos.isFinite, pos >= dur - 0.5 {
+                    player.seek(to: .zero)
+                    currentTime = 0
+                }
+                if playbackSpeed == 1.0 {
+                    player.play()
+                } else {
+                    player.rate = playbackSpeed
+                }
+                startTimer()
+                isPlaying = true
+            }
         }
     }
 
@@ -191,8 +228,8 @@ final class EnhancedLRCViewModel: ObservableObject {
         guard currentTrackURL != nil, isRecording, !lines.isEmpty else { return }
         pushUndo()
         // Read live time straight from the player — timer may lag behind.
-        let liveTime = audioPlayer?.currentTime ?? currentTime
-        currentTime = liveTime
+        let liveTime = audioPlayer?.currentTime().seconds ?? currentTime
+        currentTime = liveTime.isFinite ? liveTime : currentTime
         recordLine(in: &lines, at: &recordingCursorIndex, time: liveTime)
         hasUnsavedChanges = true
         autoSave()
@@ -202,6 +239,61 @@ final class EnhancedLRCViewModel: ObservableObject {
         guard cursor >= 0, cursor < lines.count else { return }
         lines[cursor].time = time
         cursor += 1
+    }
+
+    /// Evenly spreads untimed ([00:00.00]) lines across the track so a paste
+    /// can be preview-played immediately. Timed lines untouched. One undo step.
+    func spreadUntimedLines() {
+        guard let player = audioPlayer else { return }
+        let dur = player.currentItem?.duration.seconds ?? 0
+        guard dur.isFinite, dur > 0 else { return }
+        let idx = lines.indices.filter { lines[$0].time <= 0 }
+        guard !idx.isEmpty else { return }
+        pushUndo()
+        for (k, i) in idx.enumerated() {
+            lines[i].time = dur * Double(k + 1) / Double(idx.count + 1)
+        }
+        hasUnsavedChanges = true
+        autoSave()
+    }
+
+    /// Preview: spread untimed lines, play from top. Re-stamp with M after.
+    func previewFromTop() {
+        guard currentTrackURL != nil, !lines.isEmpty else { return }
+        spreadUntimedLines()
+        seek(to: 0)
+        if !isPlaying {
+            togglePlayback()
+        }
+    }
+
+    /// Appends pasted lyric lines. Lines carrying `[mm:ss.xx]` keep their
+    /// timestamps; plain lines stamp [00:00.00] for later timing; bare tag
+    /// lines (`[ar:…]`) are skipped. One undo step. Time-sorted, ties keep
+    /// paste order.
+    func appendLines(_ texts: [String]) {
+        let fresh = texts
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !fresh.isEmpty else { return }
+        var items: [(time: TimeInterval, text: String)] = []
+        for raw in fresh {
+            let parsed = LrcParser.parse(raw)
+            if let first = parsed.lines.first {
+                items.append((first.time, first.text))
+            } else if parsed.metadata.isEmpty {
+                items.append((0, raw))
+            }
+        }
+        guard !items.isEmpty else { return }
+        pushUndo()
+        lines.append(contentsOf: items.map { EditableLrcLine(time: $0.time, text: $0.text) })
+        // Stable time sort: ties keep existing + paste order.
+        lines = lines.enumerated()
+            .sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }
+            .map { $0.element }
+        hasUnsavedChanges = true
+        autoSave()
     }
 
     func addLine(at index: Int? = nil) {

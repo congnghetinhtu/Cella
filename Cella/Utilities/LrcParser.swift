@@ -53,6 +53,69 @@ struct LrcMetadata {
 }
 
 struct LrcParser {
+    /// Rewrites only the leading `[ti:]` / `[ar:]` / `[al:]` header tags and leaves
+    /// every lyric line byte-identical, so timestamps are never reformatted.
+    /// An empty value drops the tag.
+    static func updatingMetadata(in content: String, title: String, artist: String, album: String) -> String {
+        // Split/join on "\n" only: `components(separatedBy: .newlines)` also splits
+        // on a bare "\r", injecting blank lines into CRLF lyric files on every save.
+        let cr = content.contains("\r\n") ? "\r" : ""
+        let lines = content.components(separatedBy: "\n")
+
+        func clean(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "]", with: ")")
+                .replacingOccurrences(of: "\r", with: " ")
+                .replacingOccurrences(of: "\n", with: " ")
+        }
+        let newTitle = clean(title)
+        let newArtist = clean(artist)
+        let newAlbum = clean(album)
+
+        var out: [String] = []
+        var inHeader = true
+        var keptHeader: [String] = []
+
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if inHeader, isTimestampTag(trimmed) { inHeader = false; out.append(line); continue }
+            if !inHeader { out.append(line); continue }
+            // Still in the header: drop old ti/ar/al, keep every other tag in place.
+            if let key = headerKey(trimmed) {
+                switch key {
+                case "ti", "ar", "al": continue // re-emitted below in canonical order
+                default: keptHeader.append(line)
+                }
+                continue
+            }
+            keptHeader.append(line)
+        }
+
+        // Canonical order, then the untouched tags ([by:], [offset:], …).
+        var header: [String] = []
+        if !newTitle.isEmpty { header.append("[ti:\(newTitle)]\(cr)") }
+        if !newArtist.isEmpty { header.append("[ar:\(newArtist)]\(cr)") }
+        if !newAlbum.isEmpty { header.append("[al:\(newAlbum)]\(cr)") }
+        header += keptHeader
+
+        return (header + out).joined(separator: "\n")
+    }
+
+    /// `[key:value]` → lowercased non-numeric key, else nil.
+    private static func headerKey(_ line: String) -> String? {
+        guard line.hasPrefix("["), line.hasSuffix("]"),
+              let colon = line.firstIndex(of: ":") else { return nil }
+        let key = String(line[line.index(line.startIndex, offsetBy: 1)..<colon])
+        guard !key.isEmpty, Int(key) == nil else { return nil }
+        return key.lowercased()
+    }
+
+    private static func isTimestampTag(_ line: String) -> Bool {
+        guard line.hasPrefix("["), line.hasSuffix("]"),
+              let colon = line.firstIndex(of: ":") else { return false }
+        return Int(line[line.index(line.startIndex, offsetBy: 1)..<colon]) != nil
+    }
+
     static func parse(_ content: String) -> (metadata: LrcMetadata, lines: [LrcLine]) {
         var metadata = LrcMetadata()
         var lines: [LrcLine] = []

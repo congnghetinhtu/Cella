@@ -78,6 +78,9 @@ class MixAudioEngine {
 
     private(set) var isPlaying = false
     private(set) var isCrossfading = false
+    /// Solo play-through: no beat-aligned crossfade trigger — track plays to its
+    /// true end. Set by playThroughToEnd(), cleared by stop/crossfade/resume.
+    private(set) var soloPlayThrough = false
 
     private var crossfadeTimer: Timer?
     private var trackEndTimer: Timer?
@@ -485,6 +488,7 @@ class MixAudioEngine {
         resetEQ(eqB)
         isPlaying = false
         isCrossfading = false
+        soloPlayThrough = false
         currentURL = nil
         currentDuration = 0
         seekOffset = 0
@@ -559,6 +563,12 @@ class MixAudioEngine {
             if isPlaying {
                 currentPlayer.play()
             }
+            if soloPlayThrough {
+                if remainingAtStart > 0 {
+                    scheduleTrackEndTimer(delay: max(0.1, remainingAtStart))
+                }
+                return
+            }
             let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
             beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
                 duration: seekDuration,
@@ -594,6 +604,12 @@ class MixAudioEngine {
             return false
         }
 
+        guard !soloPlayThrough else {
+            print("[Engine] Crossfade refused — solo play-through")
+            return false
+        }
+
+        soloPlayThrough = false
         cancelTrackEndTimer()
         cancelPreCrossfadeEQ()
         tempoRampTimer?.invalidate()
@@ -871,10 +887,73 @@ class MixAudioEngine {
         }
     }
 
+    /// True remaining playback time, pause-aware (elapsed before a pause is kept
+    /// in seekOffset, so wall-clock since resume alone would overestimate).
+    private func trueRemaining() -> TimeInterval {
+        guard remainingAtStart > 0 else { return 0 }
+        let played = max(0, currentTime - seekOffset)
+        return max(0, remainingAtStart - played)
+    }
+
+    /// Solo play-through: fire onTrackEnd at the true track end, no early
+    /// crossfade trigger and no pre-crossfade EQ. Safe to call while paused
+    /// (flag only — play() schedules via restartTrackEndTimer).
+    func playThroughToEnd() {
+        soloPlayThrough = true
+        cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
+        guard isPlaying else { return }
+        scheduleTrackEndTimer(delay: max(0.1, trueRemaining()))
+    }
+
+    /// Clears solo play-through without scheduling (paused exit path).
+    func cancelSoloPlayThrough() {
+        soloPlayThrough = false
+        cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
+    }
+
+    /// Restores normal beat-aligned crossfade scheduling after solo (playing path).
+    /// Delay counts from NOW (true remaining), not from track load — otherwise
+    /// the trigger lands past the true end and the song just stops with no mix.
+    func resumeAutoCrossfade() {
+        soloPlayThrough = false
+        guard isPlaying, currentDuration > 0 else { return }
+        cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
+        let remaining = trueRemaining()
+        guard remaining > 0.15 else {
+            // Song basically over — hand off immediately so it mixes to next.
+            scheduleTrackEndTimer(delay: 0.1)
+            return
+        }
+        let maxFadeDuration = max(config.crossfadeDuration * 1.5, 12.0)
+        beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
+            duration: currentDuration,
+            rate: Double(currentRate),
+            barTimestamps: currentBarTimestamps,
+            crossfadeDuration: maxFadeDuration,
+            outgoingAnalysis: currentTrackAnalysis,
+            incomingAnalysis: nil
+        )
+        var vocalDelay: Double = 0
+        if let vocalEnds = currentTrackAnalysis?.vocalOffsetTimestamps, !vocalEnds.isEmpty {
+            vocalDelay = max(0, vocalEnds.last! - currentTime)
+        }
+        let finalDelay = max(0.1, remaining - beatAlignedCrossfadeTime, vocalDelay)
+        schedulePreCrossfadeEQ(delay: finalDelay - 5.0)
+        scheduleTrackEndTimer(delay: finalDelay)
+    }
+
     private func restartTrackEndTimer() {
-        guard let startTime = trackStartTime, remainingAtStart > 0 else { return }
-        let elapsed = -startTime.timeIntervalSinceNow
-        let remaining = remainingAtStart - elapsed
+        guard trackStartTime != nil, remainingAtStart > 0 else { return }
+        let remaining = trueRemaining()
+        if soloPlayThrough {
+            if remaining > 0 {
+                scheduleTrackEndTimer(delay: max(0.1, remaining))
+            }
+            return
+        }
         if remaining > beatAlignedCrossfadeTime {
             let delay = remaining - beatAlignedCrossfadeTime
             schedulePreCrossfadeEQ(delay: delay - 5.0)

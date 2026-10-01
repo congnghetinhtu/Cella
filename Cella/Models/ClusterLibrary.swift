@@ -193,7 +193,7 @@ struct ClusterLibrary {
                 let cached = countCachedTracks(in: subfolder, audioExtensions: audioExtensions)
                 // Build ordered tracks from cue, include unmatched files at end
                 let orderedFiles = sheet.trackOrder(for: audioFiles)
-                let cueMap = Dictionary(uniqueKeysWithValues: sheet.tracks.map { ($0.fileName.lowercased(), $0) })
+                let cueMap = Dictionary(sheet.tracks.map { ($0.fileName.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
                 let tracks: [CellaTrack] = orderedFiles.map { url in
                     let name = url.lastPathComponent
                     if let c = cueMap[name.lowercased()] {
@@ -259,7 +259,7 @@ struct ClusterLibrary {
             let cached = countCachedTracks(in: packURL, audioExtensions: audioExtensions)
             let tracks: [CellaTrack]
             if let sheet = rootCueSheet {
-                let cueMap = Dictionary(uniqueKeysWithValues: sheet.tracks.map { ($0.fileName.lowercased(), $0) })
+                let cueMap = Dictionary(sheet.tracks.map { ($0.fileName.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
                 tracks = rootAudio.map { url in
                     let name = url.lastPathComponent
                     if let c = cueMap[name.lowercased()] {
@@ -308,7 +308,7 @@ struct ClusterLibrary {
         for album in albums {
             let albumDir: URL = album.folderName.isEmpty ? packURL : packURL.appendingPathComponent(album.folderName)
             let contents = (try? FileManager.default.contentsOfDirectory(at: albumDir, includingPropertiesForKeys: nil)) ?? []
-            let urlByName = Dictionary(uniqueKeysWithValues: contents.map { ($0.lastPathComponent.lowercased(), $0) })
+            let urlByName = Dictionary(contents.map { ($0.lastPathComponent.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
             for track in album.tracks {
                 let names = ArtistMatcher.splitNames(trackArtist: track.artist, file: track.file)
                 let effective = names.isEmpty ? ["Unknown"] : names
@@ -344,7 +344,7 @@ struct ClusterLibrary {
             for album in albums {
                 let albumDir: URL = album.folderName.isEmpty ? pack.url : pack.url.appendingPathComponent(album.folderName)
                 let contents = (try? FileManager.default.contentsOfDirectory(at: albumDir, includingPropertiesForKeys: nil)) ?? []
-                let urlByName = Dictionary(uniqueKeysWithValues: contents.map { ($0.lastPathComponent.lowercased(), $0) })
+                let urlByName = Dictionary(contents.map { ($0.lastPathComponent.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
                 for track in album.tracks {
                     guard let fileURL = urlByName[track.file.lowercased()] else { continue }
                     let names = ArtistMatcher.splitNames(trackArtist: track.artist, file: track.file)

@@ -15,26 +15,31 @@ struct Theme {
 
     var isColorful: Bool { dotActive == Color(hex: 0xFF5C8A) }
     private var isMint: Bool { dotActive == Color(hex: 0x22D3EE) }
+    private var isFrutiger: Bool { dotActive == Color(hex: 0x3ED598) }
 
     /// Halo / glow colors — adapt to theme
     var haloPrimary: Color {
         if isColorful { return Color(hex: 0xFF7EB3) }
         if isMint { return Color(hex: 0x22D3EE) }
+        if isFrutiger { return Color(hex: 0x7DF9FF) }
         return Color(hex: 0x4ADE80)
     }
     var haloSecondary: Color {
         if isColorful { return Color(hex: 0x8B7EFA) }
         if isMint { return Color(hex: 0x5EEAD4) }
+        if isFrutiger { return Color(hex: 0x3ED598) }
         return Color(hex: 0x6EE7B7)
     }
     var haloAccent: Color {
         if isColorful { return Color(hex: 0x56CCF2) }
         if isMint { return Color(hex: 0x06B6D4) }
+        if isFrutiger { return Color(hex: 0x9AE6B4) }
         return Color(hex: 0xFACC15)
     }
     var haloWarm: Color {
         if isColorful { return Color(hex: 0xFF9A5C) }
         if isMint { return Color(hex: 0xF472B6) }
+        if isFrutiger { return Color(hex: 0xF6E05E) }
         return Color(hex: 0xFB923C)
     }
 
@@ -51,6 +56,8 @@ struct Theme {
             return [Color(hex: 0x7DD3FC), Color(hex: 0x38BDF8), Color(hex: 0xBAE6FD), Color(hex: 0xA78BFA), Color(hex: 0x67E8F9)]
         case Color(hex: 0x22D3EE): // ocean — vivid aqua
             return [Color(hex: 0x22D3EE), Color(hex: 0x5EEAD4), Color(hex: 0xF472B6), Color(hex: 0x06B6D4), Color(hex: 0x67E8F9)]
+        case Color(hex: 0x3ED598): // frutiger aurora — vista sweep (green→aqua→sky→sun)
+            return [Color(hex: 0x3ED598), Color(hex: 0x7DF9FF), Color(hex: 0x63B3ED), Color(hex: 0x9AE6B4), Color(hex: 0xF6E05E)]
         default:
             return [dotActive]
         }
@@ -144,6 +151,21 @@ struct Theme {
         tabUnselectedText: Color(hex: 0x4A8A9A),
         textPrimary: Color(hex: 0xE0F0F8),
         textSecondary: Color(hex: 0x7AAABB)
+    )
+
+    /// Frutiger Aurora: Vista water-glass — bright aqua sun over deep blue-teal.
+    static let frutiger = Theme(
+        dotInactive: Color(hex: 0x1E3E4D),
+        dotActive: Color(hex: 0x3ED598),
+        dotInactiveDeep: Color(hex: 0x0C2433),
+        appBackground: Color(hex: 0x06121B),
+        screenBackground: Color(hex: 0x0C2433),
+        tabBarBackground: Color(hex: 0x0C2433),
+        tabSelectedBackground: Color(hex: 0x3ED598, opacity: 0.24),
+        tabSelectedText: Color(hex: 0x3ED598),
+        tabUnselectedText: Color(hex: 0x4E7A8C),
+        textPrimary: Color(hex: 0xE8F6FF),
+        textSecondary: Color(hex: 0x6FA3B8)
     )
 }
 

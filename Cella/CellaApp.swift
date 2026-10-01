@@ -61,6 +61,7 @@ enum SeafoamCursor {
         case "bipolar": return (1.0, 0.361, 0.541)
         case "seafoam": return (0.576, 0.914, 0.745)
         case "mint":    return (0.133, 0.827, 0.933)
+        case "frutiger": return (0.243, 0.839, 0.596)
         default:        return (1.0, 0.502, 0.220)
         }
     }

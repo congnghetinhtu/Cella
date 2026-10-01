@@ -12,6 +12,8 @@ struct ContentView: View {
     @State private var selectedTab: AppTab = .cluster
     @State private var savedVolume: Float = 1.0
     @State private var cellaVolume: Float = 1.0
+    @State private var lrcAutoPaused = false
+    @State private var lrcHasAudio = false
     @State private var viewModel = PlayerViewModel()
     @StateObject private var motionsViewModel = MotionsViewModel()
     @StateObject private var commandInput = CommandInputController()
@@ -47,6 +49,7 @@ struct ContentView: View {
         case "seafoam": return .seafoam
         case "bipolar": return .bipolar
         case "mint": return .mint
+        case "frutiger": return .frutiger
         default: return .dark
         }
     }
@@ -106,14 +109,43 @@ struct ContentView: View {
 
         let commands: [(String, String, String)] = [
             ("insertInit", "insertInit", "Break at 00:00.00"),
-            ("insertBreak", "insertBreak", "Break at current time")
+            ("insertBreak", "insertBreak", "Break at current time"),
+            ("addLy", "addLy", "Add lyric at current time")
         ]
         if !query.isEmpty {
-            out += commands.filter { $0.0.localizedCaseInsensitiveContains(query) }
+            // "addLy " with text after it still shows the command; the quoted
+            // text is the argument, not part of the match.
+            let head = query.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init) ?? query
+            out += commands.filter { $0.0.localizedCaseInsensitiveContains(head) }
                 .map { .command($0.1, $0.2) }
         }
 
         return Array(out.prefix(5))
+    }
+
+    /// Quote pairs that wrap a lyric argument. macOS smart quotes substitute
+    /// “ ” / ‘ ’, so open and close are different characters — matching only
+    /// identical characters left the quotes in the inserted lyric.
+    private static let lyricQuotePairs: [(Character, Character)] = [
+        ("\"", "\""),
+        ("'", "'"),
+        ("\u{201C}", "\u{201D}"), // “ ”
+        ("\u{2018}", "\u{2019}")  // ‘ ’,
+    ]
+
+    /// Matches `addLy "Oh we here in the jungle"`, `addLy 'same'`, or bare `addLy`.
+    /// Returns the lyric text (empty for a bare or empty-quoted call), or nil when
+    /// this isn't an addLy command at all.
+    private func parseLyricCommand(_ input: String) -> String? {
+        let parts = input.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+        guard let head = parts.first, head == "addLy" else { return nil }
+        guard parts.count > 1 else { return "" }
+        var rest = parts[1].trimmingCharacters(in: .whitespaces)
+        if let open = rest.first, let close = rest.last, rest.count >= 2,
+           Self.lyricQuotePairs.contains(where: { $0.0 == open && $0.1 == close }) {
+            rest = String(rest.dropFirst().dropLast())
+        }
+        return rest.trimmingCharacters(in: .whitespaces)
     }
 
     private func moveSuggestionSelection(_ delta: Int) {
@@ -143,6 +175,12 @@ struct ContentView: View {
                 _ = viewModel.insertInit()
             case "insertBreak":
                 _ = viewModel.insertBreak(at: viewModel.currentTime)
+            case "addLy":
+                // Tapping the row must use the quoted text already in the field.
+                _ = viewModel.addLyric(
+                    at: viewModel.currentTime,
+                    text: parseLyricCommand(commandText) ?? ""
+                )
             default:
                 break
             }
@@ -319,7 +357,7 @@ struct ContentView: View {
                         CellaView(viewModel: viewModel)
                             .transition(bloomTransition)
                     case .enhancedLRC:
-                        EnhancedLRCView(pendingAudioURL: $pendingLRCAudioURL)
+                        EnhancedLRCView(pendingAudioURL: $pendingLRCAudioURL, hasAudio: $lrcHasAudio)
                             .transition(bloomTransition)
                     case .config:
                         ConfigView(viewModel: viewModel)
@@ -421,6 +459,13 @@ struct ContentView: View {
                             commandText = ""
                             stopMouseTracking()
                             restoreMainFocus()
+                        } else if let command = parseLyricCommand(trimmed) {
+                            if selectedTab != .cella { selectedTab = .cella }
+                            _ = viewModel.addLyric(at: viewModel.currentTime, text: command)
+                            withAnimation(.snappy) { showCommandPalette = false }
+                            commandText = ""
+                            stopMouseTracking()
+                            restoreMainFocus()
                         } else {
                             let suggestions = commandSuggestions(for: commandText)
                             if !suggestions.isEmpty {
@@ -493,6 +538,15 @@ struct ContentView: View {
             }
             return .handled
         }
+        .onKeyPress(.init("s")) {
+            if showCommandPalette { return .ignored }
+            if isEditingText { return .ignored }
+            if selectedTab != .cella {
+                return .ignored
+            }
+            viewModel.toggleSolo()
+            return .handled
+        }
         .onKeyPress(.upArrow) {
             if showCommandPalette {
                 moveSuggestionSelection(-1)
@@ -549,6 +603,20 @@ struct ContentView: View {
         .onDisappear {
             removePaletteKeyMonitor()
         }
+        .onOpenURL { url in
+            // Finder double-click on packages: .cluster opens library, .cella imports pack.
+            switch url.pathExtension.lowercased() {
+            case "cluster":
+                guard FileManager.default.fileExists(atPath: url.path) else { return }
+                UserDefaults.standard.set(url.path, forKey: "clusterLibraryPath")
+                selectedTab = .cluster
+            case "cella":
+                selectedTab = .cella
+                viewModel.importViaOpenMix(url: url)
+            default:
+                break
+            }
+        }
         .onChange(of: commandText) { _, _ in
             selectedSuggestion = 0
         }
@@ -560,11 +628,24 @@ struct ContentView: View {
         }
         .onChange(of: selectedTab) { _, tab in
             bloomOnNextTabChange = false
-            if tab == .motions {
-                cellaVolume = viewModel.currentVolume
-                viewModel.setVolume(cellaVolume <= 0 ? 0 : 0.1)
+            if tab == .enhancedLRC {
+                // Edit timing in quiet — but only when the editor holds audio.
+                // Empty editor: Cella keeps playing.
+                if lrcHasAudio && viewModel.playerState == .playing {
+                    lrcAutoPaused = true
+                    viewModel.fadeOutForEditor()
+                }
             } else {
-                viewModel.setVolume(cellaVolume)
+                if lrcAutoPaused {
+                    lrcAutoPaused = false
+                    viewModel.resumeFromEditor()
+                }
+                if tab == .motions {
+                    cellaVolume = viewModel.currentVolume
+                    viewModel.setVolume(cellaVolume <= 0 ? 0 : 0.1)
+                } else {
+                    viewModel.setVolume(cellaVolume)
+                }
             }
             viewModel.setHallReverb(tab == .motions)
             if tab != .motions {
@@ -619,7 +700,11 @@ private enum CommandSuggestion: Identifiable {
             let total = Int(time)
             return String(format: "%02d:%02d", total / 60, total % 60)
         case .command(let id, _):
-            return id == "insertInit" ? "At 00:00.00" : "At current time"
+            switch id {
+            case "insertInit": return "At 00:00.00"
+            case "addLy": return "Lyric goes here"
+            default: return "At current time"
+            }
         }
     }
 }
@@ -668,12 +753,34 @@ private struct CommandPaletteBar: View {
             .padding(.vertical, 8)
             .background(
                 Capsule()
-                    .fill(theme.tabBarBackground.opacity(0.95))
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                theme.dotActive.opacity(0.22),
+                                theme.tabBarBackground.opacity(0.55)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
             )
-            .overlay { haloBorder(theme: theme) }
-            .shadow(
-                color: theme.haloPrimary.opacity(0.35),
-                radius: 12, y: 0
+            .background(
+                Capsule().fill(.ultraThinMaterial)
+            )
+            .overlay(
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.34), .white.opacity(0.04)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                Capsule()
+                    .strokeBorder(.white.opacity(0.30), lineWidth: 1.2)
             )
         }
         .overlay(alignment: .topLeading) {
@@ -692,31 +799,6 @@ private struct CommandPaletteBar: View {
             .animation(.smooth(duration: 0.18), value: hasItems)
         }
         .position(x: origin.x + 200, y: origin.y + Self.barTopHeight / 2)
-    }
-
-    private func haloBorder(theme: Theme) -> some View {
-        TimelineView(.animation) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let pulse = 0.5 + 0.5 * sin(t * 2.0)
-            Capsule()
-                .strokeBorder(
-                    AngularGradient(
-                        colors: [
-                            theme.haloPrimary.opacity(0.9),
-                            theme.haloSecondary.opacity(0.9),
-                            theme.haloAccent.opacity(0.9),
-                            theme.haloWarm.opacity(0.9),
-                            theme.haloPrimary.opacity(0.9)
-                        ],
-                        center: .center,
-                        startAngle: .degrees(t * 90),
-                        endAngle: .degrees(t * 90 + 360)
-                    ),
-                    lineWidth: 2
-                )
-                .blur(radius: 1)
-                .brightness(0.15 * pulse)
-        }
     }
 }
 
@@ -747,13 +829,27 @@ private struct CommandSuggestionMenu: View {
         .frame(width: 264, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(theme.tabBarBackground.opacity(0.96))
+                .fill(theme.tabBarBackground.opacity(0.45))
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(theme.textSecondary.opacity(0.25), lineWidth: 1)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.22), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
         )
-        .shadow(color: theme.haloPrimary.opacity(0.25), radius: 16, y: 8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.white.opacity(0.22), lineWidth: 1)
+        )
     }
 }
 
@@ -874,10 +970,13 @@ private struct SmoothCommandInput: View {
         .contentShape(Rectangle())
         .onTapGesture { focus.wrappedValue = true }
         .overlay(alignment: .trailing) {
+            // Real input surface. Kept near-invisible but MUST have a real width:
+            // a 1×1 NSTextField drops keystrokes, which loses characters typed
+            // mid-string (e.g. inside addLy "…").
             TextField("", text: $text)
                 .textFieldStyle(.plain)
                 .opacity(0.01)
-                .frame(width: 1, height: 1)
+                .frame(width: Self.fieldWidth, height: 20)
                 .focused(focus)
                 .onSubmit(onSubmit)
         }
@@ -954,18 +1053,29 @@ private struct SmoothCommandInput: View {
 
     private func syncChars(to newValue: String) {
         let newChars = Array(newValue).map(String.init)
-        if newChars.count == chars.count {
-            for i in newChars.indices where chars[i].ch != newChars[i] {
-                chars[i].ch = newChars[i]
-            }
-        } else if newChars.count > chars.count {
-            for i in chars.count..<newChars.count {
-                chars.append(CharCell(id: nextID, ch: newChars[i]))
+        // The row renders with positional identity (ForEach(chars.indices, id: \.self)),
+        // so `chars` has to mirror `text` exactly. The old fast path appended blindly
+        // whenever the text grew, which put a mid-string insertion at the END of the
+        // row — the character being typed never appeared and the trailing quote just
+        // repeated. Keep the smooth append fast-path, rebuild for anything else.
+        if newChars.count > chars.count, isPrefix(chars.map(\.ch), of: newChars) {
+            for ch in newChars[chars.count...] {
+                chars.append(CharCell(id: nextID, ch: ch))
                 nextID += 1
             }
-        } else {
-            chars.removeLast(chars.count - newChars.count)
+        } else if newChars != chars.map(\.ch) {
+            chars.removeAll(keepingCapacity: true)
+            for ch in newChars {
+                chars.append(CharCell(id: nextID, ch: ch))
+                nextID += 1
+            }
         }
+    }
+
+    private func isPrefix(_ existing: [String], of candidate: [String]) -> Bool {
+        guard existing.count <= candidate.count else { return false }
+        for (a, b) in zip(existing, candidate) where a != b { return false }
+        return true
     }
 }
 

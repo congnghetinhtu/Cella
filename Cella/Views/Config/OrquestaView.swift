@@ -3,10 +3,9 @@ import SwiftUI
 /// Cella Orquesta — half-circle stage in the Config tab.
 ///
 /// The stage doubles as an orchestra: the ten performer seats along the arc
-/// are the ten EQ bands (31 Hz → 16 kHz). Dragging a seat up/down boosts/cuts
-/// that band and builds the custom curve. Each curated preset bundles a theme
-/// (stage lighting), an EQ curve (seats) and a surround staging — one tap is
-/// a full audio mood.
+/// are the ten EQ bands (31 Hz → 16 kHz), shown locked per preset.
+/// Each curated preset bundles a theme (stage lighting), an EQ curve (seats)
+/// and a surround staging — one tap is a full audio mood.
 struct OrquestaView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
@@ -24,10 +23,7 @@ struct OrquestaView: View {
     private let cardRadius: CGFloat = 18
     private let cardPadding: CGFloat = 40
 
-    @State private var draggingSeat: Int?
-    @State private var dragStartGain: Float = 0
     @State private var hoveredSeat: Int?
-    @State private var soloSeat: Int?
     @State private var animPhase: Double = 0
     @State private var burstTimer: Timer?
     @State private var pressedPreset: String?
@@ -46,8 +42,6 @@ struct OrquestaView: View {
     private var cardBorder: some ShapeStyle {
         theme.textSecondary.opacity(0.10)
     }
-
-    private var isSoloActive: Bool { soloSeat != nil }
 
     // MARK: - Body
 
@@ -68,11 +62,11 @@ struct OrquestaView: View {
         }
         .padding(cardPadding)
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .background(theme.screenBackground)
+        .aeroCard(radius: cardRadius, wash: 0.08)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
         .onAppear {
             syncStoredSurround()
@@ -151,11 +145,6 @@ struct OrquestaView: View {
                 .overlay(Capsule().stroke(theme.dotActive.opacity(0.35), lineWidth: 0.5))
             Spacer()
             HStack(spacing: 10) {
-                if isSoloActive {
-                    Text("Solo: \(frequencies[soloSeat ?? 0].shortLabel) Hz")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(theme.haloWarm)
-                }
                 Text(viewModel.currentPreset.displayName)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(theme.dotActive)
@@ -332,10 +321,9 @@ struct OrquestaView: View {
 
     @ViewBuilder
     private func seat(index: Int, angle: Double, position: CGPoint, gain: Float) -> some View {
-        let isLive = draggingSeat == index
-        let isSolo = soloSeat == index
+        // Locked display seat: hover readout only, no drag, no solo.
         let isHover = hoveredSeat == index
-        let size: CGFloat = (isLive || isHover || isSolo) ? 13 : 10
+        let size: CGFloat = isHover ? 13 : 10
         let boosted = gain > 0
 
         Circle()
@@ -353,37 +341,15 @@ struct OrquestaView: View {
             .overlay(
                 Circle()
                     .stroke(
-                        isSolo ? theme.haloWarm : (isLive || isHover ? theme.dotActive : Color.clear),
-                        lineWidth: isSolo ? 2 : 1
+                        isHover ? theme.dotActive : Color.clear,
+                        lineWidth: 1
                     )
             )
             .shadow(
-                color: (isLive || isHover || isSolo ? theme.haloPrimary : theme.dotActive).opacity(0.8 * glowIntensity),
-                radius: isLive ? 10 : 6
+                color: (isHover ? theme.haloPrimary : theme.dotActive).opacity(0.8 * glowIntensity),
+                radius: 6
             )
             .position(position)
-            .animation(.snappy(duration: 0.15), value: draggingSeat)
-            .gesture(
-                DragGesture(minimumDistance: 3)
-                    .onChanged { value in
-                        if draggingSeat != index {
-                            draggingSeat = index
-                            dragStartGain = currentGains[safe: index] ?? 0
-                        }
-                        let dy = value.translation.height
-                        let gainSpan = CGFloat(maxGain - minGain)
-                        let gainPerPixel = gainSpan / (bandLift * 0.62 * 100)
-                        let gain = dragStartGain - Float(dy) * Float(gainPerPixel)
-                        applyCustomGain(index, gain)
-                    }
-                    .onEnded { _ in
-                        draggingSeat = nil
-                    }
-            )
-            .onTapGesture {
-                soloSeat = (soloSeat == index) ? nil : index
-                viewModel.setSoloBand(soloSeat)
-            }
             .onHover { hovering in
                 withAnimation(.snappy(duration: 0.12)) {
                     hoveredSeat = hovering ? index : nil
@@ -493,7 +459,7 @@ struct OrquestaView: View {
     // MARK: - Presets
 
     private var allPresets: [OrquestaPreset] {
-        OrquestaPreset.factoryPresets + [.custom]
+        OrquestaPreset.factoryPresets
     }
 
     private var presetRow: some View {
@@ -522,11 +488,26 @@ struct OrquestaView: View {
             .padding(.vertical, 7)
             .background(
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(isSelected ? preset.accentColor : theme.dotInactive.opacity(0.35))
+                    .fill(isSelected ? preset.accentColor.opacity(0.85) : theme.dotInactive.opacity(0.25))
+            )
+            .background(
+                RoundedRectangle(cornerRadius: 9)
+                    .fill(.ultraThinMaterial.opacity(isSelected ? 0.35 : 0.0))
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 9)
-                    .stroke(isSelected ? preset.accentColor.opacity(0.4) : Color.clear, lineWidth: 1)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(isSelected ? 0.28 : 0.10), .white.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9)
+                    .stroke(isSelected ? .white.opacity(0.35) : .white.opacity(0.10), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -562,7 +543,26 @@ struct OrquestaView: View {
                         .padding(.vertical, 8)
                         .background(
                             RoundedRectangle(cornerRadius: 10)
-                                .fill(isSelected ? theme.dotActive : theme.dotInactive.opacity(0.25))
+                                .fill(isSelected ? theme.dotActive.opacity(0.85) : theme.dotInactive.opacity(0.22))
+                        )
+                        .background(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(.ultraThinMaterial.opacity(isSelected ? 0.35 : 0.0))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [.white.opacity(isSelected ? 0.28 : 0.10), .white.opacity(0.02)],
+                                        startPoint: .top,
+                                        endPoint: .center
+                                    )
+                                )
+                                .allowsHitTesting(false)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(isSelected ? .white.opacity(0.35) : .white.opacity(0.10), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -588,27 +588,12 @@ struct OrquestaView: View {
 
     private func applyPreset(_ preset: OrquestaPreset) {
         withAnimation(.smooth) {
-            soloSeat = nil
             viewModel.setSoloBand(nil)
             presetID = preset.id
             viewModel.selectPreset(preset)
-            if !preset.isCustom {
-                themeOverride = preset.themeID
-                surroundMode = preset.surround.rawValue
-                viewModel.applySurround(preset.surround)
-            }
-        }
-    }
-
-    private func applyCustomGain(_ index: Int, _ gain: Float) {
-        var gains = OrquestaPreset.readCustomGains()
-        guard gains.indices.contains(index) else { return }
-        gains[index] = clampGain(gain)
-        OrquestaPreset.saveCustomGains(gains)
-        if viewModel.currentPreset != .custom {
-            applyPreset(.custom)
-        } else {
-            viewModel.refreshProfileEQ()
+            themeOverride = preset.themeID
+            surroundMode = preset.surround.rawValue
+            viewModel.applySurround(preset.surround)
         }
     }
 

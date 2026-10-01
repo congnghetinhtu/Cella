@@ -258,8 +258,9 @@ struct Crossfader {
 
         var rawDuration: Double
         if energyDiff > 0.15 {
-            // Large energy gap — shorter crossfade, less overlap time for jarring transition
-            rawDuration = baseDuration * 0.65
+            // Large energy gap — shorter crossfade, less overlap time for jarring transition.
+            // Dreamy mode cuts less aggressively.
+            rawDuration = baseDuration * (config.dreamyBlends ? 0.85 : 0.65)
         } else if slopeMatch > 0.8 && energyDiff < 0.08 {
             // Energy levels AND trajectories match — longer crossfade for seamless blend
             rawDuration = baseDuration * 1.25
@@ -278,9 +279,10 @@ struct Crossfader {
             }
         }
 
-        // Quantize to nearest bar boundary (minimum 2 bars)
+        // Quantize to nearest bar boundary (minimum 2 bars).
+        // Dreamy blends stretch one extra bar, staying quantized.
         let bars = max(2.0, round(rawDuration / barInterval))
-        return bars * barInterval
+        return bars * barInterval + (config.dreamyBlends ? barInterval : 0)
     }
 
     /// Energy slope: positive = rising, negative = falling.

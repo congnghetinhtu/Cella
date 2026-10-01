@@ -18,6 +18,14 @@ struct AudioConfig {
     /// Default crossfade duration in seconds.
     var crossfadeDuration: Double = 8.0
 
+    /// Order the queue as an energy arc (warm-up climb, peak, cool-down)
+    /// instead of pure compatibility chaining.
+    var energyArcOrdering: Bool = true
+
+    /// Longer, softer crossfades (dreamy blends): +1 bar per blend,
+    /// gentler cuts on energy gaps.
+    var dreamyBlends: Bool = true
+
     /// Maximum allowed BPM adjustment as a percentage (0.0–1.0).
     var maxBpmAdjustment: Double = 0.15
 

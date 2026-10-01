@@ -270,6 +270,12 @@ struct ClusterView: View {
     @State private var packToRename: CellaPack?
     @State private var renameText = ""
     @State private var packToDelete: CellaPack?
+    @State private var showCueLab = false
+    @State private var pendingDropURLs: [URL] = []
+    @State private var showPlaylistChooser = false
+    @State private var pendingDrop: PendingDrop?
+    @State private var dropNotice: String?
+    @State private var dropNoticeGen = 0
     @State private var libraryArtists: [LibraryArtist] = []
     @State private var artistThumbs: [String: NSImage] = [:]
     @State private var loadingArtistKey: String?
@@ -301,6 +307,10 @@ struct ClusterView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
+            // Repair stale persisted path (e.g. library moved) before trusting it.
+            if !libraryPath.isEmpty, !FileManager.default.fileExists(atPath: libraryPath) {
+                libraryPath = ""
+            }
             if library == nil, !libraryPath.isEmpty, FileManager.default.fileExists(atPath: libraryPath) {
                 withAnimation(.snappy) {
                     library = ClusterLibrary.scan(URL(fileURLWithPath: libraryPath))
@@ -315,6 +325,17 @@ struct ClusterView: View {
             reloadLibraryArtists()
         }
         .onChange(of: library?.url) { _, _ in reloadLibraryArtists() }
+        .onChange(of: libraryPath) { _, path in
+            // External library switch (Finder double-click on .cluster package).
+            guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else { return }
+            if library?.url.path != path { rescan() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clusterLibraryDidRescan)) { note in
+            // Pack detail moved files around — refresh counts (no re-notify, no loop).
+            if let url = note.object as? URL, url == library?.url {
+                rescan(notify: false)
+            }
+        }
     }
 
     // MARK: - Library
@@ -379,6 +400,13 @@ struct ClusterView: View {
                         .padding(.bottom, 40)
                     }
                 }
+                // Drop on gaps/empty area → choose playlist. Drops on cards add directly.
+                .onDrop(of: [.fileURL], isTargeted: .constant(false), perform: { providers in
+                    loadDroppedFileURLs(providers) { urls in
+                        routeDroppedSongs(urls)
+                    }
+                    return true
+                })
             } else {
                 artistsTimeline(lib)
             }
@@ -400,6 +428,28 @@ struct ClusterView: View {
         } message: {
             Text("Move \(packToDelete?.name ?? "") to Trash? Cannot undo.")
         }
+        .sheet(isPresented: $showCueLab) {
+            if let lib = library {
+                CueLabView(libraryURL: lib.url, packs: lib.packs) {
+                    rescan()
+                }
+                .environment(\.theme, theme)
+            }
+        }
+        .modifier(ClusterDropOverlays(
+            pendingDropURLs: $pendingDropURLs,
+            showPlaylistChooser: $showPlaylistChooser,
+            dropNotice: $dropNotice,
+            pendingDrop: $pendingDrop,
+            packs: library?.packs ?? [],
+            theme: theme,
+            onChoosePack: { pack in
+                let urls = pendingDropURLs
+                pendingDropURLs = []
+                stageDrop(urls, into: pack)
+            },
+            onCommitDrop: { pack, rows in commitDrop(pack: pack, rows: rows) }
+        ))
     }
 
     private var statsBar: some View {
@@ -445,8 +495,20 @@ struct ClusterView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: 10).fill(theme.screenBackground))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 10).fill(theme.screenBackground.opacity(0.55)))
+            .background(RoundedRectangle(cornerRadius: 10).fill(.ultraThinMaterial))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.14), .white.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.14), lineWidth: 1))
             .frame(maxWidth: 280)
 
             if clusterMode == .playlists {
@@ -477,19 +539,99 @@ struct ClusterView: View {
             Spacer()
 
             Button {
-                newPackName = ""
-                showNewPack = true
+                showCueLab = true
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "plus").font(.system(size: 12, weight: .semibold))
-                    Text("New").font(.system(size: 12, weight: .semibold, design: .rounded))
+                    Image(systemName: "list.bullet.rectangle.fill").font(.system(size: 12, weight: .semibold))
+                    Text("CueLab").font(.system(size: 12, weight: .semibold, design: .rounded))
                 }
                 .foregroundStyle(theme.tabSelectedText)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(RoundedRectangle(cornerRadius: 10).fill(theme.tabSelectedBackground))
+                .background(RoundedRectangle(cornerRadius: 10).fill(.ultraThinMaterial.opacity(0.4)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(
+                            LinearGradient(
+                                colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                        .allowsHitTesting(false)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(.white.opacity(0.16), lineWidth: 1)
+                )
             }
             .buttonStyle(.plain)
+            .help("Create a .cue sheet")
+
+            HStack(spacing: 8) {
+                Button {
+                    newPackName = ""
+                    showNewPack = true
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder.badge.plus").font(.system(size: 11, weight: .semibold))
+                        Text("Playlist").font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(theme.tabSelectedText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(theme.tabSelectedBackground))
+                    .background(RoundedRectangle(cornerRadius: 10).fill(.ultraThinMaterial.opacity(0.4)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(.white.opacity(0.16), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Create a new playlist")
+                Button {
+                    pickSongs()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "music.note.list").font(.system(size: 11, weight: .semibold))
+                        Text("Songs").font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundStyle(theme.tabSelectedText)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(theme.tabSelectedBackground))
+                    .background(RoundedRectangle(cornerRadius: 10).fill(.ultraThinMaterial.opacity(0.4)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(.white.opacity(0.16), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .help("Add songs to a playlist")
+            }
 
             Button { rescan() } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 12))
@@ -557,9 +699,24 @@ struct ClusterView: View {
         return VStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 22)
-                    .fill(theme.screenBackground)
+                    .fill(theme.screenBackground.opacity(0.55))
                     .frame(width: 150, height: 150)
-                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(theme.textSecondary.opacity(0.15), lineWidth: 1))
+                    .background(
+                        RoundedRectangle(cornerRadius: 22)
+                            .fill(.ultraThinMaterial)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 22)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.22), .white.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.25), radius: 10)
                 // Stacked preview 2x2 (top 4 artists)
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
@@ -630,9 +787,21 @@ struct ClusterView: View {
             .frame(width: 560, height: 420)
         }
         .frame(width: 560)
-        .background(theme.screenBackground)
+        .background(theme.screenBackground.opacity(0.6))
+        .background(RoundedRectangle(cornerRadius: 20).fill(.ultraThinMaterial))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.18), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(theme.textSecondary.opacity(0.2), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.18), lineWidth: 1))
         .shadow(color: .black.opacity(0.5), radius: 30)
     }
 
@@ -771,7 +940,8 @@ struct ClusterView: View {
             index: index,
             reduceMotion: reduceMotion,
             onPlay: { playPack(pack) },
-            onTap: { onOpenDetail?(pack) }
+            onTap: { onOpenDetail?(pack) },
+            onDropFiles: { urls in stageDrop(urls, into: pack) }
         )
         .animation(.snappy, value: loadingPackURL)
         .contextMenu {
@@ -879,9 +1049,11 @@ struct ClusterView: View {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
+        // .cluster is a package — present as a selectable file, not a traversable folder.
+        panel.treatsFilePackagesAsDirectories = false
         panel.allowsMultipleSelection = false
         panel.prompt = "Choose Library"
-        panel.message = "Select a .cluster library folder"
+        panel.message = "Select a Cella Music Library (.cluster)"
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads")
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -897,15 +1069,20 @@ struct ClusterView: View {
         lib.url.deletingPathExtension().lastPathComponent
     }
 
-    private func rescan() {
+    private func rescan(notify: Bool = true) {
         guard !libraryPath.isEmpty else { return }
         let url = URL(fileURLWithPath: libraryPath)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
         withAnimation(.snappy) {
             var lib = ClusterLibrary.scan(url)
             lib.refreshCacheCounts()
             library = lib
         }
         reloadLibraryArtists()
+        if notify {
+            // Open pack detail caches albums by pack URL — tell it to reload.
+            NotificationCenter.default.post(name: .clusterLibraryDidRescan, object: url)
+        }
     }
 
     private func createPack(named name: String) {
@@ -948,6 +1125,180 @@ struct ClusterView: View {
 
     private func revealPack(_ pack: CellaPack) {
         NSWorkspace.shared.activateFileViewerSelecting([pack.url])
+    }
+
+    // MARK: - Add Song picker (New → Add Song…)
+
+    /// File picker for audio files/folders, routed like a background drop.
+    private func pickSongs() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add Songs"
+        panel.message = "Choose audio files or album folders to add"
+        panel.allowedContentTypes = Self.dropAudioExtensions.compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK else { return }
+        routeDroppedSongs(panel.urls)
+    }
+
+    /// Shared routing for picked/dropped songs: single pack → sheet,
+    /// no packs → nag, many packs → playlist chooser.
+    private func routeDroppedSongs(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        if (library?.packs.count ?? 0) <= 1, let only = library?.packs.first {
+            stageDrop(urls, into: only)
+        } else if library?.packs.isEmpty == true {
+            flashDropNotice("Create a playlist first")
+        } else {
+            pendingDropURLs = urls
+            showPlaylistChooser = true
+        }
+    }
+
+    // MARK: - Drop songs into playlist
+
+    private static let dropAudioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
+
+    /// Stages dropped audio files (or album folders, shallow) for the info sheet.
+    private func stageDrop(_ urls: [URL], into pack: CellaPack) {
+        let fm = FileManager.default
+        var sources: [URL] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                let kids = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+                sources.append(contentsOf: kids.filter { Self.dropAudioExtensions.contains($0.pathExtension.lowercased()) })
+            } else if Self.dropAudioExtensions.contains(url.pathExtension.lowercased()) {
+                sources.append(url)
+            }
+        }
+        guard !sources.isEmpty else {
+            flashDropNotice("No audio files in drop")
+            return
+        }
+        pendingDropURLs = []
+        showPlaylistChooser = false
+        pendingDrop = PendingDrop(pack: pack, files: sources)
+    }
+
+    /// Commits the info sheet: routes each song to its album folder
+    /// (existing match or newly created — structured style), copies audio,
+    /// imports/writes .lrc, then rescans.
+    private func commitDrop(pack: CellaPack, rows: [SongRow]) {
+        var added = 0
+        for row in rows {
+            let destDir = albumDir(for: row.album, in: pack)
+            guard let dest = copyAudioIntoPack(row.source, into: destDir) else { continue }
+            if let lrcSrc = row.lrcSource {
+                importChosenLrc(lrcSrc, for: dest)
+            } else {
+                writeLrc(for: dest, row: row)
+            }
+            added += 1
+        }
+        pendingDrop = nil
+        rescan()
+        flashDropNotice(added > 0 ? "Added \(added) song\(added == 1 ? "" : "s") to \(pack.name)" : "Nothing added to \(pack.name)")
+    }
+
+    /// Resolves the album folder for a staged song: matches an existing album
+    /// (folder name or .cue title, case-insensitive), creates one when the
+    /// album is new, or falls back to the pack root when blank.
+    private func albumDir(for album: String, in pack: CellaPack) -> URL {
+        let fm = FileManager.default
+        let key = album.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !key.isEmpty else { return pack.url }
+        let skipDirs = Set(["lrc", "cma"])
+        let subfolders = ((try? fm.contentsOfDirectory(at: pack.url, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.hasDirectoryPath && !skipDirs.contains($0.lastPathComponent.lowercased()) }
+        for folder in subfolders {
+            if folder.lastPathComponent.lowercased() == key { return folder }
+            let contents = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            if let cueURL = contents.first(where: { $0.pathExtension.lowercased() == "cue" }),
+               let sheet = CueParser.load(from: cueURL),
+               sheet.title.lowercased() == key {
+                return folder
+            }
+        }
+        // New album — create the folder so the pack gains structure.
+        let safe = album.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        let dir = pack.url.appendingPathComponent(safe)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Copies a user-chosen .lrc next to the added song (`<dir>/lrc/<song>.lrc`).
+    /// Explicit choice wins over any existing file.
+    private func importChosenLrc(_ src: URL, for audioURL: URL) {
+        let fm = FileManager.default
+        let scoped = src.startAccessingSecurityScopedResource()
+        defer { if scoped { src.stopAccessingSecurityScopedResource() } }
+        let lrcDir = audioURL.deletingLastPathComponent().appendingPathComponent("lrc")
+        try? fm.createDirectory(at: lrcDir, withIntermediateDirectories: true)
+        let base = audioURL.deletingPathExtension().lastPathComponent
+        let dest = lrcDir.appendingPathComponent(base + ".lrc")
+        try? fm.removeItem(at: dest)
+        do {
+            try fm.copyItem(at: src, to: dest)
+        } catch {
+            print("[Cluster] lrc import failed: \(src.lastPathComponent) — \(error.localizedDescription)")
+        }
+    }
+
+    /// Collision-safe copy of one audio file into a destination dir. Returns the dest URL.
+    private func copyAudioIntoPack(_ src: URL, into destDir: URL) -> URL? {
+        let fm = FileManager.default
+        var dest = destDir.appendingPathComponent(src.lastPathComponent)
+        if fm.fileExists(atPath: dest.path) {
+            let base = src.deletingPathExtension().lastPathComponent
+            let ext = src.pathExtension
+            var n = 2
+            while fm.fileExists(atPath: dest.path), n <= 100 {
+                dest = destDir.appendingPathComponent("\(base) \(n).\(ext)")
+                n += 1
+            }
+            guard !fm.fileExists(atPath: dest.path) else { return nil }
+        }
+        do {
+            try fm.copyItem(at: src, to: dest)
+            return dest
+        } catch {
+            print("[Cluster] drop copy failed: \(src.lastPathComponent) — \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// Writes `[ti/ar/al/length]` tags next to the added song (`<dir>/lrc/`).
+    private func writeLrc(for audioURL: URL, row: SongRow) {
+        var meta = LrcMetadata()
+        meta.title = row.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        meta.artist = row.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        meta.album = row.album.trimmingCharacters(in: .whitespacesAndNewlines)
+        meta.length = row.length.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !meta.isEmpty else { return }
+        let fm = FileManager.default
+        let lrcDir = audioURL.deletingLastPathComponent().appendingPathComponent("lrc")
+        try? fm.createDirectory(at: lrcDir, withIntermediateDirectories: true)
+        let base = audioURL.deletingPathExtension().lastPathComponent
+        let content = meta.toLrcString() + "\n"
+        try? content.write(to: lrcDir.appendingPathComponent(base + ".lrc"), atomically: true, encoding: .utf8)
+    }
+
+    private func flashDropNotice(_ text: String) {
+        dropNoticeGen += 1
+        let gen = dropNoticeGen
+        withAnimation(.snappy) { dropNotice = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            if gen == dropNoticeGen {
+                withAnimation(.smooth(duration: 0.3)) { dropNotice = nil }
+            }
+        }
     }
 
     private func autoLoadDefault() -> Bool {
@@ -993,6 +1344,7 @@ private struct PackCardView: View {
     let reduceMotion: Bool
     var onPlay: () -> Void
     var onTap: () -> Void
+    var onDropFiles: ([URL]) -> Void = { _ in }
 
     @Environment(\.theme) private var theme
     @State private var isHovering = false
@@ -1000,6 +1352,7 @@ private struct PackCardView: View {
     @State private var hasAppeared = false
     @State private var loadedImages: [URL: NSImage] = [:]
     @State private var topArtists: [PackArtist] = []
+    @State private var dropTargeted = false
 
     private let entranceDelay: Double = Double.random(in: 0...0.12)
     private let joySpring: Animation = .spring(response: 0.35, dampingFraction: 0.65)
@@ -1097,14 +1450,14 @@ private struct PackCardView: View {
             }
         }
         .padding(16)
-        .background(theme.screenBackground)
+        .aeroCard(radius: cardRadius, wash: 0.08)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
                 .stroke(
                     isHovering
-                        ? theme.dotActive.opacity(0.3)
-                        : theme.textSecondary.opacity(CardStyle.borderOpacity),
+                        ? theme.dotActive.opacity(0.45)
+                        : .white.opacity(0.14),
                     lineWidth: isHovering ? 1.5 : 1
                 )
         )
@@ -1117,8 +1470,19 @@ private struct PackCardView: View {
         .animation(reduceMotion ? .none : joySpring, value: isHovering)
         .animation(reduceMotion ? .none : popSpring, value: isPressed)
         .contentShape(RoundedRectangle(cornerRadius: cardRadius))
+        .overlay(
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(theme.dotActive, lineWidth: dropTargeted ? 2.5 : 0)
+                .shadow(color: theme.dotActive.opacity(dropTargeted ? 0.6 : 0), radius: 10)
+        )
         .onTapGesture {
             onTap()
+        }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            loadDroppedFileURLs(providers) { urls in
+                if !urls.isEmpty { onDropFiles(urls) }
+            }
+            return true
         }
         .onHover { hovering in
             withAnimation(reduceMotion ? .none : joySpring) {
@@ -1218,6 +1582,26 @@ private struct PackCardView: View {
             RoundedRectangle(cornerRadius: 6)
                 .fill(accent.opacity(0.14))
         )
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.ultraThinMaterial.opacity(0.4))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        )
     }
 }
 
@@ -1243,9 +1627,24 @@ private struct ChangeLibraryButton: View {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(isHovering ? theme.tabSelectedBackground.opacity(1.2) : theme.tabSelectedBackground)
             )
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(.ultraThinMaterial.opacity(0.4))
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(isHovering ? theme.textSecondary.opacity(0.2) : Color.clear, lineWidth: 1)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isHovering ? theme.textSecondary.opacity(0.25) : .white.opacity(0.16), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -1273,8 +1672,28 @@ private struct PlayActionButton: View {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 12)
-                    .fill(theme.dotActive)
+                    .fill(theme.dotActive.opacity(0.9))
             )
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.ultraThinMaterial.opacity(0.35))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.32), .white.opacity(0.03)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.white.opacity(0.32), lineWidth: 1)
+            )
+            .shadow(color: theme.dotActive.opacity(0.35), radius: 8)
             .scaleEffect(isPressed ? 0.95 : (isHovering ? 1.03 : 1.0))
         }
         .buttonStyle(.plain)
@@ -1304,6 +1723,13 @@ struct PackDetailView: View {
     @State private var albums: [CellaAlbum] = []
     @State private var expandedAlbum: CellaAlbum.ID?
     @State private var loadedCovers: [URL: NSImage] = [:]
+    @State private var siblingPacks: [(name: String, url: URL)] = []
+    @State private var moveRequest: MoveRequest?
+    @State private var deleteRequest: MoveRequest?
+    @State private var albumEditRequest: AlbumEditRequest?
+    @State private var songEditRequest: SongEditRequest?
+    @State private var moveNotice: String?
+    @State private var moveNoticeGen = 0
 
     private let cardRadius: CGFloat = CardStyle.radius
 
@@ -1317,6 +1743,22 @@ struct PackDetailView: View {
                     .controlSize(.large)
                     .tint(theme.dotActive)
                 Spacer()
+            } else if pack.type == .openCella {
+                // OpenCella: flat song list, no album cards.
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach(Array(flatTracks.enumerated()), id: \.element.track.id) { n, entry in
+                            trackRow(index: n, track: entry.track, album: entry.album, subtitle: flatShowsAlbum ? entry.album.folderName : nil)
+                            if n < flatTracks.count - 1 {
+                                Divider()
+                                    .overlay(theme.textSecondary.opacity(0.1))
+                                    .padding(.leading, 64)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 26)
+                    .padding(.bottom, 26)
+                }
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {
@@ -1330,21 +1772,114 @@ struct PackDetailView: View {
             }
         }
         .frame(width: 860, height: 620)
-        .background(theme.appBackground.ignoresSafeArea())
+        .background(theme.appBackground.opacity(0.72).ignoresSafeArea())
+        .background(.ultraThinMaterial)
+        .aeroGloss(radius: CardStyle.radius, opacity: 0.10)
         .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
         .contentShape(RoundedRectangle(cornerRadius: CardStyle.radius))
         .overlay(
             RoundedRectangle(cornerRadius: CardStyle.radius)
-                .stroke(theme.textSecondary.opacity(CardStyle.borderOpacity), lineWidth: 1)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
         .task(id: pack.url) {
             guard !pack.url.path.isEmpty else { return }
-            albums = []
-            expandedAlbum = nil
-            loadedCovers = [:]
-            albums = ClusterLibrary.albums(in: pack.url)
-            loadAlbumCovers()
+            reloadAlbums()
+            refreshSiblings()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clusterLibraryDidRescan)) { note in
+            // Same pack rescanned (e.g. CueLab added an album) → reload live.
+            if let url = note.object as? URL, url == pack.url.deletingLastPathComponent() || url == pack.url {
+                reloadAlbums(keepExpanded: true)
+                refreshSiblings()
+            } else if note.object == nil {
+                reloadAlbums(keepExpanded: true)
+                refreshSiblings()
+            }
+        }
+        .confirmationDialog(
+            "Move “\(moveRequest?.track.title ?? moveRequest?.track.file ?? "")” to playlist",
+            isPresented: Binding(get: { moveRequest != nil }, set: { if !$0 { moveRequest = nil } }),
+            titleVisibility: .visible
+        ) {
+            ForEach(siblingPacks, id: \.url) { sib in
+                Button(sib.name) {
+                    if let req = moveRequest {
+                        moveRequest = nil
+                        moveTrackToPlaylist(req.track, in: req.album, destPackURL: sib.url, destName: sib.name)
+                    }
+                }
+            }
+            Button("Cancel", role: .cancel) { moveRequest = nil }
+        }
+        .confirmationDialog(
+            "Remove “\(deleteRequest?.track.title ?? deleteRequest?.track.file ?? "")” from \(pack.name)?",
+            isPresented: Binding(get: { deleteRequest != nil }, set: { if !$0 { deleteRequest = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Move Audio + Lyrics to Trash", role: .destructive) {
+                if let req = deleteRequest {
+                    deleteRequest = nil
+                    deleteTrack(req.track, in: req.album)
+                }
+            }
+            Button("Cancel", role: .cancel) { deleteRequest = nil }
+        }
+        .sheet(item: $albumEditRequest) { request in
+            EditAlbumSheet(
+                pack: pack,
+                album: request.album,
+                hasCue: request.hasCue,
+                isPackRoot: request.isPackRoot,
+                theme: theme,
+                onCancel: { albumEditRequest = nil },
+                // Returns nil on success (caller dismisses), or a message to keep the sheet open.
+                onSave: { draft in saveAlbumEdit(request, draft: draft) }
+            )
+        }
+        .sheet(item: $songEditRequest) { request in
+            EditSongSheet(
+                track: request.track,
+                album: request.album,
+                hasCue: albumDir(for: request.album).flatMap(cueURLIn) != nil,
+                theme: theme,
+                onCancel: { songEditRequest = nil },
+                onSave: { draft in saveSongEdit(request, draft: draft) }
+            )
+        }
+        .overlay(alignment: .bottom) {
+            if let notice = moveNotice {
+                Text(notice)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(theme.tabBarBackground.opacity(0.9)))
+                    .background(Capsule().fill(.ultraThinMaterial))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+                    .padding(.bottom, 16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: moveNotice)
+    }
+
+    private func reloadAlbums(keepExpanded: Bool = false) {
+        guard !pack.url.path.isEmpty else { return }
+        albums = []
+        if !keepExpanded { expandedAlbum = nil }
+        loadedCovers = [:]
+        albums = ClusterLibrary.albums(in: pack.url)
+        loadAlbumCovers()
+    }
+
+    /// All tracks flattened for OpenCella packs (playlist order, no album split).
+    private var flatTracks: [(album: CellaAlbum, track: CellaTrack)] {
+        albums.flatMap { album in album.tracks.map { (album: album, track: $0) } }
+    }
+
+    /// Show the album folder as subtitle only when the pack actually spans albums.
+    private var flatShowsAlbum: Bool {
+        albums.filter { !$0.tracks.isEmpty }.count > 1
     }
 
     private var detailHeader: some View {
@@ -1381,7 +1916,7 @@ struct PackDetailView: View {
                                     ? theme.dotActive
                                     : theme.textSecondary).opacity(0.14))
                         )
-                    Text("\(pack.albumCount) albums · \(pack.trackCount) tracks")
+                    Text("\(albums.count) albums · \(albums.reduce(0) { $0 + $1.trackCount }) tracks")
                         .font(.system(size: 12))
                         .foregroundStyle(theme.textSecondary)
                 }
@@ -1402,7 +1937,9 @@ struct PackDetailView: View {
     }
 
     private func albumCard(_ album: CellaAlbum) -> some View {
-        let isExpanded = expandedAlbum == album.id
+        // OpenCella flat playlists: no dropdown, songs always visible A-Z.
+        let flat = pack.type == .openCella
+        let isExpanded = flat || expandedAlbum == album.id
         return VStack(spacing: 0) {
             HStack(spacing: 14) {
                 HStack(spacing: 12) {
@@ -1441,26 +1978,38 @@ struct PackDetailView: View {
 
                     Spacer(minLength: 0)
 
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 15, weight: .bold))
-                        .foregroundStyle(isExpanded ? theme.dotActive : theme.textSecondary)
-                        .frame(width: 34, height: 34)
-                        .background(
-                            Circle()
-                                .fill(isExpanded
-                                    ? theme.tabSelectedBackground
-                                    : theme.textSecondary.opacity(0.1))
-                        )
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                        .scaleEffect(isExpanded ? 1.1 : 1.0)
-                        .animation(.spring(response: 0.35, dampingFraction: 0.65), value: isExpanded)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.snappy) {
-                        expandedAlbum = isExpanded ? nil : album.id
+                    if !flat {
+                        Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(isExpanded ? theme.dotActive : theme.textSecondary)
+                            .frame(width: 34, height: 34)
+                            .background(
+                                Circle()
+                                    .fill(isExpanded
+                                        ? theme.tabSelectedBackground
+                                        : theme.textSecondary.opacity(0.1))
+                            )
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .scaleEffect(isExpanded ? 1.1 : 1.0)
+                            .animation(.spring(response: 0.35, dampingFraction: 0.65), value: isExpanded)
                     }
                 }
+                .overlay(
+                    RightClickCatcher(
+                        onLeftClick: {
+                            guard !flat else { return }
+                            withAnimation(.snappy) {
+                                expandedAlbum = isExpanded ? nil : album.id
+                            }
+                        },
+                        onRightClick: { windowPoint, window in
+                            presentAlbumMenu(at: windowPoint, window: window, album: album)
+                        },
+                        onHoverChange: { hovering in
+                            hoveredAlbumID = hovering ? album.id : nil
+                        }
+                    )
+                )
 
                 Button {
                     onPlay(album.tracks.first?.file)
@@ -1476,7 +2025,26 @@ struct PackDetailView: View {
                     .padding(.vertical, 6)
                     .background(
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(theme.dotActive)
+                            .fill(theme.dotActive.opacity(0.9))
+                    )
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(.ultraThinMaterial.opacity(0.35))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.32), .white.opacity(0.03)],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(.white.opacity(0.32), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
@@ -1501,16 +2069,54 @@ struct PackDetailView: View {
                 ))
             }
         }
-        .background(theme.screenBackground)
+        .background(theme.screenBackground.opacity(0.55))
+        .background(RoundedRectangle(cornerRadius: cardRadius).fill(.ultraThinMaterial))
+        .aeroGloss(radius: cardRadius, opacity: 0.12)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(isExpanded ? theme.tabSelectedBackground : theme.textSecondary.opacity(0.12), lineWidth: isExpanded ? 1.5 : 1)
+                .stroke(isExpanded ? theme.tabSelectedBackground : .white.opacity(0.13), lineWidth: isExpanded ? 1.5 : 1)
         )
+        .shadow(
+            color: hoveredAlbumID == album.id ? theme.dotActive.opacity(0.2) : .clear,
+            radius: 10
+        )
+        .scaleEffect(hoveredAlbumID == album.id ? 1.01 : 1.0)
         .animation(.spring(response: 0.35, dampingFraction: 0.65), value: isExpanded)
+        .animation(.snappy, value: hoveredAlbumID == album.id)
+        .onHover { _ in }
     }
 
-    private func trackRow(index: Int, track: CellaTrack, album: CellaAlbum) -> some View {
+    private func presentAlbumMenu(at windowPoint: NSPoint, window: NSWindow?, album: CellaAlbum) {
+        guard let window else { return }
+        let screenPoint = window.convertToScreen(
+            NSRect(origin: windowPoint, size: .zero)
+        ).origin
+        CellaContextMenu.show(at: screenPoint, theme: theme, actions: [
+            CellaMenuAction(title: "Play Album", systemImage: "play.fill") {
+                onPlay(album.tracks.first?.file)
+            },
+            CellaMenuAction(title: "AutoMix Album", systemImage: "arrow.triangle.merge") {
+                onAutoMix(album.tracks.first?.file, album)
+            },
+            CellaMenuAction(title: "Edit Album…", systemImage: "pencil") {
+                albumEditRequest = AlbumEditRequest(
+                    album: album,
+                    hasCue: albumDir(for: album).flatMap(cueURLIn) != nil,
+                    isPackRoot: album.folderName.isEmpty
+                )
+            }
+        ])
+    }
+
+    private struct AlbumEditRequest: Identifiable {
+        let id = UUID()
+        let album: CellaAlbum
+        let hasCue: Bool
+        let isPackRoot: Bool
+    }
+
+    private func trackRow(index: Int, track: CellaTrack, album: CellaAlbum, subtitle: String? = nil) -> some View {
         HStack(spacing: 12) {
             Text(String(format: "%02d", index + 1))
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
@@ -1524,8 +2130,16 @@ struct PackDetailView: View {
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                if let artist = track.artist {
-                    Text(artist)
+                let sub: String = {
+                    switch (track.artist, subtitle) {
+                    case let (a?, s?) where !s.isEmpty: return "\(a) · \(s)"
+                    case let (a?, _): return a
+                    case let (nil, s?) where !s.isEmpty: return s
+                    default: return ""
+                    }
+                }()
+                if !sub.isEmpty {
+                    Text(sub)
                         .font(.system(size: 11))
                         .foregroundStyle(theme.textSecondary)
                         .lineLimit(1)
@@ -1571,7 +2185,7 @@ struct PackDetailView: View {
             NSRect(origin: windowPoint, size: .zero)
         ).origin
 
-        CellaContextMenu.show(at: screenPoint, theme: theme, actions: [
+        var actions = [
             CellaMenuAction(title: "AutoMix to", systemImage: "arrow.triangle.merge") {
                 autoMixTo(track, in: album)
             },
@@ -1579,14 +2193,439 @@ struct PackDetailView: View {
                 if let audioURL = audioURL(for: track, in: album) {
                     onOpenLRC?(audioURL)
                 }
+            },
+            CellaMenuAction(title: "Edit Song…", systemImage: "pencil") {
+                songEditRequest = SongEditRequest(track: track, album: album)
             }
-        ])
+        ]
+        if !siblingPacks.isEmpty {
+            actions.append(CellaMenuAction(title: "Move to Playlist…", systemImage: "folder.arrow.right") {
+                moveRequest = MoveRequest(track: track, album: album)
+            })
+        }
+        actions.append(CellaMenuAction(title: "Remove from Playlist…", systemImage: "trash", isDestructive: true) {
+            deleteRequest = MoveRequest(track: track, album: album)
+        })
+        CellaContextMenu.show(at: screenPoint, theme: theme, actions: actions)
+    }
+
+    private struct MoveRequest: Identifiable {
+        let id = UUID()
+        let track: CellaTrack
+        let album: CellaAlbum
+    }
+
+    private struct SongEditRequest: Identifiable {
+        let id = UUID()
+        let track: CellaTrack
+        let album: CellaAlbum
+    }
+
+    /// Other .cella packs in the same library, sorted by name.
+    private func refreshSiblings() {
+        guard !pack.url.path.isEmpty else { siblingPacks = []; return }
+        let parent = pack.url.deletingLastPathComponent()
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
+        siblingPacks = dirs
+            .filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() == "cella" && $0 != pack.url }
+            .map { (name: $0.deletingPathExtension().lastPathComponent, url: $0) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    /// Moves one track (audio + sibling .lrc + .cellax cache) into another
+    /// playlist, merging into the same album folder when present.
+    private func moveTrackToPlaylist(_ track: CellaTrack, in album: CellaAlbum, destPackURL: URL, destName: String) {
+        let fm = FileManager.default
+        guard let srcAudio = audioURL(for: track, in: album) else {
+            flashMoveNotice("File not found")
+            return
+        }
+        if viewModel?.mixQueue?.currentTrack?.url == srcAudio {
+            flashMoveNotice("Playing now — move after it ends")
+            return
+        }
+        // Destination album dir: merge into same-name folder, else create it
+        // when the source lived in one, else the pack root.
+        let srcAlbumName = album.folderName
+        let destAlbumDir: URL?
+        if srcAlbumName.isEmpty {
+            destAlbumDir = nil
+        } else if let match = ((try? fm.contentsOfDirectory(at: destPackURL, includingPropertiesForKeys: nil)) ?? [])
+            .first(where: { $0.hasDirectoryPath && $0.lastPathComponent.lowercased() == srcAlbumName.lowercased() }) {
+            destAlbumDir = match
+        } else {
+            let created = destPackURL.appendingPathComponent(srcAlbumName)
+            try? fm.createDirectory(at: created, withIntermediateDirectories: true)
+            destAlbumDir = created
+        }
+        let destDir = destAlbumDir ?? destPackURL
+        guard let destAudio = uniqueDest(in: destDir, for: track.file) else {
+            flashMoveNotice("Name clash in \(destName)")
+            return
+        }
+        do {
+            try fm.moveItem(at: srcAudio, to: destAudio)
+        } catch {
+            flashMoveNotice("Move failed: \(error.localizedDescription)")
+            return
+        }
+        // Sibling .lrc/.elrc: mirror each slot that exists at the source.
+        let base = srcAudio.deletingPathExtension().lastPathComponent
+        let srcDir = srcAudio.deletingLastPathComponent()
+        let srcSlots: [(from: URL, toDir: URL)] = [
+            (srcDir.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"), (destAlbumDir ?? destPackURL).appendingPathComponent("lrc")),
+            (srcDir.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"), (destAlbumDir ?? destPackURL).appendingPathComponent("lrc")),
+            (pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"), destPackURL.appendingPathComponent("lrc")),
+            (pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"), destPackURL.appendingPathComponent("lrc")),
+            (srcDir.appendingPathComponent(base + ".lrc"), destDir),
+            (srcDir.appendingPathComponent(base + ".elrc"), destDir)
+        ]
+        for slot in srcSlots where fm.fileExists(atPath: slot.from.path) {
+            try? fm.createDirectory(at: slot.toDir, withIntermediateDirectories: true)
+            let dest = slot.toDir.appendingPathComponent(destAudio.deletingPathExtension().lastPathComponent + "." + slot.from.pathExtension)
+            if !fm.fileExists(atPath: dest.path) {
+                try? fm.moveItem(at: slot.from, to: dest)
+            }
+        }
+        // .cellax analysis cache follows the audio.
+        let srcCache = AnalysisCache.cacheURL(for: srcAudio)
+        if fm.fileExists(atPath: srcCache.path) {
+            let destCache = AnalysisCache.cacheURL(for: destAudio)
+            try? fm.createDirectory(at: destCache.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fm.fileExists(atPath: destCache.path) {
+                try? fm.moveItem(at: srcCache, to: destCache)
+            }
+        }
+        reloadAlbums(keepExpanded: true)
+        refreshSiblings()
+        NotificationCenter.default.post(name: .clusterLibraryDidRescan, object: pack.url.deletingLastPathComponent())
+        flashMoveNotice("Moved to \(destName)")
+    }
+
+    /// Trashes a track's audio + sibling .lrc/.elrc + .cellax cache, then refreshes.
+    private func deleteTrack(_ track: CellaTrack, in album: CellaAlbum) {
+        let fm = FileManager.default
+        guard let srcAudio = audioURL(for: track, in: album) else {
+            flashMoveNotice("File not found")
+            return
+        }
+        if viewModel?.mixQueue?.currentTrack?.url == srcAudio {
+            flashMoveNotice("Playing now — delete after it ends")
+            return
+        }
+        let base = srcAudio.deletingPathExtension().lastPathComponent
+        let srcDir = srcAudio.deletingLastPathComponent()
+        var candidates = [
+            srcAudio,
+            srcDir.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"),
+            srcDir.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"),
+            pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"),
+            pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"),
+            srcDir.appendingPathComponent(base + ".lrc"),
+            srcDir.appendingPathComponent(base + ".elrc"),
+            AnalysisCache.cacheURL(for: srcAudio)
+        ]
+        // De-dupe (root-level tracks repeat the same-dir slot).
+        var seen = Set<String>()
+        candidates = candidates.filter { seen.insert($0.path).inserted }
+        var trashed = 0
+        for url in candidates where fm.fileExists(atPath: url.path) {
+            do {
+                try fm.trashItem(at: url, resultingItemURL: nil)
+                if url == srcAudio { trashed += 1 }
+            } catch {
+                print("[Cluster] trash failed: \(url.lastPathComponent) — \(error.localizedDescription)")
+            }
+        }
+        guard trashed > 0 else {
+            flashMoveNotice("Nothing removed")
+            return
+        }
+        reloadAlbums(keepExpanded: true)
+        refreshSiblings()
+        NotificationCenter.default.post(name: .clusterLibraryDidRescan, object: pack.url.deletingLastPathComponent())
+        flashMoveNotice("Removed \(track.title ?? track.file)")
+    }
+
+    /// Collision-free destination for a filename inside a dir. Nil when exhausted.
+    private func uniqueDest(in dir: URL, for fileName: String) -> URL? {
+        let fm = FileManager.default
+        var dest = dir.appendingPathComponent(fileName)
+        if fm.fileExists(atPath: dest.path) {
+            let url = URL(fileURLWithPath: fileName)
+            let base = url.deletingPathExtension().lastPathComponent
+            let ext = url.pathExtension
+            var n = 2
+            while fm.fileExists(atPath: dest.path), n <= 100 {
+                dest = dir.appendingPathComponent(ext.isEmpty ? "\(base) \(n)" : "\(base) \(n).\(ext)")
+                n += 1
+            }
+            guard !fm.fileExists(atPath: dest.path) else { return nil }
+        }
+        return dest
+    }
+
+    private func flashMoveNotice(_ text: String) {
+        moveNoticeGen += 1
+        let gen = moveNoticeGen
+        withAnimation(.snappy) { moveNotice = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            if gen == moveNoticeGen {
+                withAnimation(.smooth(duration: 0.3)) { moveNotice = nil }
+            }
+        }
     }
 
     private func audioURL(for track: CellaTrack, in album: CellaAlbum) -> URL? {
         let audioURL = pack.url.appendingPathComponent(album.folderName)
             .appendingPathComponent(track.file)
         return FileManager.default.fileExists(atPath: audioURL.path) ? audioURL : nil
+    }
+
+    // MARK: - Edit album (title / artist / cover)
+
+    /// Pack root for album-dir style URLs (empty folderName) — nil when pack.url is empty.
+    private func albumDir(for album: CellaAlbum) -> URL? {
+        guard !pack.url.path.isEmpty else { return nil }
+        return album.folderName.isEmpty ? pack.url : pack.url.appendingPathComponent(album.folderName)
+    }
+
+    private func cueURLIn(_ dir: URL) -> URL? {
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: nil
+        )) ?? []
+        return contents.first { $0.pathExtension.lowercased() == "cue" }
+    }
+
+    /// Cover basenames ClusterLibrary.findCover recognizes. A new image must land
+    /// on one of these or the scanner won't see it.
+    private static let coverNames = ["cover", "folder", "artwork", "front", "album"]
+    private static let coverExtensions: Set<String> = ["jpg", "jpeg", "png", "heic", "webp"]
+
+    /// Prefers the extension of the cover already in place so replacing art
+    /// doesn't orphan the old file.
+    private func coverDest(in dir: URL, replacing existing: URL?) -> URL {
+        let ext: String
+        if let existing,
+           Self.coverExtensions.contains(existing.pathExtension.lowercased()) {
+            ext = existing.pathExtension.lowercased()
+        } else {
+            ext = "jpg"
+        }
+        return dir.appendingPathComponent("cover.\(ext)")
+    }
+
+    private func applyCover(_ chosen: URL?, to album: CellaAlbum, removing: Bool) -> String? {
+        let fm = FileManager.default
+        guard let dir = albumDir(for: album) else { return "Pack unavailable" }
+        let existing = album.coverURL
+
+        if removing {
+            if let existing, fm.fileExists(atPath: existing.path) {
+                do { try fm.trashItem(at: existing, resultingItemURL: nil) }
+                catch { return "Could not remove cover: \(error.localizedDescription)" }
+            }
+            return nil
+        }
+
+        guard let chosen else { return nil }
+        let dest = coverDest(in: dir, replacing: existing)
+        if fm.fileExists(atPath: dest.path) {
+            do { try fm.trashItem(at: dest, resultingItemURL: nil) }
+            catch { return "Could not replace cover: \(error.localizedDescription)" }
+        }
+        do {
+            try fm.copyItem(at: chosen, to: dest)
+        } catch {
+            return "Could not copy cover: \(error.localizedDescription)"
+        }
+        return nil
+    }
+
+    /// Persists the sheet. Returns nil on success (dismisses), or a message on failure.
+    private func saveAlbumEdit(_ request: AlbumEditRequest, draft: AlbumEditDraft) -> String? {
+        let fm = FileManager.default
+        let album = request.album
+        guard let dir = albumDir(for: album) else { return "Pack unavailable" }
+
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = draft.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if title.isEmpty { return "Album title cannot be empty" }
+
+        if request.hasCue {
+            // Structured album: rewrite album-level TITLE/PERFORMER, tracks untouched.
+            guard let cueURL = cueURLIn(dir),
+                  let content = try? String(contentsOf: cueURL, encoding: .utf8) else {
+                return "Could not read cue file"
+            }
+            let updated = CueParser.updatingMetadata(in: content, title: title, performer: artist)
+            do {
+                try updated.write(to: cueURL, atomically: true, encoding: .utf8)
+            } catch {
+                return "Could not write cue file: \(error.localizedDescription)"
+            }
+        } else if !request.isPackRoot {
+            // No cue: display name IS the folder name, so rename it.
+            let dest = pack.url.appendingPathComponent(title)
+            if dest.standardizedFileURL != dir.standardizedFileURL {
+                if fm.fileExists(atPath: dest.path) { return "An album named “\(title)” already exists" }
+                do {
+                    try fm.moveItem(at: dir, to: dest)
+                } catch {
+                    return "Could not rename album folder: \(error.localizedDescription)"
+                }
+            }
+        }
+
+        if let coverError = applyCover(draft.cover, to: album, removing: draft.removeCover) {
+            return coverError
+        }
+
+        albumEditRequest = nil
+        reloadAlbums(keepExpanded: true)
+        NotificationCenter.default.post(
+            name: .clusterLibraryDidRescan,
+            object: pack.url.deletingLastPathComponent()
+        )
+        flashMoveNotice("Album updated")
+        return nil
+    }
+
+    // MARK: - Edit song (title / artist / album / filename)
+
+    /// Where this track's lyrics already live, or nil. Mirrors the candidate
+    /// order the player and LRC editor both search.
+    private func existingLrcURL(for audioURL: URL) -> URL? {
+        let fm = FileManager.default
+        let albumDir = audioURL.deletingLastPathComponent()
+        let base = audioURL.deletingPathExtension().lastPathComponent
+        let candidates = [
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"),
+            albumDir.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"),
+            pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".lrc"),
+            pack.url.appendingPathComponent("lrc").appendingPathComponent(base + ".elrc"),
+            albumDir.appendingPathComponent(base + ".lrc"),
+            albumDir.appendingPathComponent(base + ".elrc")
+        ]
+        return candidates.first { fm.fileExists(atPath: $0.path) }
+    }
+
+    /// Filenames are single path components — flatten anything that would create
+    /// a directory or an illegal name.
+    private func sanitizedFileName(_ input: String) -> String {
+        input
+            .components(separatedBy: CharacterSet.controlCharacters)
+            .joined()
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Returns nil on success (dismisses), or a message on failure.
+    private func saveSongEdit(_ request: SongEditRequest, draft: SongEditDraft) -> String? {
+        let fm = FileManager.default
+        let track = request.track
+        let album = request.album
+        guard let srcAudio = audioURL(for: track, in: album) else { return "File not found" }
+
+        let ext = srcAudio.pathExtension
+        let srcDir = srcAudio.deletingLastPathComponent()
+        let oldBase = srcAudio.deletingPathExtension().lastPathComponent
+
+        // The real audio extension always wins — renaming must not change format.
+        var typed = sanitizedFileName(draft.fileName)
+        guard !typed.isEmpty else { return "Filename cannot be empty" }
+        if (typed as NSString).pathExtension.lowercased() != ext.lowercased() {
+            typed = (typed as NSString).deletingPathExtension + "." + ext
+        }
+        let newBase = (typed as NSString).deletingPathExtension
+        guard !newBase.isEmpty, newBase != ".", newBase != ".." else { return "Invalid filename" }
+
+        let renamed = newBase != oldBase
+        let destAudio = srcDir.appendingPathComponent(typed)
+        let isPlaying = viewModel?.mixQueue?.currentTrack?.url == srcAudio
+        if renamed, fm.fileExists(atPath: destAudio.path) {
+            return "A file named “\(typed)” already exists"
+        }
+        if renamed, isPlaying {
+            return "Playing now — rename it after this song ends"
+        }
+
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = draft.artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let albumName = draft.album.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Inside a structured album the cue is authoritative for title/artist.
+        if let dir = albumDir(for: album),
+           let cueURL = cueURLIn(dir),
+           let content = try? String(contentsOf: cueURL, encoding: .utf8) {
+            let updated = CueParser.updatingTrack(
+                in: content,
+                fileName: track.file,
+                newFileName: renamed ? typed : nil,
+                title: title,
+                performer: artist
+            )
+            do { try updated.write(to: cueURL, atomically: true, encoding: .utf8) }
+            catch { return "Could not write cue: \(error.localizedDescription)" }
+        }
+
+        // 2. Lyrics carry [ti:]/[ar:]/[al:] for the rest. Timestamped lines untouched.
+        if let lrcURL = existingLrcURL(for: srcAudio) {
+            let content = (try? String(contentsOf: lrcURL, encoding: .utf8)) ?? ""
+            let updated = LrcParser.updatingMetadata(
+                in: content, title: title, artist: artist, album: albumName
+            )
+            do { try updated.write(to: lrcURL, atomically: true, encoding: .utf8) }
+            catch { return "Could not write lyrics: \(error.localizedDescription)" }
+        } else if !title.isEmpty || !artist.isEmpty || !albumName.isEmpty {
+            // No lyrics file yet — create a header-only one to hold the metadata.
+            let lrcDir = srcDir.appendingPathComponent("lrc")
+            var meta = LrcMetadata()
+            meta.title = title
+            meta.artist = artist
+            meta.album = albumName
+            do {
+                if !fm.fileExists(atPath: lrcDir.path) {
+                    try fm.createDirectory(at: lrcDir, withIntermediateDirectories: true)
+                }
+                try meta.toLrcString().write(
+                    to: lrcDir.appendingPathComponent(oldBase + ".lrc"),
+                    atomically: true, encoding: .utf8
+                )
+            } catch {
+                return "Could not create lyrics file: \(error.localizedDescription)"
+            }
+        }
+
+        // 3. Rename the audio file; lyrics and analysis cache follow the base name.
+        if renamed {
+            do { try fm.moveItem(at: srcAudio, to: destAudio) }
+            catch { return "Could not rename file: \(error.localizedDescription)" }
+
+            if let oldLrc = existingLrcURL(for: srcAudio) {
+                let newLrc = oldLrc.deletingLastPathComponent()
+                    .appendingPathComponent(newBase + oldLrc.pathExtension)
+                if !fm.fileExists(atPath: newLrc.path) {
+                    try? fm.moveItem(at: oldLrc, to: newLrc)
+                }
+            }
+            let oldCache = AnalysisCache.cacheURL(for: srcAudio)
+            let newCache = AnalysisCache.cacheURL(for: destAudio)
+            if fm.fileExists(atPath: oldCache.path), !fm.fileExists(atPath: newCache.path) {
+                try? fm.moveItem(at: oldCache, to: newCache)
+            }
+        }
+
+        songEditRequest = nil
+        reloadAlbums(keepExpanded: true)
+        NotificationCenter.default.post(
+            name: .clusterLibraryDidRescan,
+            object: pack.url.deletingLastPathComponent()
+        )
+        flashMoveNotice(renamed ? "Song updated and renamed" : "Song updated")
+        return nil
     }
 
     private func autoMixTo(_ track: CellaTrack, in album: CellaAlbum) {
@@ -1606,6 +2645,7 @@ struct PackDetailView: View {
 
     @State private var hoveredTrackIndex: Int?
     @State private var hoveredTrackAlbumID: CellaAlbum.ID?
+    @State private var hoveredAlbumID: CellaAlbum.ID?
 
     @ViewBuilder
     private func albumCover(_ album: CellaAlbum) -> some View {
@@ -1725,9 +2765,11 @@ private struct ClusterModeSwitch: View {
             modeButton(.artists, icon: "person.2.fill")
         }
         .padding(4)
-        .background(theme.tabBarBackground)
+        .background(theme.tabBarBackground.opacity(0.55))
+        .background(Capsule().fill(.ultraThinMaterial))
+        .aeroGloss(radius: 999, opacity: 0.20)
         .clipShape(Capsule())
-        .overlay(Capsule().stroke(theme.textSecondary.opacity(0.15), lineWidth: 1))
+        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1))
     }
 
     private func modeButton(_ m: ClusterMode, icon: String) -> some View {
@@ -1750,6 +2792,21 @@ private struct ClusterModeSwitch: View {
                         Capsule()
                             .fill(theme.tabSelectedBackground)
                             .matchedGeometryEffect(id: "clusterMode", in: anim)
+                            .overlay(
+                                Capsule()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.white.opacity(0.30), .white.opacity(0.03)],
+                                            startPoint: .top,
+                                            endPoint: .center
+                                        )
+                                    )
+                                    .allowsHitTesting(false)
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1)
+                            )
+                            .shadow(color: theme.tabSelectedText.opacity(0.45), radius: 8)
                     }
                 }
             )
@@ -1758,6 +2815,10 @@ private struct ClusterModeSwitch: View {
         .buttonStyle(.plain)
         .help("Show \(m.rawValue.lowercased())")
     }
+}
+
+extension Notification.Name {
+    static let clusterLibraryDidRescan = Notification.Name("clusterLibraryDidRescan")
 }
 
 // MARK: - Artist Snapshot (cma video frame; AI hook later)
@@ -1806,4 +2867,651 @@ enum ArtistSnapshot {
 #Preview {
     ClusterView()
         .frame(width: 1000, height: 700)
+}
+
+// MARK: - Drop staging types
+
+private struct PendingDrop: Identifiable {
+    let id = UUID()
+    let pack: CellaPack
+    let files: [URL]
+}
+
+private struct SongRow: Identifiable {
+    let id = UUID()
+    let source: URL
+    var fileName: String
+    var title = ""
+    var artist = ""
+    var album = ""
+    var length = ""
+    var lrcSource: URL?
+    var loaded = false
+}
+
+// MARK: - Drop overlays (chooser + info sheet + notice)
+
+private struct ClusterDropOverlays: ViewModifier {
+    @Binding var pendingDropURLs: [URL]
+    @Binding var showPlaylistChooser: Bool
+    @Binding var dropNotice: String?
+    @Binding var pendingDrop: PendingDrop?
+    var packs: [CellaPack]
+    var theme: Theme
+    var onChoosePack: (CellaPack) -> Void
+    var onCommitDrop: (CellaPack, [SongRow]) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .confirmationDialog(
+                "Add \(pendingDropURLs.count) song\(pendingDropURLs.count == 1 ? "" : "s") to playlist",
+                isPresented: $showPlaylistChooser,
+                titleVisibility: .visible
+            ) {
+                ForEach(packs) { pack in
+                    Button(pack.name) { onChoosePack(pack) }
+                }
+                Button("Cancel", role: .cancel) { pendingDropURLs = [] }
+            }
+            .sheet(item: $pendingDrop) { drop in
+                AddSongsSheet(
+                    pack: drop.pack,
+                    files: drop.files,
+                    theme: theme,
+                    onCancel: { pendingDrop = nil },
+                    onCommit: { rows in onCommitDrop(drop.pack, rows) }
+                )
+            }
+            .overlay(alignment: .bottom) {
+                if let notice = dropNotice {
+                    Text(notice)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(theme.tabBarBackground.opacity(0.9)))
+                        .background(Capsule().fill(.ultraThinMaterial))
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+                        .shadow(color: theme.dotActive.opacity(0.3), radius: 8)
+                        .padding(.bottom, 18)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.snappy, value: dropNotice)
+    }
+}
+
+// MARK: - Add-songs info sheet (ar / ti / album / length, metadata-autofilled)
+
+private struct AlbumEditDraft {
+    var title: String
+    var artist: String
+    var cover: URL?
+    var removeCover: Bool
+}
+
+private struct EditAlbumSheet: View {
+    let pack: CellaPack
+    let album: CellaAlbum
+    let hasCue: Bool
+    let isPackRoot: Bool
+    let theme: Theme
+    var onCancel: () -> Void
+    /// Returns nil on success, or a message to keep the sheet open.
+    var onSave: (AlbumEditDraft) -> String?
+
+    @State private var title: String = ""
+    @State private var artist: String = ""
+    @State private var cover: URL?
+    @State private var removeCover = false
+    @State private var error: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            fields
+            coverRow
+            if let error {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
+            footer
+        }
+        .padding(20)
+        .frame(width: 460)
+        .background(theme.appBackground.opacity(0.6))
+        .background(.ultraThinMaterial)
+        .aeroGloss(radius: CardStyle.radius, opacity: 0.12)
+        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .overlay(RoundedRectangle(cornerRadius: CardStyle.radius).stroke(.white.opacity(0.14), lineWidth: 1))
+        .task {
+            if title.isEmpty {
+                title = album.name
+                artist = album.artist ?? ""
+            }
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Edit Album")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.textPrimary)
+            Text("\(album.trackCount) track\(album.trackCount == 1 ? "" : "s") · saves to \(pack.name)")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textSecondary)
+        }
+    }
+
+    private var fields: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            field("Title", text: $title, enabled: titleEditable, hint: titleEditable ? nil : "Playlist root")
+            field("Artist", text: $artist, enabled: hasCue, hint: hasCue ? nil : "Needs a cue file")
+            if isPackRoot && !hasCue {
+                Text("No cue file here, so the playlist name comes from its folder — rename it from the playlist card.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textSecondary.opacity(0.75))
+            } else if !hasCue {
+                Text("No cue file, so the title renames the album folder.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textSecondary.opacity(0.75))
+            }
+        }
+    }
+
+    /// A cue can rename the pack root; without one the name is the folder itself.
+    private var titleEditable: Bool { hasCue || !isPackRoot }
+
+    private func field(_ label: String, text: Binding<String>, enabled: Bool = true, hint: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(label.uppercased())
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                if let hint {
+                    Text(hint)
+                        .font(.system(size: 9))
+                        .foregroundStyle(theme.textSecondary.opacity(0.7))
+                }
+            }
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+                .disabled(!enabled)
+        }
+    }
+
+    private var coverRow: some View {
+        HStack(spacing: 12) {
+            coverPreview
+                .frame(width: 54, height: 54)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(.white.opacity(0.14), lineWidth: 1))
+            VStack(alignment: .leading, spacing: 5) {
+                Text("COVER")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                if removeCover {
+                    Text("Will be removed")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.textSecondary)
+                } else if let cover {
+                    Text(cover.lastPathComponent)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.dotActive)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                } else if album.coverURL != nil {
+                    Text("Unchanged")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textSecondary)
+                } else {
+                    Text("None")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textSecondary.opacity(0.7))
+                }
+                HStack(spacing: 8) {
+                    Button("Choose…") { pickCover() }
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(theme.dotActive)
+                        .buttonStyle(.plain)
+                    if album.coverURL != nil || cover != nil {
+                        Button(removeCover ? "Undo Remove" : "Remove") {
+                            removeCover.toggle()
+                            if removeCover { cover = nil }
+                        }
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(theme.textSecondary)
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(theme.textSecondary.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(0.1), lineWidth: 1))
+    }
+
+    @ViewBuilder
+    private var coverPreview: some View {
+        if removeCover {
+            Rectangle()
+                .fill(theme.textSecondary.opacity(0.12))
+                .overlay(
+                    Image(systemName: "photo.badge.minus")
+                        .font(.system(size: 16))
+                        .foregroundStyle(theme.textSecondary)
+                )
+        } else if let image = chosenImage ?? existingImage {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFill()
+                .clipped()
+        } else {
+            Rectangle()
+                .fill(LinearGradient(
+                    colors: [theme.dotActive.opacity(0.25), theme.dotInactiveDeep],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
+                .overlay(
+                    Image(systemName: "music.note")
+                        .font(.system(size: 16))
+                        .foregroundStyle(theme.dotActive.opacity(0.8))
+                )
+        }
+    }
+
+    private var existingImage: NSImage? {
+        guard let url = album.coverURL else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    private var chosenImage: NSImage? {
+        guard let cover else { return nil }
+        return NSImage(contentsOf: cover)
+    }
+
+    private func pickCover() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.image]
+        panel.prompt = "Choose cover"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        cover = url
+        removeCover = false
+        error = nil
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(AeroButtonStyle())
+            Spacer()
+            Button("Save") {
+                error = onSave(AlbumEditDraft(
+                    title: title,
+                    artist: artist,
+                    cover: cover,
+                    removeCover: removeCover
+                ))
+            }
+            .buttonStyle(AeroButtonStyle(prominent: true))
+            .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+}
+
+private struct SongEditDraft {
+    var fileName: String
+    var title: String
+    var artist: String
+    var album: String
+}
+
+private struct EditSongSheet: View {
+    let track: CellaTrack
+    let album: CellaAlbum
+    let hasCue: Bool
+    let theme: Theme
+    var onCancel: () -> Void
+    /// Returns nil on success, or a message to keep the sheet open.
+    var onSave: (SongEditDraft) -> String?
+
+    @State private var fileName: String = ""
+    @State private var title: String = ""
+    @State private var artist: String = ""
+    @State private var albumName: String = ""
+    @State private var error: String?
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            fileNameField
+            VStack(alignment: .leading, spacing: 10) {
+                field("Title", text: $title)
+                field("Artist", text: $artist)
+                field("Album", text: $albumName)
+            }
+            hint
+            if let error {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            footer
+        }
+        .padding(20)
+        .frame(width: 480)
+        .background(theme.appBackground.opacity(0.6))
+        .background(.ultraThinMaterial)
+        .aeroGloss(radius: CardStyle.radius, opacity: 0.12)
+        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .overlay(RoundedRectangle(cornerRadius: CardStyle.radius).stroke(.white.opacity(0.14), lineWidth: 1))
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            fileName = track.file
+            title = track.title ?? ""
+            artist = track.artist ?? ""
+            albumName = album.name
+        }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Edit Song")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.textPrimary)
+            Text("\(album.name) · \(album.trackCount) track\(album.trackCount == 1 ? "" : "s")")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textSecondary)
+        }
+    }
+
+    private var fileNameField: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("FILENAME")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.textSecondary)
+            TextField("", text: $fileName)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+        }
+    }
+
+    private func field(_ label: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label.uppercased())
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.textSecondary)
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+        }
+    }
+
+    private var hint: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(hasCue
+                 ? "Title and artist are saved to the album cue."
+                 : "Title and artist are saved to the lyrics file header.")
+                .font(.system(size: 10))
+                .foregroundStyle(theme.textSecondary.opacity(0.75))
+            Text("Renaming moves the file on disk; lyrics and analysis cache follow it.")
+                .font(.system(size: 10))
+                .foregroundStyle(theme.textSecondary.opacity(0.75))
+        }
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(AeroButtonStyle())
+            Spacer()
+            Button("Save") {
+                error = onSave(SongEditDraft(
+                    fileName: fileName,
+                    title: title,
+                    artist: artist,
+                    album: albumName
+                ))
+            }
+            .buttonStyle(AeroButtonStyle(prominent: true))
+            .disabled(sanitizedFileName.isEmpty)
+        }
+    }
+
+    private var sanitizedFileName: String {
+        fileName
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct AddSongsSheet: View {
+    let pack: CellaPack
+    let files: [URL]
+    let theme: Theme
+    var onCancel: () -> Void
+    var onCommit: ([SongRow]) -> Void
+
+    @State private var rows: [SongRow] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            songSheetHeader
+            ScrollView {
+                LazyVStack(spacing: 10) {
+                    ForEach($rows) { $row in
+                        songRowEditor(row: $row)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            songSheetFooter
+        }
+        .padding(20)
+        .frame(width: 540, height: 500)
+        .task {
+            if rows.isEmpty {
+                rows = files.map { SongRow(source: $0, fileName: $0.lastPathComponent) }
+                await autofillAll()
+            }
+        }
+    }
+
+    private var songSheetHeader: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Add to \(pack.name)")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundStyle(theme.textPrimary)
+            Text("\(files.count) song\(files.count == 1 ? "" : "s") · album folders matched or created · lrc next to audio")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textSecondary)
+        }
+    }
+
+    private var songSheetFooter: some View {
+        HStack {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(AeroButtonStyle())
+            Spacer()
+            Button("Add \(rows.count) song\(rows.count == 1 ? "" : "s")") {
+                onCommit(rows)
+            }
+            .buttonStyle(AeroButtonStyle(prominent: true))
+            .disabled(rows.isEmpty)
+        }
+    }
+
+    private func songRowEditor(row: Binding<SongRow>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: "music.note")
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.dotActive)
+                Text(row.wrappedValue.fileName)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1)
+                Spacer()
+                if !row.wrappedValue.loaded {
+                    Text("Reading…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.textSecondary)
+                }
+            }
+            HStack(spacing: 8) {
+                songField(title: "Title", text: row.title)
+                songField(title: "Artist", text: row.artist)
+            }
+            HStack(spacing: 8) {
+                songField(title: "Album", text: row.album)
+                songField(title: "Length", text: row.length)
+            }
+            HStack(spacing: 6) {
+                Text("LRC")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(theme.textSecondary)
+                if let lrc = row.wrappedValue.lrcSource {
+                    Text(lrc.lastPathComponent)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(theme.dotActive)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button {
+                        row.wrappedValue.lrcSource = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove chosen LRC (fall back to tags)")
+                } else {
+                    Text("Auto (tags only)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textSecondary.opacity(0.7))
+                    Spacer()
+                    Button("Choose…") {
+                        pickLrc(for: row)
+                    }
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(theme.dotActive)
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(theme.textSecondary.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(0.1), lineWidth: 1))
+    }
+
+    private func songField(title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(theme.textSecondary)
+            TextField("", text: text)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+        }
+    }
+
+    private func pickLrc(for row: Binding<SongRow>) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = ["lrc", "elrc"].compactMap { UTType(filenameExtension: $0) }
+        panel.prompt = "Choose LRC"
+        panel.message = "Pick a lyric file for \(row.wrappedValue.fileName)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        row.wrappedValue.lrcSource = url
+    }
+
+    private func autofillAll() async {
+        for i in rows.indices {
+            await autofillRow(i)
+        }
+    }
+
+    private func autofillRow(_ i: Int) async {
+        guard rows.indices.contains(i) else { return }
+        let url = rows[i].source
+        var title = ""
+        var artist = ""
+        var album = ""
+        var length = ""
+        do {
+            let asset = AVURLAsset(url: url)
+            if let dur = try? await asset.load(.duration), dur.seconds.isFinite, dur.seconds > 0 {
+                let total = Int(dur.seconds)
+                length = "\(total / 60):\(String(format: "%02d", total % 60))"
+            }
+            if let items = try? await asset.load(.commonMetadata) {
+                for item in items {
+                    guard let key = item.commonKey?.rawValue else { continue }
+                    guard let value = try? await item.load(.value) as? String, !value.isEmpty else { continue }
+                    switch key {
+                    case "title": if title.isEmpty { title = value }
+                    case "artist": if artist.isEmpty { artist = value }
+                    case "albumName": if album.isEmpty { album = value }
+                    default: break
+                    }
+                }
+            }
+        }
+        // Filename fallback: "Artist - Title"
+        if title.isEmpty || artist.isEmpty {
+            let base = url.deletingPathExtension().lastPathComponent
+            if let sep = base.range(of: " - ") {
+                if artist.isEmpty { artist = String(base[..<sep.lowerBound]).trimmingCharacters(in: .whitespaces) }
+                if title.isEmpty { title = String(base[sep.upperBound...]).trimmingCharacters(in: .whitespaces) }
+            } else if title.isEmpty {
+                title = base.trimmingCharacters(in: .whitespaces)
+            }
+        }
+        await MainActor.run {
+            guard rows.indices.contains(i) else { return }
+            if rows[i].title.isEmpty { rows[i].title = title }
+            if rows[i].artist.isEmpty { rows[i].artist = artist }
+            if rows[i].album.isEmpty { rows[i].album = album }
+            if rows[i].length.isEmpty { rows[i].length = length }
+            rows[i].loaded = true
+        }
+    }
+}
+
+// MARK: - Drop helpers
+
+/// Loads `.fileURL` drag providers into URLs on main (shared by pack cards
+/// and the background playlist chooser). File-private to this file.
+private func loadDroppedFileURLs(_ providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
+    var urls: [URL] = []
+    let lock = NSLock()
+    let group = DispatchGroup()
+    for p in providers {
+        group.enter()
+        _ = p.loadObject(ofClass: URL.self) { url, _ in
+            if let url = url as? URL {
+                lock.lock()
+                urls.append(url)
+                lock.unlock()
+            }
+            group.leave()
+        }
+    }
+    group.notify(queue: .main) { completion(urls) }
 }

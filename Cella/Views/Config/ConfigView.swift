@@ -71,7 +71,9 @@ struct ConfigView: View {
                     .foregroundStyle(theme.textSecondary)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(Capsule().fill(theme.dotInactive.opacity(0.25)))
+                    .background(Capsule().fill(theme.dotInactive.opacity(0.2)))
+                    .background(Capsule().fill(.ultraThinMaterial.opacity(0.5)))
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
             }
             .padding(.horizontal, cardPadding)
             .padding(.top, cardPadding)
@@ -81,11 +83,11 @@ struct ConfigView: View {
         }
         .padding(.bottom, cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.screenBackground)
+        .aeroCard(radius: cardRadius, wash: 0.08)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
     }
 
@@ -115,8 +117,8 @@ struct ConfigView: View {
                 guideSlide(
                     icon: "slider.horizontal.3",
                     step: 3,
-                    title: "Shape the Curve",
-                    text: "Drag the ten seats to boost or cut each band. Your curve turns Custom.",
+                    title: "Locked Curves",
+                    text: "Five tuned presets, locked in. One tap sets theme, EQ and staging.",
                     tint: theme.haloSecondary
                 )
                 .containerRelativeFrame(.horizontal)
@@ -160,6 +162,22 @@ struct ConfigView: View {
         HStack(spacing: 20) {
             RoundedRectangle(cornerRadius: 16)
                 .fill(tint.opacity(0.15))
+                .background(RoundedRectangle(cornerRadius: 16).fill(.ultraThinMaterial.opacity(0.5)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(
+                            LinearGradient(
+                                colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                        .allowsHitTesting(false)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16)
+                        .stroke(.white.opacity(0.2), lineWidth: 1)
+                )
                 .frame(width: 64, height: 64)
                 .overlay(
                     Image(systemName: icon)
@@ -218,12 +236,14 @@ struct ConfigView: View {
 
                 Spacer(minLength: 8)
 
-                Text("v1.0")
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(theme.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(theme.dotInactive.opacity(0.25)))
+                    Text("v1.0")
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundStyle(theme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(theme.dotInactive.opacity(0.2)))
+                        .background(Capsule().fill(.ultraThinMaterial.opacity(0.5)))
+                        .overlay(Capsule().strokeBorder(.white.opacity(0.16), lineWidth: 1))
             }
             .padding(.top, cardPadding)
             .padding(.bottom, 14)
@@ -254,11 +274,11 @@ struct ConfigView: View {
         .padding(.bottom, cardPadding)
         .padding(.horizontal, cardPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.screenBackground)
+        .aeroCard(radius: cardRadius, wash: 0.08)
         .clipShape(RoundedRectangle(cornerRadius: cardRadius))
         .overlay(
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
     }
 
@@ -268,11 +288,26 @@ struct ConfigView: View {
         }
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(theme.textSecondary.opacity(0.06))
+                .fill(theme.textSecondary.opacity(0.05))
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(.ultraThinMaterial.opacity(0.6))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .stroke(cardBorder, lineWidth: 1)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.14), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
     }
 

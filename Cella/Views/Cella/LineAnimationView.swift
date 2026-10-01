@@ -173,7 +173,7 @@ struct LineAnimationView: View {
                 normY: Double.random(in: 0.15...0.85, using: &rng),
                 angle: Double.random(in: 0..<(.pi * 2), using: &rng),
                 driftSpeed: Double.random(in: 4...12, using: &rng),
-                size: CGFloat.random(in: 4...10, using: &rng),
+                size: CGFloat.random(in: 8...18, using: &rng),
                 phase: Double.random(in: 0..<(.pi * 2), using: &rng),
                 twinkleSpeed: Double.random(in: 0.4...1.2, using: &rng)
             )
@@ -199,10 +199,33 @@ struct LineAnimationView: View {
             let twinkle = 0.3 + 0.7 * soft
             let finalOpacity = twinkle * edgeFade
             let starColor = theme.trailColorCycle(at: Double(idx) / Double(starCount))
-            let sp = Self.starPath(at: CGPoint(x: posX, y: posY), size: star.size)
-            context.fill(sp, with: .color(starColor.opacity(finalOpacity)))
-            context.stroke(sp, with: .color(starColor.opacity(finalOpacity)),
-                          style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            let center = CGPoint(x: posX, y: posY)
+            let sp = Self.starPath(at: center, size: star.size)
+            // Glass body: bright core fading to theme color edge
+            context.fill(
+                sp,
+                with: .radialGradient(
+                    Gradient(colors: [
+                        .white.opacity(finalOpacity),
+                        starColor.opacity(finalOpacity)
+                    ]),
+                    center: center,
+                    startRadius: 0,
+                    endRadius: star.size
+                )
+            )
+            context.stroke(sp, with: .color(.white.opacity(finalOpacity * 0.7)),
+                           style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            // Specular gloss dot (top-left)
+            let hr = star.size * 0.16
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: posX - star.size * 0.30 - hr,
+                    y: posY - star.size * 0.34 - hr,
+                    width: hr * 2, height: hr * 2
+                )),
+                with: .color(.white.opacity(finalOpacity * 0.95))
+            )
         }
     }
 

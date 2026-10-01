@@ -124,14 +124,16 @@ struct LyricsView: View {
                 let revealClamped = min(max(revealProgress, 0), 1)
                 let revealPeak = sin(revealClamped * .pi)
                 let revealScale = CGFloat(revealPeak * 0.06)
-                let currentColor = isCurrent
-                    ? (theme.isColorful && revealPeak > 0.01
-                        ? theme.trailColorSmooth(at: revealClamped)
-                        : theme.lyricColor(for: index))
-                    : theme.textPrimary
-                let glow = theme.lyricColor(for: index).opacity(revealPeak)
                 let isHighlight = index == highlightIndex
                 let highlightColor = theme.haloAccent
+                // Aqua fade: near lines hold aqua, far lines dissolve.
+                let nearFade = max(0, 1.0 - normalizedDist * 1.4)
+                let otherColor = theme.dotActive.opacity(0.12 + 0.55 * nearFade)
+                let textStyle: Color = isHighlight ? highlightColor : (isCurrent ? theme.dotActive : otherColor)
+                let haloGlow = theme.dotActive.opacity(isCurrent ? 0.55 + revealPeak * 0.3 : 0)
+                let aquaOuter = theme.haloSecondary.opacity(isCurrent ? 0.32 : 0)
+                let isNear = !isCurrent && abs(index - currentIndex) == 1
+                let nearGlow = theme.dotActive.opacity(isNear ? 0.22 : 0)
 
                 if abs(CGFloat(index - currentIndex)) < visibleLines {
                     Text(line.text)
@@ -140,14 +142,18 @@ struct LyricsView: View {
                             weight: .bold,
                             design: .rounded
                         ))
-                        .foregroundStyle(isHighlight ? highlightColor : currentColor)
+                        .foregroundStyle(textStyle)
                         .opacity(opacity)
                         .scaleEffect(
-                            x: scale + revealScale + (isHighlight ? 0.04 : 0),
-                            y: scale * verticalSqueeze + revealScale + (isHighlight ? 0.04 : 0),
+                            x: scale + revealScale + (isHighlight ? 0.04 : 0) + (isCurrent ? 0.03 : 0),
+                            y: scale * verticalSqueeze + revealScale + (isHighlight ? 0.04 : 0) + (isCurrent ? 0.03 : 0),
                             anchor: .center
                         )
-                        .shadow(color: isHighlight ? highlightColor.opacity(0.8) : (isCurrent ? glow : .clear), radius: isHighlight ? 16 : CGFloat(revealPeak * 12))
+                        // Aero gloss stack: white specular edge + halo + aqua outer.
+                        // All solid shadows, no gradient fill, scroll stays smooth.
+                        .shadow(color: isHighlight ? highlightColor.opacity(0.8) : .white.opacity(isCurrent ? 0.38 : 0), radius: isHighlight ? 16 : 1, x: 0, y: isCurrent ? -1 : 0)
+                        .shadow(color: isHighlight ? .clear : (isCurrent ? haloGlow : nearGlow), radius: isCurrent ? 12 + revealPeak * 6 : 6)
+                        .shadow(color: isHighlight ? .clear : aquaOuter, radius: 22)
                         .blur(radius: blur)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -159,6 +165,7 @@ struct LyricsView: View {
         }
         .offset(y: scrollOffset)
         .animation(isTransitioning ? nil : .lyricsSpring, value: currentIndex)
+        .animation(.spring(response: 0.3, dampingFraction: 0.6), value: currentIndex)
     }
 
     // MARK: - Next Lyrics
@@ -181,17 +188,21 @@ struct LyricsView: View {
                 let fx = isCenter ? 0 : floatX(index + 100, time: time)
                 let fy = isCenter ? 0 : floatY(index + 100, time: time)
 
+                let nearFadeNext = max(0, 1.0 - normalizedDist * 1.4)
+                let otherNext = theme.dotActive.opacity(0.12 + 0.55 * nearFadeNext)
+
                 Text(line.text)
                     .font(.system(
                         size: isCenter ? 28 : 21,
                         weight: .bold,
                         design: .rounded
                     ))
-                    .foregroundStyle(
-                        isCenter ? theme.lyricColor(for: index + 100) : theme.textPrimary
-                    )
+                    .foregroundStyle(isCenter ? theme.dotActive : otherNext)
                     .opacity(opacity)
                     .scaleEffect(scale, anchor: .center)
+                    .shadow(color: .white.opacity(isCenter ? 0.38 : 0), radius: 1, x: 0, y: -1)
+                    .shadow(color: theme.dotActive.opacity(isCenter ? 0.55 : 0), radius: 12)
+                    .shadow(color: theme.haloSecondary.opacity(isCenter ? 0.32 : 0), radius: 22)
                     .blur(radius: blur)
                     .lineLimit(1)
                     .truncationMode(.tail)

@@ -203,8 +203,11 @@ struct BottomTabBar: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
-        .background(theme.tabBarBackground)
+        .background(theme.tabBarBackground.opacity(0.55))
+        .background(Capsule().fill(.ultraThinMaterial))
+        .aeroGloss(radius: 999, opacity: 0.20)
         .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1))
         .onContinuousHover { phase in
             switch phase {
             case .active:
@@ -300,9 +303,24 @@ struct BottomTabBar: View {
                 ZStack {
                     if isActive {
                         Capsule()
-                            .fill(tabCol.opacity(0.2))
+                            .fill(tabCol.opacity(0.22))
                             .matchedGeometryEffect(id: "pill", in: animation)
                             .offset(x: dragOffset)
+                            .shadow(color: tabCol.opacity(0.65), radius: 10)
+                            .overlay(
+                                Capsule()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.white.opacity(0.30), .white.opacity(0.03)],
+                                            startPoint: .top,
+                                            endPoint: .center
+                                        )
+                                    )
+                                    .allowsHitTesting(false)
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1)
+                            )
                     }
                 }
             )
@@ -431,6 +449,7 @@ struct AlbumPill: View {
         }
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillVisible)
         .animation(.smooth(duration: 0.5), value: viewModel.albumPillHiSoVisible)
+        .animation(.spring(response: 0.35, dampingFraction: 0.6), value: viewModel.soloMode)
     }
 
     private func syncHiSo() {
@@ -507,14 +526,18 @@ struct AlbumPill: View {
                 Text(viewModel.isArtistMode ? (viewModel.activeArtistFilter ?? "") : viewModel.albumPillTitle)
                     .font(.system(size: 11, weight: .semibold, design: .rounded))
                     .foregroundStyle(theme.textPrimary)
-                    .fixedSize(horizontal: true, vertical: false)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 160, alignment: .leading)
                 if !viewModel.albumPillSourceName.isEmpty {
                     Text(viewModel.isArtistMode
-                        ? "\(viewModel.mixQueue?.count ?? 0) songs • \(viewModel.albumPillSourceName).cella"
+                        ? "\(viewModel.mixQueue?.count ?? 0) songs"
                         : "\(viewModel.albumPillSourceName).cella")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundStyle(theme.dotActive.opacity(0.8))
-                        .fixedSize(horizontal: true, vertical: false)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 160, alignment: .leading)
                 }
             }
             if viewModel.isArtistMode {
@@ -529,7 +552,31 @@ struct AlbumPill: View {
                 .help("Clear artist filter — back to full pack")
             }
 
-            if viewModel.albumPillHiSoVisible {
+            if viewModel.soloMode {
+                HStack(spacing: 3) {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(.white)
+                    Text("Solo")
+                        .font(.system(size: 8, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(LinearGradient(colors: [theme.dotActive, theme.haloWarm, theme.dotActive.opacity(0.85)], startPoint: .leading, endPoint: .trailing)))
+                .background(Capsule().fill(.ultraThinMaterial.opacity(0.4)))
+                .overlay(
+                    Capsule()
+                        .fill(LinearGradient(colors: [.white.opacity(0.35), .white.opacity(0.02)], startPoint: .top, endPoint: .center))
+                        .allowsHitTesting(false)
+                )
+                .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.3), lineWidth: 1))
+                .shadow(color: theme.dotActive.opacity(0.4), radius: 4)
+                .transition(.scale(scale: 0.6).combined(with: .opacity))
+            }
+
+            if viewModel.albumPillHiSoVisible && !viewModel.isArtistMode {
                 HStack(spacing: 3) {
                     Circle()
                         .fill(.white)
@@ -542,14 +589,24 @@ struct AlbumPill: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
                 .background(Capsule().fill(LinearGradient(colors: [theme.haloAccent, theme.haloWarm, theme.haloAccent.opacity(0.85)], startPoint: .leading, endPoint: .trailing)))
+                .background(Capsule().fill(.ultraThinMaterial.opacity(0.4)))
+                .overlay(
+                    Capsule()
+                        .fill(LinearGradient(colors: [.white.opacity(0.35), .white.opacity(0.02)], startPoint: .top, endPoint: .center))
+                        .allowsHitTesting(false)
+                )
                 .clipShape(Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.3), lineWidth: 1))
                 .shadow(color: theme.haloAccent.opacity(0.4), radius: 4)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Capsule().fill(theme.tabBarBackground))
+        .background(Capsule().fill(theme.tabBarBackground.opacity(0.55)))
+        .background(Capsule().fill(.ultraThinMaterial))
+        .aeroGloss(radius: 999, opacity: 0.14)
         .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
         .contentShape(Capsule())
     }
 }
@@ -611,11 +668,13 @@ struct AlbumSongsPopover: View {
             }
         }
         .animation(.snappy, value: selectedAlbum?.id)
-        .background(theme.screenBackground)
+        .background(theme.screenBackground.opacity(0.6))
+        .background(RoundedRectangle(cornerRadius: 14).fill(.ultraThinMaterial))
+        .aeroGloss(radius: 14, opacity: 0.12)
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .stroke(theme.textSecondary.opacity(0.15), lineWidth: 1)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
         )
         .onAppear {
             // Open on the current album's songs first (skip in artist mode — flat list).
@@ -664,7 +723,7 @@ struct AlbumSongsPopover: View {
 
     private var artistSongList: some View {
         ScrollView {
-            VStack(spacing: 2) {
+            LazyVStack(spacing: 2) {
                 ForEach(Array((viewModel.mixQueue?.tracks ?? []).enumerated()), id: \.element.id) { index, track in
                     let isCurrent = track.url == viewModel.mixQueue?.currentTrack?.url
                     PickerRow(highlighted: isCurrent) {
@@ -675,20 +734,12 @@ struct AlbumSongsPopover: View {
                             Text("\(index + 1)")
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundStyle(theme.textSecondary)
-                                .frame(width: 24, alignment: .trailing)
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text(track.trackTitle)
-                                    .font(.system(size: 12, weight: .medium))
-                                    .foregroundStyle(isCurrent ? theme.dotActive : theme.textPrimary)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                if !track.displayArtist.isEmpty {
-                                    Text(track.displayArtist)
-                                        .font(.system(size: 10))
-                                        .foregroundStyle(theme.textSecondary)
-                                        .lineLimit(1)
-                                }
-                            }
+                                .frame(width: 28, alignment: .trailing)
+                            Text(track.trackTitle)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(isCurrent ? theme.dotActive : theme.textPrimary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             Spacer()
                             if isCurrent {
                                 Image(systemName: "speaker.wave.2.fill")
@@ -701,7 +752,8 @@ struct AlbumSongsPopover: View {
             }
             .padding(6)
         }
-        .frame(width: 300, height: min(CGFloat(viewModel.mixQueue?.count ?? 0) * 40 + 12, 340))
+        .scrollIndicators(.hidden)
+        .frame(width: 300, height: min(CGFloat(viewModel.mixQueue?.count ?? 0) * 34 + 12, 320))
     }
 
     // MARK: - Album List
@@ -830,6 +882,8 @@ struct NowPlayingBar: View {
     @State private var lyricBadgeTask: Task<Void, Never>?
     @State private var qualityPillsTask: Task<Void, Never>?
     @State private var isPlayPressed = false
+    /// Gradient wipe sweep 0→1 after autoMix lands (smooth 1.2s, once). -1 = idle.
+    @State private var wipeT: Double = -1
 
     private var currentTrack: TrackAsset? { viewModel.mixQueue?.currentTrack }
     private var isPlaying: Bool { viewModel.playerState == .playing || viewModel.playerState == .autoMix }
@@ -896,6 +950,7 @@ struct NowPlayingBar: View {
             }
             .onChange(of: viewModel.playerState) { old, new in
                 if new == .playing && old == .autoMix {
+                    triggerWipe()
                     // Crossfade landed on this song — show badge/pills again
                     if hasLyricSupported { triggerLyricBadgeIfNeeded(force: true, forcePillsAfter: true) }
                     else { showQualityPills(force: true) }
@@ -1008,7 +1063,22 @@ struct NowPlayingBar: View {
                 Image(systemName: viewModel.lyricsMode.iconName)
                     .font(.system(size: 12))
                     .foregroundStyle(viewModel.lyricsMode != .off ? theme.dotActive : theme.textSecondary)
-                    .frame(width: 16)
+                    .frame(width: 28, height: 28)
+                    .background(Circle().fill(theme.textSecondary.opacity(0.12)))
+                    .background(Circle().fill(.ultraThinMaterial.opacity(0.5)))
+                    .overlay(
+                        Circle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.white.opacity(0.25), .white.opacity(0.02)],
+                                    startPoint: .top,
+                                    endPoint: .center
+                                )
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 1))
+                    .shadow(color: viewModel.lyricsMode != .off ? theme.dotActive.opacity(0.4) : .clear, radius: 5)
                     .contentTransition(.symbolEffect(.replace))
                     .onTapGesture {
                         withAnimation(.snappy) {
@@ -1031,8 +1101,12 @@ struct NowPlayingBar: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 10)
-        .background(Capsule().fill(theme.tabBarBackground))
+        .background(Capsule().fill(theme.tabBarBackground.opacity(0.55)))
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(wipeOverlay)
+        .aeroGloss(radius: 999, opacity: 0.14)
         .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.14), lineWidth: 1))
         .contentShape(Rectangle())
         .animation(.smooth(duration: 0.4), value: lyrics)
         .animation(.snappy, value: viewModel.currentTime)
@@ -1049,6 +1123,57 @@ struct NowPlayingBar: View {
                     isPlayPressed = false
                 }
             }
+        }
+    }
+
+    // MARK: - Post-transition wipe (smooth 1.2s sweep once after autoMix)
+
+    private func triggerWipe() {
+        wipeT = 0
+        withAnimation(.smooth(duration: 1.2)) { wipeT = 1 }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+            wipeT = -1
+        }
+    }
+
+    @ViewBuilder
+    private var wipeOverlay: some View {
+        if wipeT >= 0 {
+            GeometryReader { geo in
+                let w = max(geo.size.width, 1)
+                let h = geo.size.height
+                // Slide fully off: center travels -0.8w → +0.85w so tails clear edge.
+                let glow = max(0, min(1, (1 - wipeT) / 0.15))
+                let x = -w * 0.8 + wipeT * w * 1.65
+                // Aurora curtains: 3 soft theme ribbons trailing each other.
+                ZStack {
+                    Ellipse()
+                        .fill(theme.dotActive.opacity(0.35 * glow))
+                        .frame(width: w * 0.5, height: h * 2.2)
+                        .blur(radius: 7)
+                        .offset(x: x)
+                    Ellipse()
+                        .fill(theme.haloSecondary.opacity(0.30 * glow))
+                        .frame(width: w * 0.38, height: h * 2.6)
+                        .blur(radius: 8)
+                        .offset(x: x - w * 0.10)
+                    Ellipse()
+                        .fill(theme.haloPrimary.opacity(0.28 * glow))
+                        .frame(width: w * 0.30, height: h * 2.0)
+                        .blur(radius: 6)
+                        .offset(x: x + w * 0.08)
+                    // Faint glass sheen on the leading edge.
+                    Capsule()
+                        .fill(.white.opacity(0.18 * glow))
+                        .frame(width: w * 0.06, height: h)
+                        .offset(x: x + w * 0.22)
+                }
+                .frame(width: w, height: h)
+                .allowsHitTesting(false)
+            }
+            .mask(Capsule())
+            .allowsHitTesting(false)
+            .transition(.opacity)
         }
     }
 
@@ -1094,8 +1219,20 @@ struct NowPlayingBar: View {
                     )
                     .blendMode(.overlay)
                 )
+                .overlay(
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [.white.opacity(0.35), .white.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .center
+                            )
+                        )
+                        .allowsHitTesting(false)
+                )
         )
         .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.3), lineWidth: 1))
         .shadow(color: theme.haloPrimary.opacity(0.5), radius: 6)
     }
 
@@ -1115,10 +1252,22 @@ struct NowPlayingBar: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .background(Capsule().fill(theme.screenBackground))
+        .background(Capsule().fill(theme.screenBackground.opacity(0.55)))
+        .background(Capsule().fill(.ultraThinMaterial))
+        .overlay(
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.22), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
         .clipShape(Capsule())
         .overlay(
-            Capsule().stroke(theme.dotInactive.opacity(0.4), lineWidth: 1)
+            Capsule().stroke(.white.opacity(0.16), lineWidth: 1)
         )
     }
 
@@ -1298,8 +1447,10 @@ struct TopTabBar: View {
             }
         }
         .padding(8)
-        .background(theme.tabBarBackground)
+        .background(theme.tabBarBackground.opacity(0.55))
+        .aeroGloss(radius: 999, opacity: 0.20)
         .clipShape(Capsule())
+        .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1))
         .onContinuousHover { phase in
             switch phase {
             case .active:
@@ -1389,9 +1540,24 @@ struct TopTabBar: View {
                 ZStack {
                     if isActive {
                         Capsule()
-                            .fill(tabCol.opacity(0.2))
+                            .fill(tabCol.opacity(0.22))
                             .matchedGeometryEffect(id: "pill", in: animation)
                             .offset(x: dragOffset)
+                            .shadow(color: tabCol.opacity(0.65), radius: 10)
+                            .overlay(
+                                Capsule()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [.white.opacity(0.30), .white.opacity(0.03)],
+                                            startPoint: .top,
+                                            endPoint: .center
+                                        )
+                                    )
+                                    .allowsHitTesting(false)
+                            )
+                            .overlay(
+                                Capsule().strokeBorder(.white.opacity(0.28), lineWidth: 1)
+                            )
                     }
                 }
             )
@@ -1463,52 +1629,62 @@ private struct OrbMixBadge: View {
     let theme: Theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private struct Orb: Hashable {
-        let ring: Double      // 0 inner … 1 outer
-        let angle0: Double    // start angle
-        let speed: Double     // revs per second (signed)
-        let size: Double      // base diameter
-        let depth: Double     // 0 far … 1 near
-    }
-
-    private var orbs: [Orb] {
-        var rng = SeededRandomGenerator(seed: 20260927)
-        return (0..<42).map { _ in
-            Orb(
-                ring: Double.random(in: 0.15...1.0, using: &rng),
-                angle0: Double.random(in: 0..<(.pi * 2), using: &rng),
-                speed: Double.random(in: -0.25...0.35, using: &rng),
-                size: Double.random(in: 2...7, using: &rng),
-                depth: Double.random(in: 0...1, using: &rng)
-            )
-        }
-    }
-
     var body: some View {
         TimelineView(.animation) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
-            // Theme-following: pill = tab bar surface, dots = accent, label = primary.
-            // Dark Seafoam/Bipolar/Mint all adapt (no fixed cream).
-            let dotBase = theme.dotActive
+            // Same tempo family as old orbs (max 0.35 rev/s, 2.8s shine).
+            let pulse = reduceMotion ? 0 : sin(t * 2 * .pi * 0.35)
+            let bubbleD: CGFloat = 14 * (1 + pulse * 0.07)
+            let a1 = reduceMotion ? 0.8 : (t * 0.35 * 2 * .pi)
+            let a2 = reduceMotion ? 2.4 : (-t * 0.25 * 2 * .pi + 2.1)
+            let cx: CGFloat = 15
+            let cy: CGFloat = 10
+            let rx: CGFloat = 10.5
+            let ry: CGFloat = 6.5
+            let s1 = CGPoint(x: cx + cos(a1) * rx, y: cy + sin(a1) * ry)
+            let s2 = CGPoint(x: cx + cos(a2) * rx * 0.7, y: cy + sin(a2) * ry * 0.7)
+
             HStack(spacing: 7) {
-                Canvas { context, size in
-                    let cx = 14.0
-                    let cy = size.height / 2
-                    let maxR = min(size.height / 2 - 2, 13)
-                    for (idx, orb) in orbs.enumerated() {
-                        let ang = orb.angle0 + (reduceMotion ? 0 : t * orb.speed * .pi * 2)
-                        let rx = maxR * orb.ring
-                        let ry = maxR * orb.ring * 0.82
-                        let x = cx + cos(ang) * rx
-                        let y = cy + sin(ang) * ry
-                        let d = 0.35 + 0.65 * orb.depth
-                        let dotR = orb.size * 0.5 * (0.5 + d)
-                        let opacity = 0.25 + 0.65 * d
-                        // Alternate accent / halo for depth variety, all theme-driven
-                        let c = idx % 4 == 0 ? theme.haloSecondary : dotBase
-                        let rect = CGRect(x: x - dotR, y: y - dotR, width: dotR * 2, height: dotR * 2)
-                        context.fill(Path(ellipseIn: rect), with: .color(c.opacity(opacity)))
-                    }
+                ZStack {
+                    // Soft halo behind hero
+                    Circle()
+                        .fill(theme.dotActive.opacity(0.30))
+                        .frame(width: 20, height: 20)
+                        .blur(radius: 4)
+                    // Hero gloss bubble (matches progress knob)
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    .white.opacity(0.95),
+                                    theme.dotActive.opacity(0.9),
+                                    theme.haloSecondary.opacity(0.55)
+                                ],
+                                center: .init(x: 0.35, y: 0.3),
+                                startRadius: 0,
+                                endRadius: bubbleD * 0.7
+                            )
+                        )
+                        .frame(width: bubbleD, height: bubbleD)
+                        .overlay(Circle().stroke(.white.opacity(0.65), lineWidth: 1))
+                        .overlay(
+                            Ellipse()
+                                .fill(.white.opacity(0.9))
+                                .frame(width: bubbleD * 0.34, height: bubbleD * 0.22)
+                                .offset(x: -bubbleD * 0.12, y: -bubbleD * 0.22)
+                        )
+                        .shadow(color: theme.dotActive.opacity(0.6), radius: 5)
+                    // Two satellite sparks on old orbit tempo
+                    Circle()
+                        .fill(.white.opacity(0.95))
+                        .frame(width: 4, height: 4)
+                        .shadow(color: theme.dotActive.opacity(0.8), radius: 3)
+                        .position(s1)
+                    Circle()
+                        .fill(theme.haloSecondary.opacity(0.9))
+                        .frame(width: 3, height: 3)
+                        .shadow(color: theme.haloSecondary.opacity(0.7), radius: 2)
+                        .position(s2)
                 }
                 .frame(width: 30, height: 20)
                 Text("Mixing")
@@ -1518,9 +1694,53 @@ private struct OrbMixBadge: View {
             .padding(.leading, 6)
             .padding(.trailing, 10)
             .padding(.vertical, 5)
-            .background(Capsule().fill(theme.tabBarBackground))
-            .overlay(Capsule().stroke(theme.textSecondary.opacity(0.25), lineWidth: 1))
+            // Glass track (matches progress bar + AeroGlass kit)
+            .background(Capsule().fill(.ultraThinMaterial))
+            .background(
+                Capsule().fill(
+                    LinearGradient(
+                        colors: [
+                            AeroAqua.washTop.opacity(0.18),
+                            theme.dotActive.opacity(0.14),
+                            AeroAqua.washDeep.opacity(0.22)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+            )
+            .background(Capsule().fill(theme.screenBackground.opacity(0.35)))
+            .overlay(
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.24), .white.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+                    .allowsHitTesting(false)
+            )
+            .overlay(
+                // Same 2.8s diagonal shine sweep as before.
+                GeometryReader { geo in
+                    let w = max(geo.size.width, 1)
+                    let cycle: Double = 2.8
+                    let raw = reduceMotion ? 0.5 : (t.truncatingRemainder(dividingBy: cycle)) / cycle
+                    let eased = raw * raw * (3 - 2 * raw)
+                    LinearGradient(
+                        colors: [.clear, .white.opacity(0.22), .clear],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    .frame(width: w * 0.35, height: geo.size.height)
+                    .offset(x: -w * 0.2 + eased * w * 1.1)
+                    .allowsHitTesting(false)
+                }
+                .allowsHitTesting(false)
+            )
             .clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(.white.opacity(0.2), lineWidth: 1))
             .shadow(color: theme.dotActive.opacity(0.35), radius: 6)
         }
     }

@@ -8,6 +8,7 @@ struct QueueView: View {
     @State private var draggedIndex: Int?
     @State private var dropTargetIndex: Int?
     @State private var tappedIndex: Int?
+    @State private var hoveredIndex: Int?
 
     private let rowHPadding: CGFloat = 10
     private let listHPadding: CGFloat = 10
@@ -55,13 +56,16 @@ struct QueueView: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(Array(queue.tracks.enumerated()), id: \.element.id) { index, track in
-                        trackRow(track: track, index: index, isPlaying: index == queue.currentIndex)
+                        trackRow(track: track, index: index, isPlaying: index == queue.currentIndex, isHovered: hoveredIndex == index)
+                            .onHover { hoveredIndex = $0 ? index : nil }
                             .opacity(draggedIndex == index ? 0.4 : 1)
                             .scaleEffect(draggedIndex == index ? 0.95 : 1)
                             .offset(x: draggedIndex == index ? 8 : 0)
                             .onDrag {
                                 draggedIndex = index
-                                return NSItemProvider(object: "\(index)" as NSString)
+                                // File URL for drops outside the queue (cluster packs, Finder).
+                                // Internal reorder still uses draggedIndex state.
+                                return NSItemProvider(item: track.url as NSURL, typeIdentifier: UTType.fileURL.identifier)
                             }
                             .onDrop(of: [.text], delegate: TrackDropDelegate(
                                 destinationIndex: index,
@@ -100,13 +104,18 @@ struct QueueView: View {
     // MARK: - Track Row
 
     @ViewBuilder
-    private func trackRow(track: TrackAsset, index: Int, isPlaying: Bool) -> some View {
+    private func trackRow(track: TrackAsset, index: Int, isPlaying: Bool, isHovered: Bool = false) -> some View {
         HStack(spacing: 8) {
             if isPlaying {
                 Image(systemName: "speaker.wave.2.fill")
                     .font(.system(size: 10))
                     .foregroundStyle(theme.dotActive)
                     .symbolEffect(.variableColor.iterative)
+                    .frame(width: 18)
+            } else if isHovered {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.dotActive)
                     .frame(width: 18)
             } else {
                 Text("\(index + 1)")
@@ -117,7 +126,7 @@ struct QueueView: View {
 
             Text(track.fileName)
                 .font(.system(size: 12))
-                .foregroundStyle(isPlaying ? theme.textPrimary : theme.textSecondary)
+                .foregroundStyle(isPlaying ? theme.textPrimary : (isHovered ? theme.textPrimary : theme.textSecondary))
                 .lineLimit(1)
                 .truncationMode(.tail)
 
@@ -128,6 +137,7 @@ struct QueueView: View {
                     viewModel.removeTrack(at: index)
                 }
             }
+            .opacity(isHovered || isPlaying ? 1 : 0.4)
         }
         .frame(height: rowHeight)
         .padding(.horizontal, rowHPadding)
@@ -138,15 +148,25 @@ struct QueueView: View {
                     ? theme.dotActive.opacity(0.15)
                     : isPlaying
                         ? theme.dotActive.opacity(0.08)
-                        : Color.clear
+                        : isHovered
+                            ? theme.dotActive.opacity(0.1)
+                            : Color.clear
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(dropTargetIndex == index ? theme.dotActive.opacity(0.4) : Color.clear, lineWidth: 1)
+                        .stroke(
+                            dropTargetIndex == index
+                            ? theme.dotActive.opacity(0.4)
+                            : isHovered ? theme.dotActive.opacity(0.25) : Color.clear,
+                            lineWidth: 1
+                        )
                 )
+                .shadow(color: isHovered ? theme.dotActive.opacity(0.25) : .clear, radius: 6)
         )
+        .offset(x: isHovered ? 3 : 0)
         .animation(reduceMotion ? .none : joySpring, value: isPlaying)
         .animation(reduceMotion ? .none : popSpring, value: tappedIndex == index)
+        .animation(reduceMotion ? .none : joySpring, value: isHovered)
     }
 }
 

@@ -83,9 +83,11 @@ struct CellaMotionsView: View {
     private var bentoCard: some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: cardRadius)
-                .fill(theme.screenBackground)
+                .fill(theme.screenBackground.opacity(0.55))
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
 
             HStack(spacing: 0) {
                 canvasColumn
@@ -217,7 +219,23 @@ struct CellaMotionsView: View {
         .frame(maxWidth: .infinity)
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(theme.tabBarBackground))
+        .background(RoundedRectangle(cornerRadius: 8).fill(theme.tabBarBackground.opacity(0.55)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(.ultraThinMaterial.opacity(0.6)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.18), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(.white.opacity(0.13), lineWidth: 1)
+        )
     }
 
     // MARK: - Filmstrip
@@ -266,22 +284,22 @@ struct CellaMotionsView: View {
         VStack(alignment: .leading, spacing: 0) {
             inspectorSectionLabel("MARK")
                 .padding(.bottom, 8)
-            inspectorMarkRow
+            inspectorGlassPanel { inspectorMarkRow }
 
             inspectorSpacer
             inspectorSectionLabel("CLIP")
                 .padding(.bottom, 8)
-            inspectorClipRow
+            inspectorGlassPanel { inspectorClipRow }
 
             inspectorSpacer
             inspectorSectionLabel("PRECISION")
                 .padding(.bottom, 8)
-            inspectorPrecision
+            inspectorGlassPanel { inspectorPrecision }
 
             inspectorSpacer
             inspectorSectionLabel("EXPORT")
                 .padding(.bottom, 8)
-            inspectorExport
+            inspectorGlassPanel { inspectorExport }
 
             Spacer(minLength: 12)
 
@@ -306,6 +324,30 @@ struct CellaMotionsView: View {
             .font(.system(size: 9, weight: .semibold, design: .rounded))
             .kerning(1.2)
             .foregroundStyle(theme.textSecondary.opacity(0.5))
+    }
+
+    private func inspectorGlassPanel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            content()
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 12).fill(theme.textSecondary.opacity(0.05)))
+        .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial.opacity(0.6)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.16), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+                .allowsHitTesting(false)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.white.opacity(0.13), lineWidth: 1)
+        )
     }
 
     private var inspectorMarkRow: some View {
@@ -505,9 +547,11 @@ struct CellaMotionsView: View {
     private var dropCard: some View {
         ZStack(alignment: .topLeading) {
             RoundedRectangle(cornerRadius: cardRadius)
-                .fill(theme.screenBackground)
+                .fill(theme.screenBackground.opacity(0.55))
             RoundedRectangle(cornerRadius: cardRadius)
-                .stroke(cardBorder, lineWidth: 1)
+                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: cardRadius)
+                .stroke(.white.opacity(0.14), lineWidth: 1)
 
             VStack(spacing: 0) {
                 HStack(spacing: 8) {
@@ -635,6 +679,7 @@ struct BoomerangSaveSheet: View {
                             let panel = NSOpenPanel()
                             panel.canChooseFiles = false
                             panel.canChooseDirectories = true
+                            panel.treatsFilePackagesAsDirectories = false
                             panel.allowsMultipleSelection = false
                             panel.prompt = "Choose Library"
                             if panel.runModal() == .OK, let url = panel.url {

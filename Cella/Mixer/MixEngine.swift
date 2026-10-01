@@ -329,8 +329,14 @@ enum MixEngine {
     // MARK: - Track Ordering
 
     /// Builds an optimally ordered mix queue from a set of analyzed tracks.
-    /// Uses local greedy with 2-step lookahead for energy-flow-aware ordering.
-    static func buildMixQueue(tracks: [TrackAsset], startingWith startURL: URL? = nil) -> MixQueue {
+    /// Energy-arc mode (default): warm-up climb, peak, cool-down, with peak
+    /// near the middle and small steps between neighbors. Pure compatibility
+    /// chaining (local greedy + 2-opt) when `config.energyArcOrdering` is off.
+    static func buildMixQueue(
+        tracks: [TrackAsset],
+        startingWith startURL: URL? = nil,
+        config: AudioConfig = .standard
+    ) -> MixQueue {
         let analyzedTracks = tracks.filter { $0.analysis != nil }
         guard !analyzedTracks.isEmpty else {
             print("[MixEngine] Warning: no analyzed tracks — returning empty queue")
@@ -357,7 +363,9 @@ enum MixEngine {
         }
 
         let orderedIndices: [Int]
-        if let startURL,
+        if config.energyArcOrdering {
+            orderedIndices = energyArcOrdering(tracks: analyzedTracks, startURL: startURL)
+        } else if let startURL,
            let startIndex = analyzedTracks.firstIndex(where: { $0.url == startURL }) {
             // Anchored: local greedy from current track
             var greedy = localGreedyOrdering(
@@ -391,6 +399,34 @@ enum MixEngine {
             tracks: orderedTracks,
             transitions: transitions
         )
+    }
+
+    // MARK: - Energy Arc Ordering
+
+    /// Per-track energy scalar for arc ranking.
+    private static func trackEnergy(_ track: TrackAsset) -> Double {
+        guard let a = track.analysis else { return 0 }
+        if a.averageRMS > 0 { return Double(a.averageRMS) }
+        return averageEnergy(a.energyProfile)
+    }
+
+    /// Warm-up climb, peak near the middle, cool-down descent.
+    /// Even/odd fold over the energy-sorted list keeps neighbor steps small;
+    /// rotating to the anchor preserves that smoothness (circularly).
+    static func energyArcOrdering(tracks: [TrackAsset], startURL: URL? = nil) -> [Int] {
+        guard tracks.count > 1 else { return Array(tracks.indices) }
+        let byEnergy = tracks.indices.sorted { trackEnergy(tracks[$0]) < trackEnergy(tracks[$1]) }
+        var climb: [Int] = []
+        var descent: [Int] = []
+        for (k, idx) in byEnergy.enumerated() {
+            if k % 2 == 0 { climb.append(idx) } else { descent.append(idx) }
+        }
+        var arc = climb + descent.reversed()
+        if let startURL,
+           let pos = arc.firstIndex(where: { tracks[$0].url == startURL }) {
+            arc = Array(arc[pos...] + arc[..<pos])
+        }
+        return arc
     }
 
     // MARK: - Best Energy Flow Ordering
