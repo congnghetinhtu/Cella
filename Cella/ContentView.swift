@@ -22,6 +22,9 @@ struct ContentView: View {
     /// Cluster guide overlay state (opened via .clusterGuideRequest).
     @State private var showClusterGuide = false
     @State private var clusterGuideName = ""
+    /// Artists folder-open scene is modal edge-to-edge: ClusterView mirrors
+    /// its open state via .clusterFolderVeil so the Metro tab bar dims too.
+    @State private var clusterFolderVeil = false
     /// Shared with ClusterView — the guide only auto-opens on first visit.
     @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
     @State private var pendingLRCAudioURL: URL?
@@ -392,6 +395,16 @@ struct ContentView: View {
                     .padding(.horizontal, 48)
                     .padding(.top, 20)
                     .padding(.bottom, 12)
+                    .overlay {
+                        // The artists folder scene is modal across the whole
+                        // window: this veil makes the nav strip part of the
+                        // dim and swallows taps so the scene stays put.
+                        if clusterFolderVeil {
+                            Color.black.opacity(0.45)
+                                .contentShape(Rectangle())
+                                .onTapGesture {}
+                        }
+                    }
 
                 // Content
                 ZStack {
@@ -710,6 +723,10 @@ struct ContentView: View {
             guard let name = note.object as? String else { return }
             clusterGuideName = name
             withAnimation(.snappy) { showClusterGuide = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clusterFolderVeil)) { note in
+            // note.object is the opened pack path, or nil on close.
+            withAnimation(.snappy) { clusterFolderVeil = note.object != nil }
         }
         .onChange(of: commandText) { _, _ in
             selectedSuggestion = 0

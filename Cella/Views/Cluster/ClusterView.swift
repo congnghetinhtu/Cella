@@ -268,6 +268,13 @@ enum ClusterMode: String, CaseIterable {
     case artists = "Artists"
 }
 
+extension Notification.Name {
+    /// Mirrors the artists folder-open scene to the window root so the Metro
+    /// tab bar dims with the rest of the window. Object is the opened pack
+    /// path while the scene is open, or nil after it closes.
+    static let clusterFolderVeil = Notification.Name("clusterFolderVeil")
+}
+
 struct ClusterView: View {
     var viewModel: PlayerViewModel?
     var onPlay: (() -> Void)? = nil
@@ -340,6 +347,11 @@ struct ClusterView: View {
             }
         }
         .animation(.snappy, value: openedPackPath)
+        .onChange(of: openedPackPath) { _, path in
+            // Mirror to the window root: ContentView dims the Metro tab bar
+            // for as long as the artist chooser scene is open.
+            NotificationCenter.default.post(name: .clusterFolderVeil, object: path)
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             // Repair stale persisted path (e.g. library moved) before trusting it.
