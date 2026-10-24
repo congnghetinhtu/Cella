@@ -2,8 +2,9 @@
 //  TopTabBar.swift
 //  Cella
 //
-//  Dual pill-style tab bar — left (Cluster, Cella, Config) and right (Cella Motion, Enhanced LRC).
-//  Includes a "Liquid Glass" sliding selection pill and drag-to-switch.
+//  Metro-style tab bar — the four AppTab pills: Cluster, Cella, Clarc, Config.
+//  "Liquid Glass" sliding selection pill, drag-to-switch, and scroll-wheel
+//  tab toggling (AlbumPillScrollCoordinator); Clarc shows an unsaved-changes dot.
 //
 
 import SwiftUI

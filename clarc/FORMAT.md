@@ -56,6 +56,8 @@ duration: 05:08
   the correspondingly numbered `artist.N` metadata entry. Multiple IDs joined
   by `&` indicate that those artists sing the line together. The marker is
   attribution metadata, not displayed lyric text.
+- A plain `artist: Name` entry acts as `artist.1`. Single-artist files may
+  use either form; writers emit `artist.N` for consistency.
 - A lyric timestamp represents time from the start of the audio. Timestamps
   must be in non-decreasing order. Equal timestamps are allowed for
   simultaneous lines.
@@ -70,6 +72,30 @@ duration: 05:08
   as lyric lines.
 - Unknown metadata keys should be preserved by tools that read and write CLARC.
   Duplicate metadata keys are invalid.
+
+## Reader and writer behavior (reference implementation)
+
+The reader and writer in the Cella app (`Cella/Utilities/ClarcParser.swift`)
+define the practical behavior of CLARC/1 today:
+
+- **Tolerant reading.** Malformed event lines are skipped rather than failing
+  the file. Timestamps are re-sorted into non-decreasing order on read, so a
+  hand-edited out-of-order file plays correctly. Fraction digits other than
+  exact two (`.5`, `.123`) are accepted and padded to milliseconds.
+- **Duplicate metadata.** Duplicates are invalid per the rules above; if they
+  occur, the reader resolves them last-wins instead of erroring. Recognized
+  key matching is case-insensitive.
+- **Legacy rescue.** An old writer bug could emit a classic LRC banner
+  (`[ti:…]`, `[ar:…]`) before the `CLARC/1` marker. When every line before the
+  marker is blank or a `[word:…]` tag, the reader skips the banner and parses
+  normally, healing such files on their next read.
+- **Canonical write order.** The writer emits `title`, then `artist.N` entries
+  in ascending index order, then `writer`, `album`, `duration`, followed by any
+  preserved unknown keys. Timestamps are written as two-digit hundredths
+  (`[MM:SS.xx]`), harmony rows keep their `har` prefix inside the brackets, and
+  vocalist markers are re-emitted between the timestamp and the text. Metadata
+  values are flattened: embedded CR/LF is folded to spaces. The file ends with
+  a trailing newline.
 
 ## Why this first version
 

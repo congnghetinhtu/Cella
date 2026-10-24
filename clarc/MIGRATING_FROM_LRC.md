@@ -2,7 +2,9 @@
 
 CLARC keeps LRC's familiar `[mm:ss.xx]` lyric timestamps. Conversion mainly
 means moving song information into a metadata section and lyrics into a
-separate lyrics section.
+separate lyrics section. Cella's reader also repairs small mistakes — it
+re-sorts timestamps that went out of order and preserves unknown metadata —
+but get the conversion right the first time and the file round-trips clean.
 
 ## Basic conversion
 
@@ -46,8 +48,9 @@ duration: 05:08
 | LRC tag | CLARC field | Notes |
 | --- | --- | --- |
 | `[ti:...]` | `title: ...` | Copy the value after the tag. |
-| `[ar:...]` | `artist.N: ...` | Use one indexed entry per artist when known. Artist entries and vocalist tags are optional. |
+| `[ar:...]` | `artist.N: ...` | Use one indexed entry per artist when known. A single-artist file may use plain `artist: ...`, which acts as `artist.1`. Artist entries and vocalist tags are optional. |
 | `[al:...]` | `album: ...` | Keep punctuation and quotes as literal text; do not escape them. |
+| `[au:...]` | `writer: ...` | Songwriter credit; keep it even when it matches the artist. |
 | `[length:m:ss]` | `duration: mm:ss` | Zero-pad the minute and second fields if needed. |
 | `[by:...]` or other descriptive tags | Same key in `[metadata]` | Preserve useful extra information as a plain `key: value` entry. |
 
