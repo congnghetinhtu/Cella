@@ -738,6 +738,9 @@ struct ContentView: View {
             }
         }
         .onChange(of: selectedTab) { oldTab, tab in
+            // Any navigation retires the artists folder veil — even a switch
+            // that slipped past its tap-swallowing overlay.
+            clusterFolderVeil = false
             // Leaving the LRC Editor pauses its audio (keeps position).
             if oldTab == .enhancedLRC, lrcViewModel.isPlaying {
                 lrcViewModel.togglePlayback()

@@ -352,6 +352,13 @@ struct ClusterView: View {
             // for as long as the artist chooser scene is open.
             NotificationCenter.default.post(name: .clusterFolderVeil, object: path)
         }
+        .onDisappear {
+            // Safety net: any unmount with the scene still open (tab switch
+            // taken internally, library reset) must retire the window veil.
+            if openedPackPath != nil {
+                NotificationCenter.default.post(name: .clusterFolderVeil, object: nil as String?)
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             // Repair stale persisted path (e.g. library moved) before trusting it.
@@ -995,6 +1002,9 @@ struct ClusterView: View {
 
     private func playLibraryArtist(_ artist: LibraryArtist, libraryURL: URL) {
         guard let viewModel, loadingArtistKey == nil else { return }
+        // Retire the folder scene first: closing it before onPlay switches
+        // tabs means the window-root veil mirrors down before unmount.
+        withAnimation(.snappy) { openedPackPath = nil }
         loadingArtistKey = artist.key
         selectedArtistKey = artist.key
         viewModel.playLibraryArtist(artist, libraryURL: libraryURL)
@@ -1069,6 +1079,9 @@ struct ClusterView: View {
 
     private func playArtist(_ pack: CellaPack, artist: PackArtist) {
         guard let viewModel else { return }
+        // Same discipline as playLibraryArtist: retire the folder scene
+        // before the tab switch so the window-root veil always mirrors down.
+        withAnimation(.snappy) { openedPackPath = nil }
         loadingPackURL = pack.url
         viewModel.importViaOpenMix(url: pack.url, startFileName: artist.files.first, blend: false, artistFilter: artist.name)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
