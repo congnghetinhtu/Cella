@@ -731,7 +731,7 @@ struct ClusterView: View {
                 if packs.isEmpty {
                     artistsEmptyState
                 } else {
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 170), spacing: 20)], spacing: 22) {
+                    CenteringFlowLayout(itemWidth: 150, itemHeight: 200, hSpacing: 20, vSpacing: 22) {
                         ForEach(packs) { pack in
                             packFolderCell(pack, libraryURL: lib.url)
                         }
@@ -3238,6 +3238,52 @@ private struct ArtistCircleCell: View {
         }
         .frame(width: 100)
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Centering wrap layout (Artists grid)
+
+/// Wrapping flow layout that centers a partial last row instead of pinning
+/// it against the left column edge (LazyVGrid leaves the tail row clustered,
+/// which read as a broken, half-empty screen on wide windows). Non-lazy by
+/// design — the Artists grid holds one folder cell per playlist pack, never
+/// thousands of items.
+private struct CenteringFlowLayout: Layout {
+    var itemWidth: CGFloat
+    var itemHeight: CGFloat
+    var hSpacing: CGFloat
+    var vSpacing: CGFloat
+
+    private func columns(for width: CGFloat) -> Int {
+        guard width > itemWidth else { return 1 }
+        return max(1, Int(((width + hSpacing) / (itemWidth + hSpacing)).rounded(.down)))
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? 0
+        guard width > 0, !subviews.isEmpty else { return .zero }
+        let rows = Int(ceil(Double(subviews.count) / Double(columns(for: width))))
+        return CGSize(
+            width: width,
+            height: CGFloat(rows) * itemHeight + CGFloat(rows - 1) * vSpacing
+        )
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let cols = columns(for: bounds.width)
+        for (index, view) in subviews.enumerated() {
+            let row = index / cols
+            let rowStart = row * cols
+            let inRowCount = min(cols, subviews.count - rowStart)
+            let rowWidth = CGFloat(inRowCount) * itemWidth + CGFloat(inRowCount - 1) * hSpacing
+            let rowX = bounds.minX + (bounds.width - rowWidth) / 2
+            let x = rowX + CGFloat(index - rowStart) * (itemWidth + hSpacing)
+            let y = bounds.minY + CGFloat(row) * (itemHeight + vSpacing)
+            view.place(
+                at: CGPoint(x: x, y: y),
+                proposal: ProposedViewSize(width: itemWidth, height: itemHeight)
+            )
+        }
     }
 }
 
