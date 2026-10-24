@@ -11,9 +11,9 @@ struct EnhancedLRCView: View {
     @State private var keyMonitor: Any?
     @State private var isLoading = false
     // First-visit format guide: auto-opens once per install (clarcGuideSeen);
-    // clarcGuideOpen gates the R/M key monitor while the card is expanded.
+    // clarcGuideUp gates the R/M key monitor while the overlay is up.
     @AppStorage("clarcGuideSeen") private var clarcGuideSeen = false
-    @State private var clarcGuideOpen = false
+    @State private var clarcGuideUp = false
     @State private var showBulkPaste = false
     @State private var bulkText = ""
     /// Inline metadata-adjustment panel below the meta bar.
@@ -94,24 +94,18 @@ struct EnhancedLRCView: View {
         }
         .padding(.horizontal, CardStyle.horizontalPadding)
         .padding(.vertical, CardStyle.verticalPadding)
-        // Format guide: floating pill docked at the editor's bottom-right,
-        // raised above the tools bar so it never sits on the toolbar.
+        // Floating launch pill docked at the editor's bottom-right, raised
+        // above the tools bar; the card it opens presents full-screen.
         .overlay(alignment: .bottomTrailing) {
-            ClarcGuideFloating(isOpen: $clarcGuideOpen)
+            ClarcGuidePill(onTap: { requestClarcGuide() })
                 .padding(.trailing, 16)
                 .padding(.bottom, 58)
         }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
                 guard let viewModel, viewModel.currentTrackURL != nil else { return event }
-                // Format guide expanded: Esc collapses it, everything else waits.
-                if clarcGuideOpen {
-                    if event.keyCode == 53 {
-                        withAnimation(.snappy) { clarcGuideOpen = false }
-                        return nil
-                    }
-                    return event
-                }
+                // Format guide up at the window root — R/M waits.
+                if clarcGuideUp { return event }
                 // Typing in paste box / line fields — let R/M type, don't record.
                 if NSApp.keyWindow?.firstResponder is NSTextView { return event }
                 // Behind the bulk-paste sheet, or with Command held (menu
@@ -153,6 +147,11 @@ struct EnhancedLRCView: View {
             hasAudio = viewModel.currentTrackURL != nil
             maybeAutoShowClarcGuide()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clarcGuideRequest)) { note in
+            // True/false mirror: the guide overlay retires the R/M swallow
+            // exactly when it is dismissed at the window root.
+            clarcGuideUp = note.object as? Bool ?? false
+        }
         .sheet(item: $viewModel.pendingConversion) { pending in
             ClarcConversionSheet(
                 pending: pending,
@@ -177,7 +176,8 @@ struct EnhancedLRCView: View {
 
     private func requestClarcGuide() {
         clarcGuideSeen = true
-        withAnimation(.snappy) { clarcGuideOpen = true }
+        clarcGuideUp = true
+        NotificationCenter.default.post(name: .clarcGuideRequest, object: true)
     }
 
     // MARK: - Header
@@ -260,15 +260,6 @@ struct EnhancedLRCView: View {
             .buttonStyle(AeroButtonStyle())
             .disabled(viewModel.currentTrackURL == nil)
             .opacity(viewModel.currentTrackURL == nil ? 0.4 : 1.0)
-
-            Button {
-                requestClarcGuide()
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(.system(size: 14, weight: .medium))
-            }
-            .buttonStyle(AeroButtonStyle())
-            .help("How CLARC works — open the format guide")
 
             if viewModel.currentTrackURL != nil {
                 Button {
@@ -695,6 +686,15 @@ struct EnhancedLRCView: View {
             .buttonStyle(AeroButtonStyle())
             .disabled(!viewModel.canUndo)
             .opacity(viewModel.canUndo ? 1.0 : 0.4)
+
+            Button {
+                requestClarcGuide()
+            } label: {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 14, weight: .medium))
+            }
+            .buttonStyle(AeroButtonStyle())
+            .help("How CLARC works — open the format guide")
         }
         .padding(sectionPadding)
         .background(theme.screenBackground.opacity(0.55))

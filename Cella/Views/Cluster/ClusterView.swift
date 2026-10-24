@@ -317,10 +317,9 @@ struct ClusterView: View {
     @State private var showAllArtists = false
     @State private var openedPackPath: String?
     /// First-visit walkthrough: auto-opens once per install (`clusterGuideSeen`).
-    /// Presentation is local — a floating pill docked at the tab's bottom-right
-    /// that expands into the walkthrough card in place.
+    /// Presentation lives at the window root (ContentView) — ClusterView only
+    /// posts .clusterGuideRequest, so the dim covers the tab bar as well.
     @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
-    @State private var showGuideCard = false
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -360,17 +359,13 @@ struct ClusterView: View {
                 NotificationCenter.default.post(name: .clusterFolderVeil, object: nil as String?)
             }
         }
-        // Format guide: floating pill docked at the tab's bottom-right that
-        // expands into the walkthrough card in place. Hidden while the
-        // folder-open scene dims everything.
+        // Floating launch pill docked at the tab's bottom-right; hidden
+        // while the folder-open scene dims everything.
         .overlay(alignment: .bottomTrailing) {
             if openedPackPath == nil {
-                ClusterGuideFloating(
-                    isOpen: $showGuideCard,
-                    libraryName: library.map { libraryTitle($0) } ?? "Your library"
-                )
-                .padding(.trailing, 22)
-                .padding(.bottom, 22)
+                ClusterGuidePill(onTap: { requestGuide() })
+                    .padding(.trailing, 22)
+                    .padding(.bottom, 22)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1569,10 +1564,12 @@ struct ClusterView: View {
         }
     }
 
+    /// The overlay itself lives at the window root (ContentView owns it, so
+    /// the dim covers the tab bar too) — presenting is just a post.
     private func requestGuide() {
-        guard library != nil else { return }
+        guard let current = library else { return }
         clusterGuideSeen = true
-        withAnimation(.snappy) { showGuideCard = true }
+        NotificationCenter.default.post(name: .clusterGuideRequest, object: libraryTitle(current))
     }
 
     private func autoLoadDefault() -> Bool {
