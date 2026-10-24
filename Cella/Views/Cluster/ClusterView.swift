@@ -327,7 +327,19 @@ struct ClusterView: View {
             } else {
                 emptyState
             }
+
+            // Folder open scene (Android folder expand): the dim spans the
+            // whole tab — header, stats and toolbar included — so the artist
+            // chooser reads as full-screen instead of a panel under the chrome.
+            if let library, let path = openedPackPath,
+               let pack = library.packs.first(where: { $0.url.path == path }) {
+                Color.black.opacity(0.45).ignoresSafeArea()
+                    .onTapGesture { withAnimation(.snappy) { openedPackPath = nil } }
+                packFolderOpen(pack, libraryURL: library.url)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
         }
+        .animation(.snappy, value: openedPackPath)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             // Repair stale persisted path (e.g. library moved) before trusting it.
@@ -742,16 +754,7 @@ struct ClusterView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Folder open overlay (Android folder expand)
-            if let path = openedPackPath,
-               let pack = packs.first(where: { $0.url.path == path }) {
-                Color.black.opacity(0.45).ignoresSafeArea()
-                    .onTapGesture { withAnimation(.snappy) { openedPackPath = nil } }
-                packFolderOpen(pack, libraryURL: lib.url)
-                    .transition(.scale(scale: 0.92).combined(with: .opacity))
-            }
         }
-        .animation(.snappy, value: openedPackPath)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
