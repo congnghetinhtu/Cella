@@ -86,7 +86,7 @@ enum SeafoamCursor {
     }
 
     private static func currentThemeName() -> String {
-        UserDefaults.standard.string(forKey: "themeOverride") ?? "dark"
+        UserDefaults.standard.string(forKey: "themeOverride") ?? "seafoam"
     }
 
     // MARK: - Morph frame

@@ -4,12 +4,13 @@ import SwiftUI
 ///
 /// The stage doubles as an orchestra: the ten performer seats along the arc
 /// are the ten EQ bands (31 Hz → 16 kHz), shown locked per preset.
-/// Each curated preset bundles an EQ curve (seats) and a surround staging —
-/// one tap is a full audio mood.  The visual theme is always Frutiger Aurora
-/// and cannot be changed from this tab.
+/// Each curated preset bundles the look (its paired theme), the EQ curve
+/// (seats) and the surround staging — one tap is a full audio mood. The
+/// stage follows the app theme; drawing a custom curve leaves it alone.
 struct OrquestaView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
+    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
     @AppStorage("surroundMode") private var surroundMode: String = SurroundMode.off.rawValue
     @AppStorage("orquestaPresetID") private var presetID: String = OrquestaPreset.storageKeyEmpty
@@ -91,7 +92,8 @@ struct OrquestaView: View {
         .onDisappear {
             stopBreathing()
         }
-        .environment(\.theme, .frutiger)  // Always Frutiger Aurora — cannot be changed from this tab
+        // The card follows the app theme, which each preset tap sets from its
+        // paired themeID — the stage seats, chips and text all re-tint with it.
     }
 
     // MARK: - Breathing Animation
@@ -594,6 +596,13 @@ struct OrquestaView: View {
             viewModel.selectPreset(preset)
             surroundMode = preset.surround.rawValue
             viewModel.applySurround(preset.surround)
+            // The full mood: a preset bundles the look too. Natural pairs
+            // with seafoam, Cálido with dark, Océano with mint, Aurora with
+            // bipolar, Frutiger Aurora with frutiger. The custom preset is a
+            // sound-only action, so it never re-themes the app.
+            if !preset.isCustom {
+                themeOverride = preset.themeID
+            }
         }
     }
 
