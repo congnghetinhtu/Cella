@@ -34,6 +34,10 @@ struct ContentView: View {
     @State private var pendingLRCAudioURL: URL?
     @State private var showCommandPalette = false
     @State private var commandText = ""
+    /// Palette suggestions/placeholder — refreshed on text change and on
+    /// open only (see refreshSuggestions), so playback ticks never rebuild them.
+    @State private var paletteSuggestions: [CommandSuggestion] = []
+    @State private var commandPlaceholder = ""
     @State private var commandOrigin: CGPoint = .zero
     @State private var mouseMonitor: Any?
     @State private var keyMonitor: Any?
@@ -68,7 +72,7 @@ struct ContentView: View {
     // MARK: - Command palette suggestions
 
     private var suggestionCount: Int {
-        commandSuggestions(for: commandText).count
+        paletteSuggestions.count
     }
 
     private var effectiveSuggestion: Int {
@@ -77,22 +81,29 @@ struct ContentView: View {
         return min(max(0, selectedSuggestion), count - 1)
     }
 
+    /// Palette suggestions are computed once per text change / palette open
+    /// into `paletteSuggestions` — never per render. The palette re-renders
+    /// on every playback tick, and rescanning the whole lyric file there
+    /// ("jump to lyric" per keystroke) froze typing on long files.
+    private func refreshSuggestions() {
+        paletteSuggestions = commandSuggestions(for: commandText)
+        let current = viewModel.currentLyrics
+            .last(where: { $0.time <= viewModel.currentTime })
+        commandPlaceholder = current.map { "current line: \($0.text)" }
+            ?? (viewModel.currentLyrics.isEmpty ? "type a command" : "current line: —")
+    }
+
     private func commandSuggestions(for text: String) -> [CommandSuggestion] {
         var out: [CommandSuggestion] = []
         let query = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let lyrics = viewModel.currentLyrics
-        if !lyrics.isEmpty && query.hasPrefix("lyric ") {
-            let search = String(query.dropFirst(6)).trimmingCharacters(in: .whitespaces)
-            if !search.isEmpty {
-                let upper = search.uppercased()
-                var found = 0
-                for line in lyrics where found < 5 {
-                    if line.text.uppercased().contains(upper) {
-                        out.append(.lyric(line.time, line.text))
-                        found += 1
-                    }
-                }
+        // The line at the playhead, in place of the old jump-list scan:
+        // shown as soon as the palette opens, no search, no allocations.
+        if query.isEmpty || query.hasPrefix("lyric"),
+           !viewModel.currentLyrics.isEmpty {
+            let time = viewModel.currentTime
+            if let current = viewModel.currentLyrics.last(where: { $0.time <= time }) {
+                out.append(.currentLine(current.time, current.text))
             }
         }
 
@@ -192,7 +203,7 @@ struct ContentView: View {
         case .track(let index, _):
             if selectedTab != .cella { selectedTab = .cella }
             viewModel.jumpToTrack(at: index)
-        case .lyric(let time, _):
+        case .lyric(let time, _), .currentLine(let time, _):
             if selectedTab != .cella { selectedTab = .cella }
             if viewModel.lyricsMode == .off {
                 withAnimation(.snappy) { viewModel.lyricsMode = .full }
@@ -527,18 +538,10 @@ struct ContentView: View {
                     focus: $isCommandFocused,
                     origin: commandOrigin,
                     input: commandInput,
-                    suggestions: { commandSuggestions(for: $0) },
+                    suggestions: paletteSuggestions,
                     selectedSuggestion: effectiveSuggestion,
                     onHoverSelect: { selectedSuggestion = $0 },
-                    placeholder: viewModel.currentLyrics.isEmpty
-                        ? "jump to lyric"
-                        : {
-                            let current = viewModel.currentLyrics
-                                .last(where: { $0.time <= viewModel.currentTime })
-                                ?? viewModel.currentLyrics.first
-                            return current.map { "jump to lyric: \($0.text)" }
-                                ?? "jump to lyric"
-                        }(),
+                    placeholder: commandPlaceholder,
                     onSuggestionTap: selectSuggestion,
                     onSubmit: {
                         let trimmed = commandText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -564,7 +567,7 @@ struct ContentView: View {
                             stopMouseTracking()
                             restoreMainFocus()
                         } else {
-                            let suggestions = commandSuggestions(for: commandText)
+                            let suggestions = paletteSuggestions
                             if !suggestions.isEmpty {
                                 let index = min(max(0, selectedSuggestion), suggestions.count - 1)
                                 selectSuggestion(suggestions[index])
@@ -759,9 +762,13 @@ struct ContentView: View {
         }
         .onChange(of: commandText) { _, _ in
             selectedSuggestion = 0
+            refreshSuggestions()
         }
         .onChange(of: showCommandPalette) { _, visible in
-            if !visible {
+            if visible {
+                // Fresh palette state: the current line at open time.
+                refreshSuggestions()
+            } else {
                 bloomOnNextTabChange = false
                 restoreMainFocus()
             }
@@ -899,6 +906,7 @@ private enum CommandSuggestion: Identifiable {
     case tab(AppTab)
     case track(Int, TrackAsset)
     case lyric(Double, String)
+    case currentLine(Double, String)
     case command(String, String) // id, title
 
     var id: String {
@@ -906,6 +914,7 @@ private enum CommandSuggestion: Identifiable {
         case .tab(let tab): return "tab-\(tab.rawValue)"
         case .track(let index, let track): return "track-\(index)-\(track.url.path)"
         case .lyric(let time, let text): return "lyric-\(time)-\(text)"
+        case .currentLine(let time, let text): return "current-\(time)-\(text)"
         case .command(let id, _): return "cmd-\(id)"
         }
     }
@@ -914,7 +923,7 @@ private enum CommandSuggestion: Identifiable {
         switch self {
         case .tab(let tab): return tab.rawValue
         case .track(_, let track): return track.trackTitle
-        case .lyric(_, let text): return text
+        case .lyric(_, let text), .currentLine(_, let text): return text
         case .command(_, let title): return title
         }
     }
@@ -928,6 +937,8 @@ private enum CommandSuggestion: Identifiable {
         case .lyric(let time, _):
             let total = Int(time)
             return String(format: "%02d:%02d", total / 60, total % 60)
+        case .currentLine:
+            return "Current line"
         case .command(let id, _):
             switch id {
             case "insertInit": return "At 00:00.00"
@@ -946,7 +957,7 @@ private struct CommandPaletteBar: View {
     let focus: FocusState<Bool>.Binding
     let origin: CGPoint
     let input: CommandInputController
-    let suggestions: (String) -> [CommandSuggestion]
+    let suggestions: [CommandSuggestion]
     let selectedSuggestion: Int
     let onHoverSelect: (Int) -> Void
     let placeholder: String
@@ -958,7 +969,7 @@ private struct CommandPaletteBar: View {
     private static let barTopHeight: CGFloat = 60
 
     var body: some View {
-        let items = suggestions(text)
+        let items = suggestions
         let hasItems = !items.isEmpty
         VStack(alignment: .leading, spacing: 6) {
             Text("Command Palette")
@@ -1102,6 +1113,7 @@ private struct CommandSuggestionRow: View {
         case .tab: return "arrow.up.left.and.arrow.down.right"
         case .track: return "music.note"
         case .lyric: return "quote.opening"
+        case .currentLine: return "text.quote"
         case .command: return "plus.circle"
         }
     }
@@ -1111,6 +1123,7 @@ private struct CommandSuggestionRow: View {
         case .tab: return theme.dotActive
         case .track: return theme.haloSecondary
         case .lyric: return theme.haloAccent
+        case .currentLine: return theme.dotActive
         case .command: return theme.haloWarm
         }
     }
