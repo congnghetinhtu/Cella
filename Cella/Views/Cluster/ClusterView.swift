@@ -726,86 +726,48 @@ struct ClusterView: View {
     // Android app folder style: packs as folders with stacked preview, tap opens folder.
     private func artistsTimeline(_ lib: ClusterLibrary) -> some View {
         let packs = lib.packs.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
-        return GeometryReader { geo in
-            let metrics = artistsGridMetrics(count: packs.count, size: geo.size)
-            ZStack {
-                ScrollView {
-                    if packs.isEmpty {
-                        artistsEmptyState
-                    } else {
-                        CenteringFlowLayout(itemWidth: metrics.tile, itemHeight: metrics.tile + metrics.labelHeight, hSpacing: metrics.hSpace, vSpacing: metrics.vSpace) {
-                            ForEach(packs) { pack in
-                                packFolderCell(pack, libraryURL: lib.url, tile: metrics.tile)
-                            }
+        return ZStack {
+            ScrollView {
+                if packs.isEmpty {
+                    artistsEmptyState
+                } else {
+                    CenteringFlowLayout(itemWidth: 150, itemHeight: 200, hSpacing: 20, vSpacing: 22) {
+                        ForEach(packs) { pack in
+                            packFolderCell(pack, libraryURL: lib.url)
                         }
-                        .padding(.horizontal, CardStyle.horizontalPadding)
-                        .padding(.top, 18)
-                        .padding(.bottom, 30)
                     }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // Folder open overlay (Android folder expand)
-                if let path = openedPackPath,
-                   let pack = packs.first(where: { $0.url.path == path }) {
-                    Color.black.opacity(0.45).ignoresSafeArea()
-                        .onTapGesture { withAnimation(.snappy) { openedPackPath = nil } }
-                    packFolderOpen(pack, libraryURL: lib.url)
-                        .transition(.scale(scale: 0.92).combined(with: .opacity))
+                    .padding(.horizontal, CardStyle.horizontalPadding)
+                    .padding(.vertical, 18)
+                    .padding(.bottom, 30)
                 }
             }
-            .animation(.snappy, value: openedPackPath)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Folder open overlay (Android folder expand)
+            if let path = openedPackPath,
+               let pack = packs.first(where: { $0.url.path == path }) {
+                Color.black.opacity(0.45).ignoresSafeArea()
+                    .onTapGesture { withAnimation(.snappy) { openedPackPath = nil } }
+                packFolderOpen(pack, libraryURL: lib.url)
+                    .transition(.scale(scale: 0.92).combined(with: .opacity))
+            }
         }
+        .animation(.snappy, value: openedPackPath)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Launchpad-style fill: pick the tile size that makes the folder grid
-    /// consume the visible viewport (width and height) instead of hugging
-    /// the top edge with one thin row of pin-sized cells. Scans column
-    /// counts and keeps the largest tile that keeps every row inside the
-    /// viewport; clamps to a compact floor so huge libraries still wrap
-    /// into a scrollable grid.
-    private func artistsGridMetrics(count: Int, size: CGSize) -> (tile: CGFloat, labelHeight: CGFloat, hSpace: CGFloat, vSpace: CGFloat) {
-        let hSpace: CGFloat = 20
-        let vSpace: CGFloat = 22
-        let labelHeight: CGFloat = 52 // spacing + name + mono count under the tile
-        let minTile: CGFloat = 118
-        let maxTile: CGFloat = 340
-        guard count > 0 else { return (150, labelHeight, hSpace, vSpace) }
-        let width = max(360, size.width - 2 * CardStyle.horizontalPadding)
-        let height = max(300, size.height - 48) // .top 18 + .bottom 30 paddings
-        var tile: CGFloat = minTile
-        var fits = false
-        for cols in 1...min(count, 12) {
-            let rows = Int(ceil(Double(count) / Double(cols)))
-            let tileByWidth = (width - CGFloat(cols - 1) * hSpace) / CGFloat(cols)
-            let tileByHeight = (height - CGFloat(rows - 1) * vSpace) / CGFloat(rows) - labelHeight
-            let candidate = min(tileByWidth, tileByHeight)
-            if candidate >= minTile && candidate > tile {
-                tile = min(candidate, maxTile)
-                fits = true
-            }
-        }
-        if !fits { tile = minTile }
-        return (tile.rounded(), labelHeight, hSpace, vSpace)
-    }
-
-    private func packFolderCell(_ pack: CellaPack, libraryURL: URL, tile: CGFloat) -> some View {
-        let radius = max(12, tile * 0.1467)          // 22pt at the 150pt reference tile
-        let circle = tile * 0.3733                   // 56pt at reference
-        let inner = tile * 0.8                       // 120pt preview grid at reference
-        let gridGap = circle * 0.11                  // 6pt at reference
+    private func packFolderCell(_ pack: CellaPack, libraryURL: URL) -> some View {
         let artists = filteredPackArtists(pack)
         return VStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: radius)
+                RoundedRectangle(cornerRadius: 22)
                     .fill(theme.screenBackground.opacity(0.55))
-                    .frame(width: tile, height: tile)
+                    .frame(width: 150, height: 150)
                     .background(
-                        RoundedRectangle(cornerRadius: radius)
+                        RoundedRectangle(cornerRadius: 22)
                             .fill(.ultraThinMaterial)
                     )
                     .overlay(
-                        RoundedRectangle(cornerRadius: radius)
+                        RoundedRectangle(cornerRadius: 22)
                             .fill(
                                 LinearGradient(
                                     colors: [.white.opacity(0.22), .white.opacity(0.02)],
@@ -815,20 +777,20 @@ struct ClusterView: View {
                             )
                             .allowsHitTesting(false)
                     )
-                    .overlay(RoundedRectangle(cornerRadius: radius).stroke(.white.opacity(0.18), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.25), radius: 10)
                 // Stacked preview 2x2 (top 4 artists)
-                LazyVGrid(columns: [GridItem(.flexible(), spacing: gridGap), GridItem(.flexible(), spacing: gridGap)], spacing: gridGap) {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                     ForEach(artists.prefix(4)) { pa in
                         if let libArtist = libraryArtists.first(where: { $0.key == pa.key }) {
                             ZStack {
-                                Circle().fill(theme.textSecondary.opacity(0.12)).frame(width: circle, height: circle)
+                                Circle().fill(theme.textSecondary.opacity(0.12)).frame(width: 56, height: 56)
                                 if let thumb = artistThumbs[libArtist.key] {
                                     Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
-                                        .frame(width: circle, height: circle).clipShape(Circle())
+                                        .frame(width: 56, height: 56).clipShape(Circle())
                                 } else {
                                     Text(String(libArtist.name.prefix(1)).uppercased())
-                                        .font(.system(size: circle * 0.36, weight: .bold, design: .rounded))
+                                        .font(.system(size: 20, weight: .bold, design: .rounded))
                                         .foregroundStyle(theme.dotActive)
                                 }
                             }
@@ -836,7 +798,7 @@ struct ClusterView: View {
                         }
                     }
                 }
-                .frame(width: inner, height: inner)
+                .frame(width: 120, height: 120)
             }
             .contentShape(Rectangle())
             .onTapGesture {
@@ -844,11 +806,11 @@ struct ClusterView: View {
             }
             Text(pack.name)
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(theme.textPrimary).lineLimit(1).frame(width: tile)
+                .foregroundStyle(theme.textPrimary).lineLimit(1).frame(width: 150)
             Text("\(artists.count) artists")
                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(theme.textSecondary)
         }
-        .frame(width: tile)
+        .frame(width: 150)
     }
 
     private func filteredPackArtists(_ pack: CellaPack) -> [PackArtist] {
