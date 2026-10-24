@@ -94,13 +94,6 @@ struct EnhancedLRCView: View {
         }
         .padding(.horizontal, CardStyle.horizontalPadding)
         .padding(.vertical, CardStyle.verticalPadding)
-        // Floating launch pill docked at the editor's bottom-right, raised
-        // above the tools bar; the card it opens presents full-screen.
-        .overlay(alignment: .bottomTrailing) {
-            ClarcGuidePill(onTap: { requestClarcGuide() })
-                .padding(.trailing, 16)
-                .padding(.bottom, 58)
-        }
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
                 guard let viewModel, viewModel.currentTrackURL != nil else { return event }
@@ -690,11 +683,10 @@ struct EnhancedLRCView: View {
             Button {
                 requestClarcGuide()
             } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(.system(size: 14, weight: .medium))
+                Label("How to Clarc?", systemImage: "questionmark.circle")
+                    .font(.system(size: 13, weight: .medium))
             }
             .buttonStyle(AeroButtonStyle())
-            .help("How CLARC works — open the format guide")
         }
         .padding(sectionPadding)
         .background(theme.screenBackground.opacity(0.55))

@@ -6,12 +6,13 @@
 //  cards covering the CLARC/1 lyric format — spec: clarc/FORMAT.md in the
 //  repo root: the magic line and file layout, the [metadata] section, the
 //  timed [lyrics] section, vocalist/harmony/DUO attribution, and the
-//  LRC → CLARC conversion flow. Auto-opens once per install
-//  (clarcGuideSeen); the header "?" button reopens it any time.
+//  LRC → CLARC conversion flow. Presents full-screen at the window root;
+//  auto-opens once per install (clarcGuideSeen), and the "How to Clarc?"
+//  button next to Undo in the editor's tools bar reopens it any time.
 //
-//  Presentation mirrors ClusterGuide: the editor posts .clarcGuideRequest
-//  (object = true/false) and the overlay lives at the window root
-//  (ContentView), so the dim covers the Metro tab bar too.
+//  The editor posts .clarcGuideRequest (object = true/false): true opens
+//  the card at the window root, false mirrors a dismissal so the editor's
+//  R/M key monitor resumes.
 //
 //  Sample rows are the real "Trễ Giờ Cơm" lines from clarc/FORMAT.md.
 //
@@ -574,52 +575,3 @@ private struct GuideRow: View {
     }
 }
 
-// MARK: - Floating launch pill (docked at the editor's bottom-right)
-
-/// A floating glass pill that opens the format walkthrough card, which
-/// presents full-screen at the window root. Stateless by design — the
-/// pill only posted the request; the modal owns its own presentation.
-struct ClarcGuidePill: View {
-    var onTap: () -> Void
-    @Environment(\.theme) private var theme
-    @State private var isHovering = false
-
-    var body: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "questionmark")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(theme.dotActive)
-            Text("Guide")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(theme.textPrimary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(
-            Capsule()
-                .fill(theme.dotActive.opacity(0.14))
-        )
-        .background(
-            Capsule()
-                .fill(.ultraThinMaterial)
-        )
-        .overlay(
-            Capsule()
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0.22), .white.opacity(0.03)],
-                        startPoint: .top,
-                        endPoint: .center
-                    )
-                )
-        )
-        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
-        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
-        .scaleEffect(isHovering ? 1.06 : 1.0)
-        .animation(.snappy, value: isHovering)
-        .contentShape(Capsule())
-        .onHover { isHovering = $0 }
-        .onTapGesture(perform: onTap)
-        .help("How CLARC works — open the format guide")
-    }
-}
