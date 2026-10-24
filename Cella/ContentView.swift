@@ -19,6 +19,11 @@ struct ContentView: View {
     @StateObject private var commandInput = CommandInputController()
     @State private var detailPack: CellaPack?
     @State private var displayedPack: CellaPack?
+    /// Cluster guide overlay state (opened via .clusterGuideRequest).
+    @State private var showClusterGuide = false
+    @State private var clusterGuideName = ""
+    /// Shared with ClusterView — the guide only auto-opens on first visit.
+    @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
     @State private var pendingLRCAudioURL: URL?
     @State private var showCommandPalette = false
     @State private var commandText = ""
@@ -222,6 +227,13 @@ struct ContentView: View {
                 self.isFocused = true
             }
         }
+    }
+
+    /// Any dismissal (✕, Esc, backdrop, Get Started) marks the guide seen so it
+    /// never auto-opens again, even when the user skips through it.
+    private func dismissClusterGuide() {
+        clusterGuideSeen = true
+        withAnimation(.snappy) { showClusterGuide = false }
     }
 
     private var bloomTransition: AnyTransition {
@@ -455,6 +467,16 @@ struct ContentView: View {
             .opacity(detailPack != nil ? 1 : 0)
             .allowsHitTesting(detailPack != nil)
 
+            // Cluster guide — presented at the window root so the dim covers
+            // the Metro tab bar too. ClusterView posts .clusterGuideRequest.
+            if showClusterGuide {
+                ClusterGuideOverlay(
+                    libraryName: clusterGuideName,
+                    onClose: { dismissClusterGuide() }
+                )
+                .transition(.scale(scale: 0.95).combined(with: .opacity))
+            }
+
             // Command palette — minimal input bar at cursor
             if showCommandPalette {
                 Color.black.opacity(0.15)
@@ -636,6 +658,10 @@ struct ContentView: View {
                 restoreMainFocus()
                 return .handled
             }
+            if showClusterGuide {
+                dismissClusterGuide()
+                return .handled
+            }
             if isEditingText { return .ignored }
             return .ignored
         }
@@ -679,6 +705,11 @@ struct ContentView: View {
             default:
                 break
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clusterGuideRequest)) { note in
+            guard let name = note.object as? String else { return }
+            clusterGuideName = name
+            withAnimation(.snappy) { showClusterGuide = true }
         }
         .onChange(of: commandText) { _, _ in
             selectedSuggestion = 0

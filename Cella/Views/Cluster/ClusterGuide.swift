@@ -10,6 +10,15 @@
 
 import SwiftUI
 
+// MARK: - Cross-view signal
+
+extension Notification.Name {
+    /// ClusterView posts this to present the guide (object = library display
+    /// name). The overlay itself lives at the window root (ContentView), so
+    /// the dim covers the tab bar too.
+    static let clusterGuideRequest = Notification.Name("clusterGuideRequest")
+}
+
 // MARK: - Guide overlay
 
 struct ClusterGuideOverlay: View {

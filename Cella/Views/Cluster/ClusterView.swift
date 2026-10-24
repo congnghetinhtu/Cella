@@ -309,10 +309,10 @@ struct ClusterView: View {
     @State private var artistPackFilter: String?
     @State private var showAllArtists = false
     @State private var openedPackPath: String?
-    /// First-visit walkthrough: auto-opens once per install; the toolbar
-    /// guide button reopens it any time.
+    /// First-visit walkthrough: auto-opens once per install (`clusterGuideSeen`).
+    /// Presentation lives at the window root (ContentView) — ClusterView only
+    /// posts .clusterGuideRequest, so the dim covers the tab bar as well.
     @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
-    @State private var showGuide = false
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -500,14 +500,6 @@ struct ClusterView: View {
             },
             onCommitDrop: { pack, rows in commitDrop(pack: pack, rows: rows) }
         ))
-        .overlay(alignment: .center) {
-            if showGuide, let lib = library {
-                ClusterGuideOverlay(
-                    libraryName: libraryTitle(lib),
-                    onClose: { dismissGuide() }
-                )
-            }
-        }
     }
 
     private var statsBar: some View {
@@ -692,7 +684,7 @@ struct ClusterView: View {
             }
 
             Button {
-                withAnimation(.smooth) { showGuide = true }
+                requestGuide()
             } label: {
                 Image(systemName: "questionmark.circle").font(.system(size: 12))
                     .foregroundStyle(theme.textSecondary)
@@ -1041,7 +1033,8 @@ struct ClusterView: View {
             reduceMotion: reduceMotion,
             onPlay: { playPack(pack) },
             onTap: { onOpenDetail?(pack) },
-            onDropFiles: { urls in stageDrop(urls, into: pack) }
+            onDropFiles: { urls in stageDrop(urls, into: pack) },
+            onPlayArtist: { playArtist(pack, artist: $0) }
         )
         .animation(.snappy, value: loadingPackURL)
         .contextMenu {
@@ -1527,16 +1520,19 @@ struct ClusterView: View {
     /// (the empty state carries its own welcome), and only on the first
     /// visit ever. Short delay so the entrance plays over a settled grid.
     private func maybeAutoShowGuide() {
-        guard library != nil, !clusterGuideSeen, !showGuide else { return }
+        guard library != nil, !clusterGuideSeen else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
             guard library != nil, !clusterGuideSeen else { return }
-            withAnimation(.smooth) { showGuide = true }
+            requestGuide()
         }
     }
 
-    private func dismissGuide() {
+    /// The overlay itself lives at the window root (ContentView owns it, so
+    /// the dim covers the tab bar too) — presenting is just a post.
+    private func requestGuide() {
+        guard let current = library else { return }
         clusterGuideSeen = true
-        withAnimation(.smooth) { showGuide = false }
+        NotificationCenter.default.post(name: .clusterGuideRequest, object: libraryTitle(current))
     }
 
     private func autoLoadDefault() -> Bool {
@@ -1580,6 +1576,8 @@ private struct PackCardView: View {
     var onPlay: () -> Void
     var onTap: () -> Void
     var onDropFiles: ([URL]) -> Void = { _ in }
+    /// Artist chip tap — plays that artist's tracks from this pack.
+    var onPlayArtist: (PackArtist) -> Void = { _ in }
 
     @Environment(\.theme) private var theme
     @State private var isHovering = false
@@ -1688,6 +1686,9 @@ private struct PackCardView: View {
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
                                 .background(Capsule().fill(theme.textSecondary.opacity(0.08)))
+                                .contentShape(Capsule())
+                                .onTapGesture { onPlayArtist(a) }
+                                .help("Play \(a.name)")
                             }
                         }
                     }
