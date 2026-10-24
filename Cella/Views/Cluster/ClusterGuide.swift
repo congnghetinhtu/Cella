@@ -31,7 +31,7 @@ struct ClusterGuideOverlay: View {
     @State private var step = 0
     @State private var forward = true
 
-    private let pageCount = 5
+    private let pageCount = 6
 
     /// Directional page change: new page slides in from the side you move toward.
     private var pageTransition: AnyTransition {
@@ -93,6 +93,7 @@ struct ClusterGuideOverlay: View {
             PageMeta(title: "Meet CueLab", icon: "list.bullet.rectangle.fill"),
             PageMeta(title: "Getting songs in", icon: "tray.and.arrow.down"),
             PageMeta(title: "Making playlists", icon: "folder.badge.plus"),
+            PageMeta(title: "The Metro Glass look", icon: "sparkles"),
         ]
     }
 
@@ -234,7 +235,8 @@ struct ClusterGuideOverlay: View {
             case 1: packTypesPage
             case 2: cueLabPage
             case 3: addSongsPage
-            default: makePlaylistsPage
+            case 4: makePlaylistsPage
+            default: metroGlassPage
             }
         }
         .frame(maxHeight: .infinity, alignment: .top)
@@ -316,26 +318,181 @@ struct ClusterGuideOverlay: View {
         )
     }
 
-    /// Page 2 — OpenCella vs Cella Structured, using the real classification.
+    /// Page 2 — OpenCella vs Cella Structured, with the real folder layout
+    /// each kind scans (mirrors ClusterLibrary's discovery rules).
     private var packTypesPage: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            GuideRow(
-                icon: CellaPackType.openCella.icon,
-                title: CellaPackType.openCella.label,
-                text: "No .cue sheets — metadata comes from .lrc tags and folder names, and songs show as one flat, always-visible list."
-            )
-            GuideRow(
-                icon: CellaPackType.structured.icon,
-                title: CellaPackType.structured.label,
-                text: "Each album carries a .cue sheet. The sheet is authoritative: track order, titles and artists play back exactly as written."
-            )
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                packTypePanel(
+                    type: .openCella,
+                    tree: [
+                        TreeLine(name: "MyPlaylist.cella", style: .root),
+                        TreeLine(name: "├─ 01 Skyline.flac", style: .plain),
+                        TreeLine(name: "├─ 02 Drift.flac", style: .plain),
+                        TreeLine(name: "├─ cover.jpg", style: .plain),
+                        TreeLine(name: "└─ lrc/", style: .plain),
+                        TreeLine(name: "   ├─ 01 Skyline.lrc", style: .lyric),
+                        TreeLine(name: "   └─ 02 Drift.lrc", style: .lyric),
+                    ],
+                    caption: "Flat songs — names parsed from .lrc tags and folders, shown as one always-visible list."
+                )
+                packTypePanel(
+                    type: .structured,
+                    tree: [
+                        TreeLine(name: "MyPlaylist.cella", style: .root),
+                        TreeLine(name: "├─ Side A.cue", style: .cue),
+                        TreeLine(name: "├─ Side A/", style: .plain),
+                        TreeLine(name: "│  ├─ 01 Intro.flac", style: .plain),
+                        TreeLine(name: "│  ├─ cover.jpg", style: .plain),
+                        TreeLine(name: "│  └─ lrc/", style: .plain),
+                        TreeLine(name: "│     └─ 01 Intro.lrc", style: .lyric),
+                        TreeLine(name: "└─ Side B.cue", style: .cue),
+                    ],
+                    caption: "One .cue per album — the sheet owns track order, titles and artists."
+                )
+            }
 
             Text("The badge on each playlist card tells you which kind it is.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(theme.textSecondary)
-                .lineSpacing(3)
-                .padding(.top, 2)
         }
+    }
+
+    private struct TreeLine {
+        let name: String
+        let style: TreeStyle
+        enum TreeStyle { case root, cue, lyric, plain }
+    }
+
+    private func packTypePanel(type: CellaPackType, tree: [TreeLine], caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // The very badge the user knows from playlist cards.
+            HStack(spacing: 5) {
+                Image(systemName: type.icon)
+                    .font(.system(size: 10))
+                Text(type.label)
+                    .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+            }
+            .foregroundStyle(type == .structured ? theme.dotActive : theme.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill((type == .structured ? theme.dotActive : theme.textSecondary).opacity(0.14))
+            )
+
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(tree.indices, id: \.self) { index in
+                    treeLine(tree[index])
+                }
+            }
+
+            Text(caption)
+                .font(.system(size: 10.5))
+                .foregroundStyle(theme.textSecondary)
+                .lineSpacing(2.5)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(theme.textSecondary.opacity(0.08))
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial.opacity(0.4))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.14), .white.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(.white.opacity(0.16), lineWidth: 1)
+        )
+    }
+
+    private func treeLine(_ line: TreeLine) -> some View {
+        Text(line.name)
+            .font(.system(size: 9.5, design: .monospaced))
+            .foregroundStyle(line.style == .cue
+                ? theme.dotActive
+                : line.style == .lyric
+                    ? theme.textSecondary
+                    : line.style == .root
+                        ? theme.textPrimary
+                        : theme.textPrimary.opacity(0.75))
+    }
+
+    /// Page 6 — Metro Glass: the design language, shown rather than described.
+    private var metroGlassPage: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Cella is drawn in one design language \u{2014} Metro Glass: frosted aero cards, a single accent hue, rounded type, and the living water world floating behind this window.")
+                .font(.system(size: 13.5))
+                .foregroundStyle(theme.textPrimary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+
+            metroGlassSpecimen
+                .frame(height: 128)
+                .frame(maxWidth: .infinity)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+
+            Text("A specimen: the real window backdrop, with one glass card floating on it. Five accent themes live in Config.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(theme.textSecondary)
+                .lineSpacing(3)
+        }
+    }
+
+    /// A real Metro backdrop (live canvases) with a real aero card on top —
+    /// the same two layers every screen of the app is built from.
+    private var metroGlassSpecimen: some View {
+        ZStack {
+            MetroBackgroundView()
+
+            HStack(spacing: 10) {
+                GuideTile(icon: "music.note", size: 30, iconSize: 13)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Late Radiance")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(theme.textPrimary)
+                    Text("Glass card over the backdrop")
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(theme.textSecondary)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.ultraThinMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(
+                        LinearGradient(
+                            colors: [.white.opacity(0.3), .white.opacity(0.03)],
+                            startPoint: .top,
+                            endPoint: .center
+                        )
+                    )
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(.white.opacity(0.3), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+        }
+        .frame(height: 128)
+        .contentShape(Rectangle())
     }
 
     /// Page 3 — CueLab introduction with a mirror of the real toolbar button.
