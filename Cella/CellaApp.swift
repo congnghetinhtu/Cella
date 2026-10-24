@@ -75,19 +75,9 @@ enum SeafoamCursor {
 
     // MARK: - Theme
 
-    private static func accentColor(for themeName: String) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
-        switch themeName {
-        case "bipolar": return (1.0, 0.361, 0.541)
-        case "seafoam": return (0.576, 0.914, 0.745)
-        case "mint":    return (0.133, 0.827, 0.933)
-        case "frutiger": return (0.243, 0.839, 0.596)
-        default:        return (1.0, 0.502, 0.220)
-        }
-    }
-
-    private static func currentThemeName() -> String {
-        UserDefaults.standard.string(forKey: "themeOverride") ?? "seafoam"
-    }
+    /// One visual language — the cursor always wears the Frutiger Aurora
+    /// accent. Themes are not selectable anymore.
+    private static let accent: (r: CGFloat, g: CGFloat, b: CGFloat) = (0.243, 0.839, 0.596)
 
     // MARK: - Morph frame
 
@@ -128,7 +118,7 @@ enum SeafoamCursor {
     // MARK: - Rebuild
 
     static func rebuildCursors() {
-        let color = accentColor(for: currentThemeName())
+        let color = accent
         circleCursor = NSCursor(image: makeMorphFrame(t: 0, color: color), hotSpot: NSPoint(x: 10, y: 10))
         currentCursor = circleCursor
 

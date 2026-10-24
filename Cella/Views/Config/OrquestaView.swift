@@ -4,13 +4,12 @@ import SwiftUI
 ///
 /// The stage doubles as an orchestra: the ten performer seats along the arc
 /// are the ten EQ bands (31 Hz → 16 kHz), shown locked per preset.
-/// Each curated preset bundles the look (its paired theme), the EQ curve
-/// (seats) and the surround staging — one tap is a full audio mood. The
-/// stage follows the app theme; drawing a custom curve leaves it alone.
+/// Each preset tunes the sound (EQ curve) and the space (surround staging) —
+/// presets are audio profiles. The look never changes: Frutiger Aurora
+/// glass is the one visual language, and the stage wears it too.
 struct OrquestaView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
-    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
     @AppStorage("surroundMode") private var surroundMode: String = SurroundMode.off.rawValue
     @AppStorage("orquestaPresetID") private var presetID: String = OrquestaPreset.storageKeyEmpty
@@ -591,18 +590,13 @@ struct OrquestaView: View {
     // MARK: - Actions
 
     private func applyPreset(_ preset: OrquestaPreset) {
+        // Presets are audio profiles only: EQ curve + surround staging. The
+        // look never changes — Frutiger Aurora is the one visual language.
         withAnimation(.smooth) {
             viewModel.setSoloBand(nil)
             viewModel.selectPreset(preset)
             surroundMode = preset.surround.rawValue
             viewModel.applySurround(preset.surround)
-            // The full mood: a preset bundles the look too. Natural pairs
-            // with seafoam, Cálido with dark, Océano with mint, Aurora with
-            // bipolar, Frutiger Aurora with frutiger. The custom preset is a
-            // sound-only action, so it never re-themes the app.
-            if !preset.isCustom {
-                themeOverride = preset.themeID
-            }
         }
     }
 
@@ -648,7 +642,7 @@ private extension Float {
 
 #Preview {
     OrquestaView(viewModel: PlayerViewModel())
-        .environment(\.theme, .seafoam)
+        .environment(\.theme, .frutiger)
         .padding(40)
         .frame(width: 560)
 }

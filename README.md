@@ -35,7 +35,7 @@ See **[ENGINE.md](ENGINE.md)** for the full engine implementation notes.
 | **Cluster** | Library browser: a `.cluster` library holds `.cella` packs; browse packs, artists, albums, and open artist folders. Includes CueLab and the first-visit Cluster guide (floating glass pill, bottom-right) |
 | **Cella** | The player: full-screen playback, Apple Music-style lyrics, queue reorder, dot-matrix patterns, artist images/videos, engine transitions |
 | **Clarc** | Lyric studio: record timings with R/M, edit lines, bulk paste, save `.clarc` files; "How to Clarc?" format tutorial next to Undo |
-| **Config** | Audio & app settings: Orquesta EQ stage, theme picker, quick guide, about |
+| **Config** | Audio & app settings: Orquesta EQ stage (audio profiles), quick guide, about |
 
 ## Features
 
@@ -48,12 +48,12 @@ See **[ENGINE.md](ENGINE.md)** for the full engine implementation notes.
 - **Lyric studio (Clarc tab)** — timed recording (R toggles, M stamps the current line), editing tools, bulk paste, round-trip parse/write that preserves unknown metadata
 - **Command palette** — `/` opens anywhere (except the Clarc editor), anchored to your mouse position with a bloom animation; shows the current lyric line, tabs, queue tracks, and lyric-insert commands
 - **Dot-matrix display** — 9×5 pattern matrix with mood-driven animations (analyzing, automix, skip, smiley...) and a 3×5 pixel font text scroller
-- **Line visualizer** — procedurally generated path with energy-reactive trail, palette cycling per theme
+- **Line visualizer** — procedurally generated path with energy-reactive trail sweeping the Frutiger Aurora palette (green→aqua→sky→sun)
 - **Artist visuals** — pack `cma/` folders serve images or videos (including `.cma` motion files) synced to the playing track's artist
 - **Orquesta EQ stage** — 10-band parametric EQ presented as a half-circle orchestra stage (each seat is a band), bundled surround staging presets: natural, calido, oceano, aurora, frutiger aurora + custom
 - **Preview mini player** — drop/open an audio file anywhere and get a floating Quick Look-style card with its own Orquesta panel, above the main app even in fullscreen
 - **CueLab** — build ExactAudioCopy-style `.cue` sheets: rename ("NN - Title" detect), move files into albums, write `.cue`, create `lrc/` folders
-- **Theme system** — dark, seafoam, bipolar, mint, frutiger aurora — each with its own trail/glow palette and Metro Glass surfaces
+- **One visual language** — Frutiger Aurora glass everywhere (trail/glow palette sweeps green→aqua→sky→sun); look and sound are separated: preset choices are audio profiles, not themes
 - **macOS native** — custom circle cursor with press animation, drag-to-switch tab bar, keyboard shortcuts, remote-ready playback
 
 ## How It Works

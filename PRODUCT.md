@@ -46,7 +46,7 @@ Three differentiators are inseparable:
 - **Orquesta audio:** 10-band parametric EQ as a half-circle orchestra stage, bundled surround-staging presets (natural, calido, oceano, aurora, frutiger aurora + custom); shared DSP geometry between main and preview engines
 - **Preview mini player:** floating Quick Look-style window for dropped/opened audio files, with its own engine and Orquesta panel
 - **CueLab:** ExactAudioCopy-style `.cue` sheet builder with bulk rename ("NN - Title"), album moves, `lrc/` folder creation
-- **Themes:** dark, seafoam, bipolar, mint, frutiger aurora (each with its own trail/glow palette)
+- **One visual language:** Frutiger Aurora glass everywhere; the Orquesta presets are audio profiles (EQ curve + surround staging), not looks
 - **macOS 15.0+ required**
 - **SPM dependencies:** spfk-tempo, spfk-musical-analysis, spfk-loudness, SignalKit
 - **File naming:** `Artist - Title.ext` parsed into artist/title metadata; `.cue` performer data takes precedence

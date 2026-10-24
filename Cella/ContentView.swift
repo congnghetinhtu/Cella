@@ -47,7 +47,6 @@ struct ContentView: View {
     @State private var bloomAnchor: UnitPoint = UnitPoint(x: 0.5, y: 0.6)
     @State private var bloomOnNextTabChange = false
     @Environment(\.colorScheme) private var colorScheme
-    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
     private var preferredScheme: ColorScheme? {
         .dark
@@ -59,15 +58,9 @@ struct ContentView: View {
         NSApp.keyWindow?.firstResponder is NSTextView
     }
 
-    private var theme: Theme {
-        switch themeOverride {
-        case "seafoam": return .seafoam
-        case "bipolar": return .bipolar
-        case "mint": return .mint
-        case "frutiger": return .frutiger
-        default: return .dark
-        }
-    }
+    /// One visual language: Frutiger Aurora glass everywhere. The Orquesta
+    /// presets are audio profiles (EQ + staging), not looks.
+    private var theme: Theme { .frutiger }
 
     // MARK: - Command palette suggestions
 
@@ -606,7 +599,7 @@ struct ContentView: View {
             }
         }
         .animation(.smooth, value: detailPack != nil)
-        .animation(.smooth, value: themeOverride)
+        .animation(.smooth, value: selectedTab)
         .animation(.snappy, value: showCommandPalette)
         .animation(.snappy, value: viewModel.dropNotice)
         .environment(\.theme, theme)

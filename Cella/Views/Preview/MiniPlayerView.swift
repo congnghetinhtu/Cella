@@ -405,7 +405,7 @@ struct MiniPlayerView: View {
     let mini = MiniPlayerViewModel()
     mini.title = "demo-audio"
     return MiniPlayerView(viewModel: mini)
-        .environment(\.theme, .seafoam)
+        .environment(\.theme, .frutiger)
         .padding(40)
         .background(Color.black)
 }

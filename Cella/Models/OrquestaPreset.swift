@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// A curated Cella Orquesta preset — a complete audio mood that bundles the
-/// look (theme), the sound (EQ curve) and the space (surround staging).
+/// A curated Cella Orquesta preset — a complete audio profile that bundles
+/// the sound (EQ curve) and the space (surround staging). The look is not
+/// part of a preset: Frutiger Aurora is the one visual language.
 struct OrquestaPreset: Equatable, Sendable {
     let id: String
     let displayName: String
     let iconName: String
-    let themeID: String
     let eqBands: [(freq: Float, gain: Float)]
     let surround: SurroundMode
     let accentColor: Color
@@ -28,7 +28,6 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "natural",
         displayName: "Natural",
         iconName: "waveform.path",
-        themeID: "seafoam",
         eqBands: eqFrequencies.map { ($0, 0) },
         surround: .off,
         accentColor: Color(hex: 0x93E9BE)
@@ -39,7 +38,6 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "calido",
         displayName: "Cálido",
         iconName: "flame.fill",
-        themeID: "dark",
         eqBands: [(31, 2), (62, 3), (125, 2), (250, 1), (500, 0),
                   (1000, 0), (2000, 0), (4000, 0), (8000, 1), (16000, 1)],
         surround: .ampliado,
@@ -51,7 +49,6 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "oceano",
         displayName: "Océano",
         iconName: "water.waves",
-        themeID: "mint",
         eqBands: [(31, 3), (62, 2), (125, 1), (250, 0), (500, 1),
                   (1000, 2), (2000, 2), (4000, 3), (8000, 2), (16000, 3)],
         surround: .ampliado,
@@ -63,7 +60,6 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "aurora",
         displayName: "Aurora",
         iconName: "sparkles",
-        themeID: "bipolar",
         eqBands: [(31, 4), (62, 6), (125, 4), (250, 1), (500, -1),
                   (1000, -1), (2000, 1), (4000, 3), (8000, 4), (16000, 3)],
         surround: .teatro,
@@ -76,7 +72,6 @@ struct OrquestaPreset: Equatable, Sendable {
         id: "frutigerAurora",
         displayName: "Frutiger Aurora",
         iconName: "leaf.fill",
-        themeID: "frutiger",
         eqBands: [(31, 3), (62, 3), (125, 2), (250, 1), (500, 0),
                   (1000, 0), (2000, 1), (4000, 1), (8000, 0), (16000, -1)],
         surround: .teatro,
@@ -95,7 +90,6 @@ struct OrquestaPreset: Equatable, Sendable {
             id: customID,
             displayName: "Custom",
             iconName: "slider.horizontal.3",
-            themeID: "dark",
             eqBands: customCurve,
             surround: .off,
             accentColor: Color(hex: 0xFF8038)

@@ -4,7 +4,6 @@ import AppKit
 struct ConfigView: View {
     var viewModel: PlayerViewModel
     @Environment(\.theme) private var theme
-    @AppStorage("themeOverride") private var themeOverride: String = "seafoam"
 
     @State private var guidePage: Int? = 0
 
@@ -109,7 +108,7 @@ struct ConfigView: View {
                     icon: "waveform",
                     step: 2,
                     title: "Pick a Preset",
-                    text: "Natural, Cálido, Océano, Aurora — one tap sets the whole mood.",
+                    text: "Natural, Cálido, Océano, Aurora — a tuned audio profile per mood.",
                     tint: theme.haloPrimary
                 )
                 .containerRelativeFrame(.horizontal)
@@ -119,7 +118,7 @@ struct ConfigView: View {
                     icon: "slider.horizontal.3",
                     step: 3,
                     title: "Locked Curves",
-                    text: "Five tuned presets, locked in. One tap sets theme, EQ and staging.",
+                    text: "Five tuned presets, locked in. One tap sets EQ and staging.",
                     tint: theme.haloSecondary
                 )
                 .containerRelativeFrame(.horizontal)
