@@ -1,7 +1,7 @@
 import Foundation
 
 /// Unified artist model — replaces PackArtist/LibraryArtist duplication.
-/// Single source for name normalization, splitting, video lookup.
+/// Single source for name normalization, splitting, matching.
 struct Artist: Identifiable {
     let id = UUID()
     let name: String
@@ -13,7 +13,6 @@ struct Artist: Identifiable {
     let trackURLs: [URL]
     /// Filenames only (pack scope compat). Derived from trackURLs when empty.
     let files: [String]
-    let videoURL: URL?
     let coverURL: URL?
 
     var effectiveFiles: [String] {

@@ -299,7 +299,6 @@ struct ClusterView: View {
     @State private var libraryArtists: [LibraryArtist] = []
     /// Generation guard: only the latest background rescan may publish.
     @State private var libraryScanGen = 0
-    @State private var artistThumbs: [String: NSImage] = [:]
     @State private var loadingArtistKey: String?
     /// True while the background artist aggregation runs: distinguishes
     /// "loading" from genuinely empty (which previously spun forever on
@@ -816,16 +815,10 @@ struct ClusterView: View {
                         if let libArtist = libraryArtists.first(where: { $0.key == pa.key }) {
                             ZStack {
                                 Circle().fill(theme.textSecondary.opacity(0.12)).frame(width: 56, height: 56)
-                                if let thumb = artistThumbs[libArtist.key] {
-                                    Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fill)
-                                        .frame(width: 56, height: 56).clipShape(Circle())
-                                } else {
-                                    Text(String(libArtist.name.prefix(1)).uppercased())
-                                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                                        .foregroundStyle(theme.dotActive)
-                                }
+                                Text(String(libArtist.name.prefix(1)).uppercased())
+                                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                                    .foregroundStyle(theme.dotActive)
                             }
-                            .onAppear { loadArtistThumb(libArtist) }
                         }
                     }
                 }
@@ -941,12 +934,10 @@ struct ClusterView: View {
         let isNowPlaying = viewModel?.activeArtistFilter.map { ArtistMatcher.normKey($0) == artist.key } ?? false
         return ArtistCircleCell(
             name: artist.name,
-            thumb: artistThumbs[artist.key],
             theme: theme,
             isLoading: isLoading,
             isNowPlaying: isNowPlaying
         )
-        .onAppear { loadArtistThumb(artist) }
         .opacity(isLoading ? 0.6 : 1)
         .allowsHitTesting(!isLoading)
         .onTapGesture { playLibraryArtist(artist, libraryURL: libraryURL) }
@@ -986,29 +977,6 @@ struct ClusterView: View {
         }
     }
 
-    @State private var artistThumbsInFlight: Set<String> = []
-
-    private func loadArtistThumb(_ artist: LibraryArtist) {
-        guard artistThumbs[artist.key] == nil,
-              !artistThumbsInFlight.contains(artist.key) else { return }
-        guard let videoURL = artist.videoURL else { return }
-        artistThumbsInFlight.insert(artist.key)
-        // Snapshot from cma video (current source; AI analysis hook later)
-        DispatchQueue.global(qos: .utility).async {
-            let img = ArtistSnapshot.snapshot(videoURL: videoURL)
-            if let img {
-                DispatchQueue.main.async {
-                    artistThumbs[artist.key] = img
-                    artistThumbsInFlight.remove(artist.key)
-                }
-            } else {
-                DispatchQueue.main.async {
-                    artistThumbsInFlight.remove(artist.key)
-                }
-            }
-        }
-    }
-
     private func playLibraryArtist(_ artist: LibraryArtist, libraryURL: URL) {
         guard let viewModel, loadingArtistKey == nil else { return }
         // Retire the folder scene first: closing it before onPlay switches
@@ -1022,11 +990,6 @@ struct ClusterView: View {
             loadingArtistKey = nil
         }
         onPlay?()
-    }
-
-    private func revealArtistVideos(_ artist: LibraryArtist) {
-        guard let videoURL = artist.videoURL else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([videoURL])
     }
 
     private func header(_ lib: ClusterLibrary) -> some View {
@@ -3209,11 +3172,10 @@ struct PackDetailView: View {
     }
 }
 
-// MARK: - Polished Artist Circle (hover play, now-playing ring, fade-in thumb)
+// MARK: - Polished Artist Circle (hover play, now-playing ring)
 
 private struct ArtistCircleCell: View {
     let name: String
-    let thumb: NSImage?
     let theme: Theme
     let isLoading: Bool
     let isNowPlaying: Bool
@@ -3238,16 +3200,9 @@ private struct ArtistCircleCell: View {
                     )
                     .scaleEffect(isHovering && !isLoading ? 1.05 : 1.0)
                     .animation(reduceMotion ? .none : .snappy, value: isHovering)
-                if let thumb {
-                    Image(nsImage: thumb)
-                        .resizable().aspectRatio(contentMode: .fill)
-                        .frame(width: 88, height: 88).clipShape(Circle())
-                        .transition(.opacity)
-                } else {
-                    Text(String(name.prefix(1)).uppercased())
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(theme.dotActive)
-                }
+                Text(String(name.prefix(1)).uppercased())
+                    .font(.system(size: 30, weight: .bold, design: .rounded))
+                    .foregroundStyle(theme.dotActive)
                 if isLoading {
                     Circle().fill(.black.opacity(0.35)).frame(width: 88, height: 88)
                     MixOrbView(theme: theme, diameter: 26)
@@ -3394,49 +3349,6 @@ private struct ClusterModeSwitch: View {
 
 extension Notification.Name {
     static let clusterLibraryDidRescan = Notification.Name("clusterLibraryDidRescan")
-}
-
-// MARK: - Artist Snapshot (cma video frame; AI hook later)
-
-/// Current source: first cma video frame for artist.
-/// Later: replace with AI-analyzed portrait / best frame.
-enum ArtistSnapshot {
-    private static var cache: [String: NSImage] = [:]
-    private static let lock = NSLock()
-
-    static func snapshot(videoURL: URL) -> NSImage? {
-        let key = videoURL.path
-        lock.lock()
-        if let hit = cache[key] { lock.unlock(); return hit }
-        lock.unlock()
-        // Resolve .cma → temp .mp4 for AVFoundation
-        let playURL: URL
-        if videoURL.pathExtension.lowercased() == "cma" {
-            let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent("cella_\(videoURL.deletingPathExtension().lastPathComponent)_\(abs(videoURL.path.hashValue)).mp4")
-            if !FileManager.default.fileExists(atPath: tmp.path) {
-                try? FileManager.default.copyItem(at: videoURL, to: tmp)
-            }
-            playURL = tmp
-        } else {
-            playURL = videoURL
-        }
-        let asset = AVURLAsset(url: playURL)
-        let gen = AVAssetImageGenerator(asset: asset)
-        gen.appliesPreferredTrackTransform = true
-        gen.maximumSize = CGSize(width: 256, height: 256)
-        let time = CMTime(seconds: 0.5, preferredTimescale: 600)
-        do {
-            let cg = try gen.copyCGImage(at: time, actualTime: nil)
-            let img = NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
-            lock.lock()
-            cache[key] = img
-            lock.unlock()
-            return img
-        } catch {
-            return nil
-        }
-    }
 }
 
 #Preview {

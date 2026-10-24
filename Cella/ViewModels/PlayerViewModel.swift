@@ -20,20 +20,11 @@ class PlayerViewModel {
     var analyzedTrackCount: Int = 0
     var totalTrackCount: Int = 0
 
-    private var animatedPattern: [[Bool]] = MatrixPatterns.smileyFace
-    private var animationTimer: Timer?
-    private var temporaryPattern: [[Bool]]?
-    private var temporaryPatternTimer: Timer?
     private var nowPlayingTimer: Timer?
     private var playbackTimer: Timer?
-    private var currentMood: MusicMood = .neutral
-    private var animationFrame: Int = 0
-    private var moodTransitionTimer: Timer?
-    private var pendingMood: MusicMood?
     /// Manual skip/tap blend held for the next outgoing downbeat (beat-fit
     /// handoff). Cancelled by a newer request or an auto track-end blend.
     private var pendingDownbeatTimer: Timer?
-    private let powerManager = PowerManager.shared
 
     var currentPreset: OrquestaPreset = .natural
 
@@ -231,21 +222,6 @@ class PlayerViewModel {
     var activeArtistFilter: String?
     var activeArtistPackURL: URL?
 
-    // MARK: - Artist Images
-
-    var artistImages: [NSImage] = []
-    var currentArtistImage: NSImage?
-    private var artistImageIndex: Int = 0
-
-    // MARK: - Animated Background (GIF)
-
-    var gifFrames: [NSImage] = []
-    var gifFrameDurations: [Double] = []
-    var isGifPlaying: Bool = false
-    private var gifFrameIndex: Int = 0
-    private var gifDirection: Int = 1  // 1 = forward, -1 = backward
-    private var gifTimer: Timer?
-
     var currentTrackHasLrc: Bool {
         guard let url = mixQueue?.currentTrack?.url else { return false }
         return hasLyric(for: url)
@@ -319,35 +295,6 @@ class PlayerViewModel {
         }
     }
 
-    var currentPattern: [[Bool]] {
-        if let temp = temporaryPattern {
-            return temp
-        }
-
-        switch playerState {
-        case .playing:
-            return animatedPattern
-        case .analyzing:
-            return MatrixPatterns.analyzing
-        case .autoMix:
-            return MatrixPatterns.autoMix
-        case .loading:
-            return MatrixPatterns.loading
-        default:
-            return MatrixPatterns.smileyFace
-        }
-    }
-
-    var currentEnergyValue: Float {
-        guard let profile = mixQueue?.currentTrack?.analysis?.energyProfile,
-              !profile.isEmpty,
-              currentDuration > 0
-        else { return 0.3 }
-        let idx = Int((currentTime / currentDuration) * Double(profile.count))
-        let clamped = max(0, min(idx, profile.count - 1))
-        return min(1.0, profile[clamped] / 0.5)
-    }
-
     var statusText: String? {
         guard let queue = mixQueue, !queue.isEmpty else {
             switch playerState {
@@ -405,12 +352,8 @@ class PlayerViewModel {
     }
 
     deinit {
-        animationTimer?.invalidate()
-        temporaryPatternTimer?.invalidate()
         nowPlayingTimer?.invalidate()
         playbackTimer?.invalidate()
-        moodTransitionTimer?.invalidate()
-        gifTimer?.invalidate()
     }
 
     // MARK: - Setup
@@ -533,7 +476,7 @@ class PlayerViewModel {
     /// New lyric files are born CLARC — the editor's native format.
     private func resolveOrCreateLrcURL(for trackURL: URL) -> URL? {
         if let existing = resolveLrcURL(for: trackURL) { return existing }
-        guard let folder = playlistFolderURL else { return nil }
+        guard playlistFolderURL != nil else { return nil }
         let base = trackURL.deletingPathExtension().lastPathComponent
         let lrcDir = trackURL.deletingLastPathComponent().appendingPathComponent("lrc")
         if !FileManager.default.fileExists(atPath: lrcDir.path) {
@@ -649,7 +592,6 @@ class PlayerViewModel {
 
     func removeTrack(at index: Int) {
         guard var queue = mixQueue, index >= 0, index < queue.tracks.count else { return }
-        cancelPendingMoodTransition()
 
         let wasPlayingCurrent = index == queue.currentIndex
         queue.tracks.remove(at: index)
@@ -660,7 +602,6 @@ class PlayerViewModel {
             soloMode = false
             preSoloTracks = nil
             audioEngine.stop()
-            stopAnimationLoop()
             return
         }
 
@@ -676,8 +617,6 @@ class PlayerViewModel {
                     if playerState == .playing || playerState == .paused {
                         playerState = .playing
                         audioEngine.play()
-                        stopAnimationLoop()
-                        startAnimationLoop()
                     }
                 } catch {
                     importError = "Failed to load track: \(error.localizedDescription)"
@@ -693,7 +632,6 @@ class PlayerViewModel {
     func jumpToTrack(at index: Int) {
         guard var queue = mixQueue, index >= 0, index < queue.tracks.count else { return }
         guard index != queue.currentIndex else { return }
-        cancelPendingMoodTransition()
 
         queue.currentIndex = index
         mixQueue = queue
@@ -707,8 +645,6 @@ class PlayerViewModel {
                 )
                 playerState = .playing
                 audioEngine.play()
-                stopAnimationLoop()
-                startAnimationLoop()
             } catch {
                 importError = "Failed to load track: \(error.localizedDescription)"
             }
@@ -824,8 +760,6 @@ class PlayerViewModel {
     /// Library-wide artist play: all songs by artist across all packs, pack order.
     /// Builds TrackAssets with per-file pack context (cue → lrc → filename), no filename collision.
     func playLibraryArtist(_ artist: LibraryArtist, libraryURL: URL) {
-        cancelPendingMoodTransition()
-        stopAnimationLoop()
         audioEngine.stop()
         cacheTask?.cancel()
         importError = nil
@@ -834,8 +768,6 @@ class PlayerViewModel {
         activeArtistPackURL = libraryURL
         playlistFolderURL = libraryURL
         albumPillSourceName = libraryURL.deletingPathExtension().lastPathComponent
-        artistImages = []
-        currentArtistImage = nil
 
         var tracks: [TrackAsset] = []
         for fileURL in artist.trackURLs {
@@ -895,12 +827,10 @@ class PlayerViewModel {
         totalTrackCount = tracks.count
         analyzedTrackCount = 0
         mixQueue = MixQueue(tracks: tracks, transitions: Array(repeating: nil, count: max(0, tracks.count - 1)), currentIndex: 0)
-        loadArtistImages(from: libraryURL)
         do {
             try loadTrackAndRestore(url: tracks[0].url, barTimestamps: [], analysis: nil)
             audioEngine.play()
             playerState = .playing
-            startAnimationLoop()
             log("Playing artist \(artist.name): \(tracks.count) tracks")
         } catch {
             importError = "Failed to play \(artist.name): \(error.localizedDescription)"
@@ -912,7 +842,7 @@ class PlayerViewModel {
     func playLibraryTrackURLs(_ name: String, urls: [URL], libraryURL: URL, startURL: URL? = nil) {
         guard !urls.isEmpty else { return }
         // Reuse per-file enrichment by faking an Artist
-        let fake = Artist(name: name, key: ArtistMatcher.normKey(name), trackCount: urls.count, packCount: 0, albumCount: 0, trackURLs: urls, files: urls.map { $0.lastPathComponent }, videoURL: nil, coverURL: nil)
+        let fake = Artist(name: name, key: ArtistMatcher.normKey(name), trackCount: urls.count, packCount: 0, albumCount: 0, trackURLs: urls, files: urls.map { $0.lastPathComponent }, coverURL: nil)
         // Temporarily swap to play subset starting at startURL
         let savedFirst = fake.trackURLs
         playLibraryArtist(fake, libraryURL: libraryURL)
@@ -930,7 +860,7 @@ class PlayerViewModel {
 
     /// Crossfade from the current track straight to a chosen album song.
     func crossfadeToTrack(at index: Int) {
-        guard var queue = mixQueue, index >= 0, index < queue.tracks.count else {
+        guard let queue = mixQueue, index >= 0, index < queue.tracks.count else {
             print("[PlayerViewModel] crossfadeToTrack GUARD FAIL idx=\(index)")
             return
         }
@@ -939,7 +869,6 @@ class PlayerViewModel {
             return
         }
         print("[PlayerViewModel] crossfadeToTrack → \(queue.tracks[index].fileName) (idx \(index), current \(queue.currentIndex))")
-        cancelPendingMoodTransition()
 
         let outgoingURL = outgoing.url
         // Beat-fit: hold the blend for the next outgoing downbeat so the
@@ -982,8 +911,6 @@ class PlayerViewModel {
             self.pendingSwitchCompletion = { [weak self] in
                 if self?.playerState == .autoMix {
                     self?.playerState = .playing
-                    self?.stopAnimationLoop()
-                    self?.startAnimationLoop()
                     self?.loadLyrics(for: self?.mixQueue?.currentTrack?.url ?? incoming.url)
                     self?.scheduleCrossfadeWarmup()
                 }
@@ -1143,7 +1070,6 @@ class PlayerViewModel {
             guard let self, gen == self.editorFadeGen, self.playerState == .playing else { return }
             self.playerState = .paused
             self.audioEngine.pause()
-            self.stopAnimationLoop()
             self.syncPlaybackTime()
             self.updateNowPlayingInfo()
             self.log("Paused for LRC editor")
@@ -1164,11 +1090,6 @@ class PlayerViewModel {
         playerState = .playing
         audioEngine.play()
         syncPlaybackTime()
-        if pendingMood != nil {
-            applyPendingMood()
-        } else {
-            startAnimationLoop()
-        }
         updateNowPlayingInfo()
         log("Resumed from LRC editor")
     }
@@ -1316,13 +1237,9 @@ class PlayerViewModel {
             nextLyrics = []
         }
 
-        // Reload artist images for this track's artists.
-        if let folder = playlistFolderURL {
-            loadArtistImages(from: folder)
-        }
     }
 
-    // MARK: - Artist Images
+    // MARK: - Track Folder Helpers
 
     /// Owning .cella pack for a track (walks up to nearest *.cella). Falls back to folder.
     private func owningPack(for trackURL: URL, fallback: URL) -> URL {
@@ -1339,267 +1256,11 @@ class PlayerViewModel {
         return fallback
     }
 
-    private func loadArtistImages(from folder: URL) {
-        // Library artist mode: folder is *.cluster → resolve owning *.cella pack
-        // so structure follows cella playlist (pack/cma/<Artist>/...).
-        var cmaRoots: [URL] = []
-        if folder.pathExtension.lowercased() == "cluster",
-           let trackURL = mixQueue?.currentTrack?.url {
-            let pack = owningPack(for: trackURL, fallback: folder)
-            cmaRoots = [pack.appendingPathComponent("cma")]
-        } else if folder.pathExtension.lowercased() == "cluster" {
-            // No current track yet (initial library play): collect all packs' cma
-            // dirs so first-frame visuals still show. Filtered per-track on next songs.
-            let packs = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil))?.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() == "cella" } ?? []
-            cmaRoots = packs.map { $0.appendingPathComponent("cma") }
-        } else {
-            cmaRoots = [folder.appendingPathComponent("cma")]
-        }
-        // Use first existing cma dir as primary; library mode aggregates across packs below
-        let cmaDir = cmaRoots.first(where: { FileManager.default.fileExists(atPath: $0.path) }) ?? folder.appendingPathComponent("cma")
-        guard FileManager.default.fileExists(atPath: cmaDir.path) || folder.pathExtension.lowercased() == "cluster" else {
-            // No visuals here — full teardown so the previous pack's
-            // video/image can't keep showing.
-            resetPackVisuals()
-            return
-        }
-
-        let allExtensions = Set(["jpg", "jpeg", "png", "webp", "gif", "tiff", "bmp", "mp4", "mov", "cma"])
-        let animatedExtensions = Set(["gif", "mp4", "mov", "cma"])
-        let staticExtensions = Set(["jpg", "jpeg", "png", "webp", "tiff", "bmp"])
-
-        // Get artist names from cue metadata, then filename parsing
-        var trackArtists: [String] = []
-
-        if let track = mixQueue?.currentTrack, !track.artists.isEmpty {
-            trackArtists = track.artists.map { $0.lowercased() }
-        } else if let trackURL = mixQueue?.currentTrack?.url {
-            let fileName = trackURL.lastPathComponent
-            if let artist = albumCueArtists[fileName.lowercased()], !artist.isEmpty {
-                trackArtists.append(artist)
-            } else if let cue = cueTracksByFile[fileName.lowercased()], !cue.performer.isEmpty {
-                trackArtists.append(cue.performer.lowercased())
-            }
-        }
-
-        // Fallback: parse from filename
-        if trackArtists.isEmpty, let trackName = mixQueue?.currentTrack?.fileName {
-            if let separatorIndex = trackName.range(of: " - ")?.lowerBound {
-                let mainPart = String(trackName[..<separatorIndex]).trimmingCharacters(in: .whitespaces)
-                for name in mainPart.components(separatedBy: " & ") {
-                    let trimmed = name.trimmingCharacters(in: .whitespaces)
-                    if !trimmed.isEmpty { trackArtists.append(trimmed.lowercased()) }
-                }
-            }
-        }
-
-        print("[PlayerViewModel] artist visuals: \(trackArtists) roots=\(cmaRoots.map { $0.path })")
-
-        // Scan cma/ directories (library mode aggregates across packs, primary first)
-        var scanDirs: [URL] = []
-        scanDirs.append(cmaDir)
-        for r in cmaRoots where r.path != cmaDir.path {
-            if FileManager.default.fileExists(atPath: r.path) { scanDirs.append(r) }
-        }
-        var allFiles: [URL] = []
-        var animatedFiles: [URL] = []
-        var staticFiles: [URL] = []
-        for dir in scanDirs {
-            let contents = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-            let files = contents.filter { allExtensions.contains($0.pathExtension.lowercased()) }
-                .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-            allFiles.append(contentsOf: files)
-            animatedFiles.append(contentsOf: files.filter { animatedExtensions.contains($0.pathExtension.lowercased()) })
-            staticFiles.append(contentsOf: files.filter { staticExtensions.contains($0.pathExtension.lowercased()) })
-        }
-
-        // Match artist names to image files in cma/<artist>/ subfolders.
-        // Primary (owning pack) first so structure follows cella playlist.
-        for artist in trackArtists {
-            // Filesystem stores accented names in NFD; normalize candidates so NFC artist
-            // strings (e.g. from .lrc) still match the on-disk folder.
-            let nfd = artist.precomposedStringWithCanonicalMapping
-                .decomposedStringWithCanonicalMapping
-            let titleCase = nfd.split(separator: " ").map(\.capitalized).joined(separator: " ")
-            for baseDir in scanDirs {
-                // Try various folder name formats: "artist", "Artist", "artist-name"
-                let candidates = [
-                    baseDir.appendingPathComponent(nfd),
-                    baseDir.appendingPathComponent(titleCase),
-                    baseDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "-")),
-                    baseDir.appendingPathComponent(nfd.replacingOccurrences(of: " ", with: "_"))
-                ]
-                for dir in candidates where FileManager.default.fileExists(atPath: dir.path) {
-                    let subContents = (try? FileManager.default.contentsOfDirectory(
-                        at: dir, includingPropertiesForKeys: nil
-                    )) ?? []
-                    // Static images from artist subfolder (primary first)
-                    let images = subContents.filter { staticExtensions.contains($0.pathExtension.lowercased()) }
-                        .sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-                    if !images.isEmpty && artistImages.isEmpty {
-                        artistImages = images.compactMap { NSImage(contentsOf: $0) }
-                    }
-                }
-                if !artistImages.isEmpty && baseDir.path == cmaDir.path { break }
-            }
-        }
-
-        // Load static images (if not already loaded from subfolder)
-        if artistImages.isEmpty {
-            artistImages = staticFiles.compactMap { NSImage(contentsOf: $0) }
-        }
-        artistImageIndex = 0
-
-        // Load animated frames (first matching GIF), else static image.
-        stopGifAnimation()
-        gifFrames = []
-        gifFrameDurations = []
-
-        if let gifURL = animatedFiles.first(where: { $0.pathExtension.lowercased() == "gif" }) {
-            loadGifFrames(from: gifURL)
-        }
-
-        // Set initial image: prefer animated, fallback to static
-        if !gifFrames.isEmpty {
-            currentArtistImage = gifFrames.first
-            startGifAnimation()
-            print("[PlayerViewModel] Loaded animated GIF: \(gifFrames.count) frame(s)")
-        } else {
-            currentArtistImage = artistImages.first
-        }
-
-        let totalStatic = artistImages.count
-        let totalAnimated = gifFrames.count
-        if totalStatic > 0 || totalAnimated > 0 {
-            print("[PlayerViewModel] Loaded \(totalStatic) image(s), \(totalAnimated) animated frame(s)")
-        }
-    }
-
-    private func cycleArtistImage() {
-        // If animated GIF is playing, don't cycle static images
-        guard gifFrames.isEmpty else { return }
-        guard !artistImages.isEmpty else { return }
-        currentArtistImage = artistImages[artistImageIndex % artistImages.count]
-        artistImageIndex += 1
-    }
-
-    // MARK: - GIF Loading
-
-    private func loadGifFrames(from url: URL) {
-        guard let data = try? Data(contentsOf: url) else { return }
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return }
-
-        let frameCount = CGImageSourceGetCount(source)
-        guard frameCount > 1 else {
-            // Single-frame GIF, treat as static
-            if let image = NSImage(contentsOf: url) {
-                gifFrames = [image]
-                gifFrameDurations = [0.1]
-            }
-            return
-        }
-
-        var frames: [NSImage] = []
-        var durations: [Double] = []
-
-        for i in 0..<frameCount {
-            guard let cgImage = CGImageSourceCreateImageAtIndex(source, i, nil) else { continue }
-            let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-            frames.append(nsImage)
-
-            // Extract frame duration from GIF metadata
-            let duration = gifFrameDuration(source: source, index: i)
-            durations.append(duration)
-        }
-
-        gifFrames = frames
-        gifFrameDurations = durations
-        gifFrameIndex = 0
-        gifDirection = 1
-    }
-
-    private func gifFrameDuration(source: CGImageSource, index: Int) -> Double {
-        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [String: Any],
-              let gifDict = properties[kCGImagePropertyGIFDictionary as String] as? [String: Any] else {
-            return 0.1 // default
-        }
-
-        // Try unclamped delay time first, then delay time
-        if let unclamped = gifDict[kCGImagePropertyGIFUnclampedDelayTime as String] as? Double, unclamped > 0 {
-            return unclamped
-        }
-        if let delay = gifDict[kCGImagePropertyGIFDelayTime as String] as? Double, delay > 0 {
-            return delay
-        }
-        return 0.1
-    }
-
-    /// Clears every pack-visual state (GIF frames, images) on playlist switch.
-    func resetPackVisuals() {
-        stopGifAnimation()
-        gifFrames = []
-        gifFrameDurations = []
-        gifFrameIndex = 0
-        artistImages = []
-        currentArtistImage = nil
-        artistImageIndex = 0
-    }
-
-    // MARK: - Boomerang Animation
-
-    func startGifAnimation() {
-        guard !gifFrames.isEmpty, gifTimer == nil else { return }
-        isGifPlaying = true
-        scheduleNextGifFrame()
-    }
-
-    func stopGifAnimation() {
-        gifTimer?.invalidate()
-        gifTimer = nil
-        isGifPlaying = false
-        gifFrameIndex = 0
-        gifDirection = 1
-    }
-
-    private func scheduleNextGifFrame() {
-        guard !gifFrames.isEmpty else { return }
-
-        let duration = gifFrameDurations[gifFrameIndex]
-        gifTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [weak self] _ in
-            self?.advanceGifFrame()
-        }
-    }
-
-    private func advanceGifFrame() {
-        guard !gifFrames.isEmpty else { return }
-
-        // Boomerang: go forward then backward
-        gifFrameIndex += gifDirection
-
-        if gifFrameIndex >= gifFrames.count {
-            // Reached end — reverse direction
-            gifDirection = -1
-            gifFrameIndex = gifFrames.count - 2
-        } else if gifFrameIndex < 0 {
-            // Reached start — reverse direction
-            gifDirection = 1
-            gifFrameIndex = 1
-        }
-
-        // Clamp safety
-        gifFrameIndex = max(0, min(gifFrameIndex, gifFrames.count - 1))
-
-        currentArtistImage = gifFrames[gifFrameIndex]
-
-        scheduleNextGifFrame()
-    }
-
     func togglePlayPause() {
         switch playerState {
         case .playing:
             playerState = .paused
             audioEngine.pause()
-            stopAnimationLoop()
             syncPlaybackTime()
 
         case .paused:
@@ -1609,12 +1270,6 @@ class PlayerViewModel {
             audioEngine.setVolumeImmediate(currentVolume)
             audioEngine.play()
             syncPlaybackTime()
-            // Apply any pending mood immediately on resume
-            if pendingMood != nil {
-                applyPendingMood()
-            } else {
-                startAnimationLoop()
-            }
 
         case .idle:
             guard let queue = mixQueue, !queue.isEmpty,
@@ -1626,7 +1281,6 @@ class PlayerViewModel {
                     barTimestamps: track.analysis?.barTimestamps ?? [],
                     analysis: track.analysis
                 )
-                startAnimationLoop()
             } catch {
                 importError = "Failed to start playback: \(error.localizedDescription)"
             }
@@ -1639,8 +1293,6 @@ class PlayerViewModel {
     }
 
     func skipForward() {
-        showTemporaryPattern(MatrixPatterns.skipForward)
-        cancelPendingMoodTransition()
 
         // Solo Mode: skipping ends the solo now (stop + clear), never mixes.
         if soloMode {
@@ -1702,8 +1354,6 @@ class PlayerViewModel {
                 self.pendingSwitchCompletion = { [weak self] in
                     if self?.playerState == .autoMix {
                         self?.playerState = .playing
-                        self?.stopAnimationLoop()
-                        self?.startAnimationLoop()
                         // Load lyrics AFTER transition completes
                         self?.loadLyrics(for: self?.mixQueue?.currentTrack?.url ?? nextTrack.url)
                         self?.scheduleCrossfadeWarmup()
@@ -1754,8 +1404,6 @@ class PlayerViewModel {
     }
 
     func skipBackward() {
-        showTemporaryPattern(MatrixPatterns.skipBackward)
-        cancelPendingMoodTransition()
 
         guard var queue = mixQueue, !queue.isEmpty else { return }
 
@@ -1775,8 +1423,6 @@ class PlayerViewModel {
                 if playerState == .playing {
                     audioEngine.play()
                     if soloMode { audioEngine.playThroughToEnd() }
-                    stopAnimationLoop()
-                    startAnimationLoop()
                 }
             } catch {
                 importError = "Failed to skip: \(error.localizedDescription)"
@@ -1837,7 +1483,6 @@ class PlayerViewModel {
         preSoloTracks = nil
         // Fresh switch: tear down old pack visuals now; correct visuals
         // load with the first track below (loadTrackAndRestore → loadLyrics).
-        resetPackVisuals()
 
         print("[PlayerViewModel] importFolder called: \(url.path)")
 
@@ -1991,7 +1636,6 @@ class PlayerViewModel {
                     )
                     self.audioEngine.play()
                     self.playerState = .playing
-                    self.startAnimationLoop()
                     print("[PlayerViewModel] Now playing: \(tracks[0].fileName)")
                 } catch {
                     self.importError = "Failed to start playback: \(error.localizedDescription)"
@@ -2043,19 +1687,6 @@ class PlayerViewModel {
                             // Buffer analysis results — avoid per-callback COW copy of MixQueue tracks array.
                             // Results are merged into the queue after all analysis completes.
 
-                            // Apply mood transition for current track from buffered analysis
-                            if let currentURL = self.mixQueue?.currentTrack?.url,
-                               analyzedAsset.url == currentURL,
-                               let analysis = analyzedAsset.analysis {
-                                let newMood = MusicMood.from(analysis: analysis)
-                                if self.playerState == .playing {
-                                    self.scheduleMoodTransition(mood: newMood, analysis: analysis)
-                                } else {
-                                    self.currentMood = newMood
-                                    self.stopAnimationLoop()
-                                    self.startAnimationLoop()
-                                }
-                            }
                         }
                     }
 
@@ -2088,8 +1719,6 @@ class PlayerViewModel {
 
                     // Restart animation loop with mood from analyzed track
                     if self.playerState == .playing {
-                        self.stopAnimationLoop()
-                        self.startAnimationLoop()
                     }
 
                 } catch {
@@ -2121,7 +1750,6 @@ class PlayerViewModel {
                 audioEngine.play()
             }
             playerState = .playing
-            startAnimationLoop()
             return
         }
         blendSourceTrack = nil
@@ -2150,7 +1778,6 @@ class PlayerViewModel {
             )
             audioEngine.play()
             playerState = .playing
-            startAnimationLoop()
             return
         }
 
@@ -2161,8 +1788,6 @@ class PlayerViewModel {
             guard let self else { return }
             if self.playerState == .autoMix {
                 self.playerState = .playing
-                self.stopAnimationLoop()
-                self.startAnimationLoop()
                 self.log("Now playing: \(incoming.fileName)")
                 self.loadLyrics(for: self.mixQueue?.currentTrack?.url ?? incoming.url)
                 self.scheduleCrossfadeWarmup()
@@ -2182,12 +1807,10 @@ class PlayerViewModel {
         mixQueue = nil
         playerState = .idle
         audioEngine.stop()
-        stopAnimationLoop()
         updateNowPlayingInfo()
     }
 
     private func handleTrackEnd() {
-        cancelPendingMoodTransition()
         // An auto blend is starting — drop any held manual blend so they
         // can't double-fire into the same handoff.
         cancelPendingDownbeat()
@@ -2219,7 +1842,6 @@ class PlayerViewModel {
             log("Single track ended: \(onlyName) — stopping")
             playerState = .idle
             audioEngine.stop()
-            stopAnimationLoop()
             updateNowPlayingInfo()
             return
         }
@@ -2258,8 +1880,6 @@ class PlayerViewModel {
             pendingSwitchCompletion = { [weak self] in
                 if self?.playerState == .autoMix {
                     self?.playerState = .playing
-                    self?.stopAnimationLoop()
-                    self?.startAnimationLoop()
                     self?.log("Now playing: \(nextName)")
                     // Load lyrics AFTER transition completes
                     self?.loadLyrics(for: queue.currentTrack?.url ?? nextTrack.url)
@@ -2279,7 +1899,6 @@ class PlayerViewModel {
                         barTimestamps: firstTrack.analysis?.barTimestamps ?? []
                     )
                     playerState = .playing
-                    startAnimationLoop()
                 } catch {
                     importError = "Failed to loop: \(error.localizedDescription)"
                 }
@@ -2287,16 +1906,6 @@ class PlayerViewModel {
         }
 
         updateNowPlayingInfo()
-    }
-
-    // MARK: - Temporary Pattern Display
-
-    private func showTemporaryPattern(_ pattern: [[Bool]]) {
-        temporaryPattern = pattern
-        temporaryPatternTimer?.invalidate()
-        temporaryPatternTimer = Timer.scheduledTimer(withTimeInterval: 0.8, repeats: false) { [weak self] _ in
-            self?.temporaryPattern = nil
-        }
     }
 
     // MARK: - Now Playing / Control Center Integration
@@ -2353,119 +1962,6 @@ class PlayerViewModel {
         MPNowPlayingInfoCenter.default().playbackState = (playerState == .playing) ? .playing : .paused
     }
 
-    // MARK: - Animation Loop
-
-    private func startAnimationLoop() {
-        guard animationTimer == nil else { return }
-
-        currentMood = MusicMood.from(analysis: mixQueue?.currentTrack?.analysis)
-        let baseSpeed = currentMood.animationSpeed
-        let speed = powerManager.isPluggedIn ? baseSpeed * 0.5 : baseSpeed
-        animationFrame = 0
-
-        animationTimer = Timer.scheduledTimer(withTimeInterval: speed, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-
-            let frames: [[[Bool]]]
-
-            switch self.currentMood {
-            case .energeticHappy: frames = MatrixPatterns.moodEnergeticHappy
-            case .energeticAngry:  frames = MatrixPatterns.moodEnergeticAngry
-            case .calmHappy:       frames = MatrixPatterns.moodCalmHappy
-            case .calmSad:         frames = MatrixPatterns.moodCalmSad
-            case .neutral:
-                let rand = Int.random(in: 0...100)
-                if rand < 5 {
-                    self.animatedPattern = MatrixPatterns.smileyBlink
-                } else if rand < 40 {
-                    self.animatedPattern = MatrixPatterns.smileySing1
-                } else if rand < 70 {
-                    self.animatedPattern = MatrixPatterns.smileySing2
-                } else {
-                    self.animatedPattern = MatrixPatterns.smileyFace
-                }
-                return
-            }
-
-            self.animatedPattern = frames[self.animationFrame]
-            self.animationFrame = (self.animationFrame + 1) % frames.count
-        }
-
-        startGifAnimation()
-    }
-
-    private func stopAnimationLoop() {
-        animationTimer?.invalidate()
-        animationTimer = nil
-        animationFrame = 0
-        animatedPattern = MatrixPatterns.smileyFace
-        stopGifAnimation()
-    }
-
-    // MARK: - Phase-Aligned Mood Transition
-
-    /// Schedules mood change at the next bar boundary for smooth visual transition.
-    private func scheduleMoodTransition(mood: MusicMood, analysis: TrackAnalysis) {
-        moodTransitionTimer?.invalidate()
-        pendingMood = mood
-
-        guard !analysis.barTimestamps.isEmpty else {
-            applyPendingMood()
-            return
-        }
-
-        let currentTime = audioEngine.currentTime
-        let barTimestamps = analysis.barTimestamps
-
-        // Find next bar boundary after current position
-        var nextBar: Double?
-        for barTime in barTimestamps {
-            if barTime > currentTime + 0.1 {
-                nextBar = barTime
-                break
-            }
-        }
-
-        // If no future bar found, use the last bar + bar interval
-        if nextBar == nil, let lastBar = barTimestamps.last, let bpm = analysis.bpm, bpm > 0 {
-            let barInterval = 240.0 / bpm
-            nextBar = lastBar + barInterval
-        }
-
-        guard let targetTime = nextBar else {
-            applyPendingMood()
-            return
-        }
-
-        let delay = targetTime - currentTime
-        print("[PlayerViewModel] Mood transition scheduled in \(String(format: "%.2f", delay))s (at bar \(String(format: "%.2f", targetTime))s)")
-
-        moodTransitionTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            self?.applyPendingMood()
-        }
-    }
-
-    /// Applies the pending mood change immediately.
-    private func applyPendingMood() {
-        moodTransitionTimer?.invalidate()
-        moodTransitionTimer = nil
-
-        guard let mood = pendingMood else { return }
-        pendingMood = nil
-
-        currentMood = mood
-        stopAnimationLoop()
-        startAnimationLoop()
-        print("[PlayerViewModel] Mood applied: \(mood.rawValue)")
-    }
-
-    /// Cancels any pending mood transition (called when switching tracks).
-    private func cancelPendingMoodTransition() {
-        moodTransitionTimer?.invalidate()
-        moodTransitionTimer = nil
-        pendingMood = nil
-    }
-
     // MARK: - Import
 
     func importViaOpenMix(url: URL, startFileName: String? = nil, blend: Bool = false, artistFilter: String? = nil) {
@@ -2485,9 +1981,7 @@ class PlayerViewModel {
         }
 
         // Stop any existing playback and clear old state
-        cancelPendingMoodTransition()
         if !blend {
-            stopAnimationLoop()
             audioEngine.stop()
         }
         playlistFolderURL = url
@@ -2501,15 +1995,6 @@ class PlayerViewModel {
         }
         soloMode = false
         preSoloTracks = nil
-        if blend {
-            loadArtistImages(from: url)
-        } else {
-            // Fresh switch: tear down old pack visuals now so the previous
-            // playlist's video/image can't linger. Correct visuals load with
-            // the first track below (loadTrackAndRestore → loadLyrics).
-            resetPackVisuals()
-        }
-
         importError = nil
         analysisProgress = 0
         requestedStartFileName = startFileName
@@ -2650,7 +2135,6 @@ class PlayerViewModel {
                 )
                 audioEngine.play()
                 playerState = .playing
-                startAnimationLoop()
                 print("[PlayerViewModel] Now playing: \(tracks[startIndex].fileName)")
             } catch {
                 print("[PlayerViewModel] Failed to start playback: \(error)")
@@ -2661,8 +2145,7 @@ class PlayerViewModel {
         }
 
         // Background: generate .cellax cache files for the played album only
-        cacheTask = Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
+        cacheTask = Task.detached(priority: .utility) {
             let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
             let fm = FileManager.default
             let contents = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []

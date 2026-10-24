@@ -18,9 +18,7 @@ macOS music player that turns a local folder library into a continuous, DJ-quali
 │  ├── Crossfader              equal-power curves, key-corrected,  │
 │  │                            vocal-aware transition math        │
 │  ├── MixAudioEngine          AVAudioEngine playback with         │
-│  │                            scheduled seam crossfades          │
-│  └── PreviewAudioEngine      independent engine behind the       │
-│                               floating preview mini player       │
+│                               scheduled seam crossfades          │
 │
 │  Views (4 tabs): Cluster · Cella · Clarc · Config
 └──────────────────────────────────────────────────────────────────┘
@@ -33,7 +31,7 @@ See **[ENGINE.md](ENGINE.md)** for the full engine implementation notes.
 | Tab | What lives there |
 |-----|------------------|
 | **Cluster** | Library browser: a `.cluster` library holds `.cella` packs; browse packs, artists, albums, and open artist folders. Includes CueLab and the first-visit Cluster guide (floating glass pill, bottom-right) |
-| **Cella** | The player: full-screen playback, Apple Music-style lyrics, queue reorder, dot-matrix patterns, artist images/videos, engine transitions |
+| **Cella** | The player: full-screen playback, Apple Music-style lyrics, queue reorder, engine transitions |
 | **Clarc** | Lyric studio: record timings with R/M, edit lines, bulk paste, save `.clarc` files; "How to Clarc?" format tutorial next to Undo |
 | **Config** | Audio & app settings: Orquesta EQ stage (audio profiles), quick guide, about |
 
@@ -42,16 +40,12 @@ See **[ENGINE.md](ENGINE.md)** for the full engine implementation notes.
 - **Automix engine** — native on-device analysis (BPM, musical key, energy profile, vocal boundaries, intro/outro) with a weighted, directed ordering pass led by outro→intro energy seam matching
 - **Vocal-aware crossfades** — equal-power curves with five vocal transition strategies (duck/priority), tempo-aligned and key-corrected seams
 - **Blend import** — crossfade a new playlist *into* whatever is currently playing
-- **Artist solo** — scope playback and visuals to one artist inside a pack
+- **Artist solo** — scope playback to one artist inside a pack
 - **Cluster library** — Apple Photos-style one-time library pick, `.cluster` → `.cella` packs → artists/albums, `.cue`-based pack classification, NEW badges for albums added later
 - **CLARC/1 lyric format** — sections-based, LRC-compatible timestamps, vocalist attribution (`[v1]`, `[v1&v2]`), harmony lines (`[har]`), `[DUO]` dual-line layout; spec in [`clarc/FORMAT.md`](clarc/FORMAT.md)
 - **Lyric studio (Clarc tab)** — timed recording (R toggles, M stamps the current line), editing tools, bulk paste, round-trip parse/write that preserves unknown metadata
 - **Command palette** — `/` opens anywhere (except the Clarc editor), anchored to your mouse position with a bloom animation; shows the current lyric line, tabs, queue tracks, and lyric-insert commands
-- **Dot-matrix display** — 9×5 pattern matrix with mood-driven animations (analyzing, automix, skip, smiley...) and a 3×5 pixel font text scroller
-- **Line visualizer** — procedurally generated path with energy-reactive trail sweeping the Frutiger Aurora palette (green→aqua→sky→sun)
-- **Artist visuals** — pack `cma/` folders serve images or videos (including `.cma` motion files) synced to the playing track's artist
 - **Orquesta EQ stage** — 10-band parametric EQ presented as a half-circle orchestra stage (each seat is a band), bundled surround staging presets: natural, calido, oceano, aurora, frutiger aurora + custom
-- **Preview mini player** — drop/open an audio file anywhere and get a floating Quick Look-style card with its own Orquesta panel, above the main app even in fullscreen
 - **CueLab** — build ExactAudioCopy-style `.cue` sheets: rename ("NN - Title" detect), move files into albums, write `.cue`, create `lrc/` folders
 - **One visual language** — Frutiger Aurora glass everywhere (trail/glow palette sweeps green→aqua→sky→sun); look and sound are separated: preset choices are audio profiles, not themes
 - **macOS native** — custom circle cursor with press animation, drag-to-switch tab bar, keyboard shortcuts, remote-ready playback
@@ -63,7 +57,7 @@ See **[ENGINE.md](ENGINE.md)** for the full engine implementation notes.
 3. **Order** — `MixEngine.buildMixQueue` walks compatibility scores (energy 0.55, key 0.18, tempo 0.14, spectral 0.07, vocal 0.06 + hard caps) and anchors the current track at index 0
 4. **Play** — `MixAudioEngine` streams the queue in real time through AVAudioEngine
 5. **Crossfade** — at seams the engine schedules equal-power, vocal-aware transitions with generous lead time, logging each one
-6. **Listen** — lyric lines scroll with the playhead; dot-matrix and line visuals react to energy and mood
+6. **Listen** — lyric lines scroll with the playhead, colored by the Frutiger Aurora accent
 
 ## Library layout
 
@@ -76,13 +70,11 @@ My Library.cluster/              ← the one library Cella remembers
 │   │   ├── .cue                 ← per-album cue sheet (artist + track names)
 │   │   ├── Cache/               ← *.cellax analysis cache (generated)
 │   │   └── lrc/                 ← *.clarc lyrics (generated by Clarc tab)
-│   ├── cma/                     ← artist visuals: *.cma / *.mp4 / *.gif video
-│   │   └── <Artist>/              or jpg/png/webp stills, per artist
 │   └── lrc/                     ← pack-level lyrics fallback
 ```
 
 - Naming: `Artist - Title.ext` is parsed into artist/title metadata; `.cue` performer/track data takes precedence when present.
-- `cma`, `lrc`, `Cache` folders are never listed as albums.
+- Legacy `cma`, plus `lrc` and `Cache` folders are never listed as albums.
 
 ## Command palette
 
@@ -138,7 +130,7 @@ The built-in "How to Clarc?" tutorial (button next to Undo in the Clarc tools ba
 
 Audio: `mp3`, `wav`, `m4a`, `flac`, `aac`, `caf`, `ogg`, `aif`
 
-Other: `.cella` packs, `.cluster` libraries, `.clarc` lyrics, `.cue` sheets, `.cellax` analysis cache, `.cma` motion files, images for artist visuals.
+Other: `.cella` packs, `.cluster` libraries, `.clarc` lyrics, `.cue` sheets, `.cellax` analysis cache.
 
 ## Requirements
 

@@ -64,7 +64,6 @@ struct CellaView: View {
 
     private var screenPage: some View {
         CellaScreenView(
-            pattern: viewModel.currentPattern,
             viewModel: viewModel
         )
         .overlay {

@@ -8,22 +8,13 @@
 import Foundation
 
 /// Music mood derived from BPM, energy, and key analysis.
+/// Consumed by the engine's mood-aware crossfade parameter computation.
 enum MusicMood: String {
     case energeticHappy
     case energeticAngry
     case calmHappy
     case calmSad
     case neutral
-
-    var animationSpeed: TimeInterval {
-        switch self {
-        case .energeticHappy: return 0.10
-        case .energeticAngry:  return 0.12
-        case .calmHappy:       return 0.25
-        case .calmSad:         return 0.30
-        case .neutral:         return 0.15
-        }
-    }
 
     /// Determines mood from track analysis using adaptive thresholds.
     static func from(analysis: TrackAnalysis?) -> MusicMood {
@@ -72,22 +63,22 @@ enum MusicMood: String {
 }
 
 enum PlayerState: Equatable {
-    /// No music activity — shows static smiley face
+    /// No music activity
     case idle
 
-    /// Music is playing — smiley face animates with breathing effect
+    /// Music is playing
     case playing
 
-    /// Music is paused — smiley face is static with "Music Paused" info
+    /// Music is paused
     case paused
 
-    /// Tracks are being analyzed — shows analyzing dot pattern
+    /// Tracks are being analyzed
     case analyzing(progress: Double)
 
-    /// Mix queue is being built — shows loading pattern
+    /// Mix queue is being built
     case loading
 
-    /// AutoMix state — shows automix pattern
+    /// AutoMix transition in progress
     case autoMix
 
     /// Whether the player is in an active playback state.

@@ -394,7 +394,7 @@ struct ClusterLibrary {
             }
         }
         return counts.map { key, v in
-            Artist(name: v.display, key: key, trackCount: v.tracks, packCount: 1, albumCount: v.albums.count, trackURLs: v.urls, files: v.files, videoURL: nil, coverURL: v.cover)
+            Artist(name: v.display, key: key, trackCount: v.tracks, packCount: 1, albumCount: v.albums.count, trackURLs: v.urls, files: v.files, coverURL: v.cover)
         }.sorted { $0.trackCount > $1.trackCount }
     }
 
@@ -419,7 +419,7 @@ struct ClusterLibrary {
         }
         var out: [Artist] = []
         for (key, v) in counts {
-            out.append(Artist(name: v.display, key: key, trackCount: v.urls.count, packCount: v.packs.count, albumCount: 0, trackURLs: v.urls, files: v.urls.map { $0.lastPathComponent }, videoURL: nil, coverURL: nil))
+            out.append(Artist(name: v.display, key: key, trackCount: v.urls.count, packCount: v.packs.count, albumCount: 0, trackURLs: v.urls, files: v.urls.map { $0.lastPathComponent }, coverURL: nil))
         }
         return out.sorted { $0.trackCount > $1.trackCount }
     }
@@ -453,7 +453,7 @@ struct ClusterLibrary {
         }
         var out: [Artist] = []
         for (key, v) in counts {
-            out.append(Artist(name: v.display, key: key, trackCount: v.urls.count, packCount: v.packs.count, albumCount: 0, trackURLs: v.urls, files: v.urls.map { $0.lastPathComponent }, videoURL: nil, coverURL: nil))
+            out.append(Artist(name: v.display, key: key, trackCount: v.urls.count, packCount: v.packs.count, albumCount: 0, trackURLs: v.urls, files: v.urls.map { $0.lastPathComponent }, coverURL: nil))
         }
         return out.sorted { $0.trackCount > $1.trackCount }
     }

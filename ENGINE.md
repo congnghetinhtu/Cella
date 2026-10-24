@@ -28,8 +28,6 @@ Cella's audio engine is a **single-process, native-Swift pipeline**. Analysis, o
 │  └──► MixAudioEngine             AVAudioEngine playback +        │
 │       scheduled seam transitions at generous lead time           │
 │                                                                  │
-│  PreviewAudioEngine              independent engine behind the   │
-│       floating mini player (shares OrquestaDSP geometry)         │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -49,7 +47,6 @@ User action (Cluster tab, drag & drop, Finder open, palette)
       → MixQueue created; optional artistFilter solo-scopes the pack
       → optional blend: capture the currently playing track so the next
         mix transitions out of it (blendPending)
-      → load artist visuals from the pack's cma/ folder
 ```
 
 Import modes:
@@ -66,7 +63,7 @@ Import modes:
 
 - Built on the on-device SPFK packages: **spfk-tempo**, **spfk-musical-analysis**, **spfk-loudness** (plus spfk-audio-base headers they carry).
 - Produces per-track: tempo (BPM), musical key, RMS energy profile, average energy, vocal boundary detection, intro/outro structure points, spectral features.
-- Results land on `TrackAsset.analysis`; BPM/key feed the mood system, energy drives the visualizer trail, structure shapes transition points.
+- Results land on `TrackAsset.analysis`; BPM/key feed the mood-aware crossfade parameters, structure shapes transition points.
 - **Caching:** each analysis of an audio file is written to a `.cellax` file inside that album's `Cache/` subfolder. Cache is invalidated when the audio file is newer than its cache.
 - Background generation (for the played album) runs with a 200 ms throttle between tracks and yields the main thread between them.
 - A track that throws is skipped and logged; playback continues without scores.
@@ -111,7 +108,7 @@ Each finished/happening transition is recorded in a `TransitionLog` entry (from-
 
 ### 6. DSP — Orquesta
 
-`OrquestaDSP` holds the shared EQ/surround/stereo-width geometry used by **both** engines (main player and preview) so one sounds like the other:
+`OrquestaDSP` holds the shared EQ/surround/stereo-width geometry used by the main engine:
 
 - 10-band parametric profile EQ: 31 Hz → 16 kHz.
 - Four-band surround staging (low-shelf + parametric bands).
@@ -129,7 +126,6 @@ Config-tab presets (`OrquestaPreset`): `natural`, `calido`, `oceano`, `aurora`, 
 | `Cella/Mixer/MixEngine.swift` | Compatibility scoring, queue ordering |
 | `Cella/Crossfader/Crossfader.swift` | Transition params + crossfade curve math |
 | `Cella/AudioEngine/MixAudioEngine.swift` | Real-time playback engine + seam scheduling |
-| `Cella/AudioEngine/PreviewAudioEngine.swift` | Independent mini-player engine |
 | `Cella/AudioEngine/OrquestaDSP.swift` | Shared EQ/surround/width geometry |
 | `Cella/AudioEngine/StereoWidthEffect.swift` | Stereo width processing |
 | `Cella/Models/MixQueue.swift` | Queue model (jump/seek/move primitives) |

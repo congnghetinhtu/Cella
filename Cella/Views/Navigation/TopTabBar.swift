@@ -1012,7 +1012,7 @@ struct NowPlayingBar: View {
                             color: theme.textPrimary,
                             width: 150
                         )
-                        if let artist = track.artistName, !track.displayArtist.isEmpty {
+                        if track.artistName != nil, !track.displayArtist.isEmpty {
                             Text(track.displayArtist)
                                 .font(.system(size: 11, weight: .medium, design: .rounded))
                                 .foregroundStyle(theme.textSecondary)

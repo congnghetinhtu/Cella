@@ -1,30 +1,7 @@
 import SwiftUI
 import AVFoundation
 
-/// Isolated artist-image background — only re-renders when the image
-/// identity changes, not on volume / currentTime ticks. Prevents scroll
-/// from stuttering video.
-struct ArtBackgroundLayer: View {
-    let artistImage: NSImage?
-    let isActive: Bool
-
-    var body: some View {
-        Group {
-            if isActive, let image = artistImage {
-                Image(nsImage: image)
-                    .resizable()
-                    .aspectRatio(21.0 / 9.0, contentMode: .fill)
-                    .clipped()
-                    .opacity(0.55)
-                    .transition(.opacity)
-            }
-        }
-    }
-}
-
-
 struct CellaScreenView: View {
-    let pattern: [[Bool]]
     var viewModel: PlayerViewModel?
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -48,8 +25,7 @@ struct CellaScreenView: View {
     @State private var swipeTask: Task<Void, Never>?
     @State private var swipeActive: Bool = false
 
-    private static let barWidth: CGFloat =
-        CGFloat(MatrixPatterns.columns) * 36 + CGFloat(MatrixPatterns.columns - 1) * 24
+    private static let barWidth: CGFloat = 516 // 9 columns × 36pt + 8 gaps × 24pt (legacy pattern grid metrics)
 
     /// Song header's visible text-edge inset as a fraction of stage width —
     /// the same in EVERY lyrics mode. The internal `textInset` is
@@ -180,18 +156,6 @@ struct CellaScreenView: View {
     }
 
     // MARK: - Sub-layers
-
-    @ViewBuilder
-    private var placeholderBackground: some View {
-        // Artist image background — only when playing (isolated so volume
-        // scrub doesn't re-render it).
-        ArtBackgroundLayer(
-            artistImage: viewModel?.currentArtistImage,
-            isActive: viewModel?.playerState.isPlaying == true || viewModel?.playerState == .autoMix
-        )
-        .animation(.smooth, value: viewModel?.currentArtistImage?.hash)
-        .transition(.opacity)
-    }
 
     @ViewBuilder
     private var fullLyricsLayer: some View {
@@ -418,7 +382,6 @@ struct CellaScreenView: View {
     // Split so the type-checker sees small expressions, not one giant body.
     private var coreStack: some View {
         ZStack {
-            placeholderBackground
             fullLyricsLayer
             songHeader
             mixOverlay
