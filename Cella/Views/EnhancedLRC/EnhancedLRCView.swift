@@ -10,6 +10,10 @@ struct EnhancedLRCView: View {
     @Environment(\.theme) private var theme
     @State private var keyMonitor: Any?
     @State private var isLoading = false
+    // First-visit format guide: auto-opens once per install (clarcGuideSeen);
+    // clarcGuideUp gates the R/M key monitor while the overlay is up.
+    @AppStorage("clarcGuideSeen") private var clarcGuideSeen = false
+    @State private var clarcGuideUp = false
     @State private var showBulkPaste = false
     @State private var bulkText = ""
     /// Inline metadata-adjustment panel below the meta bar.
@@ -93,6 +97,8 @@ struct EnhancedLRCView: View {
         .onAppear {
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak viewModel] event in
                 guard let viewModel, viewModel.currentTrackURL != nil else { return event }
+                // Format guide up at the window root — R/M waits.
+                if clarcGuideUp { return event }
                 // Typing in paste box / line fields — let R/M type, don't record.
                 if NSApp.keyWindow?.firstResponder is NSTextView { return event }
                 // Behind the bulk-paste sheet, or with Command held (menu
@@ -132,6 +138,12 @@ struct EnhancedLRCView: View {
         }
         .onAppear {
             hasAudio = viewModel.currentTrackURL != nil
+            maybeAutoShowClarcGuide()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clarcGuideRequest)) { note in
+            // True/false mirror: the guide overlay retires the R/M swallow
+            // exactly when it is dismissed at the window root.
+            clarcGuideUp = note.object as? Bool ?? false
         }
         .sheet(item: $viewModel.pendingConversion) { pending in
             ClarcConversionSheet(
@@ -143,6 +155,22 @@ struct EnhancedLRCView: View {
                 },
                 onCancel: { viewModel.cancelClarcConversion() })
         }
+    }
+
+    // MARK: - Format guide (first visit + "?")
+
+    private func maybeAutoShowClarcGuide() {
+        guard !clarcGuideSeen else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            guard !clarcGuideSeen else { return }
+            requestClarcGuide()
+        }
+    }
+
+    private func requestClarcGuide() {
+        clarcGuideSeen = true
+        clarcGuideUp = true
+        NotificationCenter.default.post(name: .clarcGuideRequest, object: true)
     }
 
     // MARK: - Header
@@ -225,6 +253,15 @@ struct EnhancedLRCView: View {
             .buttonStyle(AeroButtonStyle())
             .disabled(viewModel.currentTrackURL == nil)
             .opacity(viewModel.currentTrackURL == nil ? 0.4 : 1.0)
+
+            Button {
+                requestClarcGuide()
+            } label: {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 14, weight: .medium))
+            }
+            .buttonStyle(AeroButtonStyle())
+            .help("How CLARC works — open the format guide")
 
             if viewModel.currentTrackURL != nil {
                 Button {

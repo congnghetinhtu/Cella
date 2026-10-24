@@ -27,6 +27,10 @@ struct ContentView: View {
     @State private var clusterFolderVeil = false
     /// Shared with ClusterView — the guide only auto-opens on first visit.
     @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
+    /// Clarc format guide overlay state (opened via .clarcGuideRequest).
+    @State private var showClarcGuide = false
+    /// Shared with the Clarc editor — the format guide only auto-opens once.
+    @AppStorage("clarcGuideSeen") private var clarcGuideSeen = false
     @State private var pendingLRCAudioURL: URL?
     @State private var showCommandPalette = false
     @State private var commandText = ""
@@ -237,6 +241,14 @@ struct ContentView: View {
     private func dismissClusterGuide() {
         clusterGuideSeen = true
         withAnimation(.snappy) { showClusterGuide = false }
+    }
+
+    /// Clarc guide dismissal: mark seen, mirror the closed state back to the
+    /// editor (its R/M key monitor resumes), and drop the window-root overlay.
+    private func dismissClarcGuide() {
+        clarcGuideSeen = true
+        NotificationCenter.default.post(name: .clarcGuideRequest, object: false)
+        withAnimation(.snappy) { showClarcGuide = false }
     }
 
     private var bloomTransition: AnyTransition {
@@ -490,6 +502,13 @@ struct ContentView: View {
                 .transition(.scale(scale: 0.95).combined(with: .opacity))
             }
 
+            // Clarc guide — same window-root presentation, same reasoning.
+            // The Clarc editor posts .clarcGuideRequest (object = true/false).
+            if showClarcGuide {
+                ClarcGuideOverlay(onClose: { dismissClarcGuide() })
+                    .transition(.scale(scale: 0.95).combined(with: .opacity))
+            }
+
             // Command palette — minimal input bar at cursor
             if showCommandPalette {
                 Color.black.opacity(0.15)
@@ -675,6 +694,10 @@ struct ContentView: View {
                 dismissClusterGuide()
                 return .handled
             }
+            if showClarcGuide {
+                dismissClarcGuide()
+                return .handled
+            }
             if isEditingText { return .ignored }
             return .ignored
         }
@@ -723,6 +746,12 @@ struct ContentView: View {
             guard let name = note.object as? String else { return }
             clusterGuideName = name
             withAnimation(.snappy) { showClusterGuide = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .clarcGuideRequest)) { note in
+            // object = true presents the overlay; object = false is just the
+            // retire mirror (handled in dismissClarcGuide).
+            guard note.object as? Bool == true else { return }
+            withAnimation(.snappy) { showClarcGuide = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .clusterFolderVeil)) { note in
             // note.object is the opened pack path, or nil on close.
