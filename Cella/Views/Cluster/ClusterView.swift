@@ -309,6 +309,10 @@ struct ClusterView: View {
     @State private var artistPackFilter: String?
     @State private var showAllArtists = false
     @State private var openedPackPath: String?
+    /// First-visit walkthrough: auto-opens once per install; the toolbar
+    /// guide button reopens it any time.
+    @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
+    @State private var showGuide = false
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -361,10 +365,12 @@ struct ClusterView: View {
             if clusterMode == .artists {
                 reloadLibraryArtists()
             }
+            maybeAutoShowGuide()
         }
         .onChange(of: library?.url) { _, _ in
             viewModel?.clusterLibrary = library
             if clusterMode == .artists { reloadLibraryArtists() }
+            maybeAutoShowGuide()
         }
         .onChange(of: libraryPath) { _, path in
             // External library switch (Finder double-click on .cluster package).
@@ -494,6 +500,14 @@ struct ClusterView: View {
             },
             onCommitDrop: { pack, rows in commitDrop(pack: pack, rows: rows) }
         ))
+        .overlay(alignment: .center) {
+            if showGuide, let lib = library {
+                ClusterGuideOverlay(
+                    libraryName: libraryTitle(lib),
+                    onClose: { dismissGuide() }
+                )
+            }
+        }
     }
 
     private var statsBar: some View {
@@ -676,6 +690,17 @@ struct ClusterView: View {
                 .buttonStyle(.plain)
                 .help("Add songs to a playlist")
             }
+
+            Button {
+                withAnimation(.smooth) { showGuide = true }
+            } label: {
+                Image(systemName: "questionmark.circle").font(.system(size: 12))
+                    .foregroundStyle(theme.textSecondary)
+                    .padding(7)
+                    .background(Circle().fill(theme.textSecondary.opacity(0.1)))
+            }
+            .buttonStyle(.plain)
+            .help("Cluster guide")
 
             Button { rescan() } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 12))
@@ -1494,6 +1519,24 @@ struct ClusterView: View {
                 withAnimation(.smooth(duration: 0.3)) { dropNotice = nil }
             }
         }
+    }
+
+    // MARK: - Cluster guide
+
+    /// Auto-opens the paged guide once: only with a real library loaded
+    /// (the empty state carries its own welcome), and only on the first
+    /// visit ever. Short delay so the entrance plays over a settled grid.
+    private func maybeAutoShowGuide() {
+        guard library != nil, !clusterGuideSeen, !showGuide else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            guard library != nil, !clusterGuideSeen else { return }
+            withAnimation(.smooth) { showGuide = true }
+        }
+    }
+
+    private func dismissGuide() {
+        clusterGuideSeen = true
+        withAnimation(.smooth) { showGuide = false }
     }
 
     private func autoLoadDefault() -> Bool {
