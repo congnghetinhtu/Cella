@@ -1,0 +1,161 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-08T00:00:00Z",
+  "title": "Design System: Cella",
+  "extensions": {
+    "colorMeta": {
+      "dark-accent": {
+        "role": "primary",
+        "displayName": "Warm Fire",
+        "canonical": "#FF8038",
+        "tonalRamp": ["#3D1409", "#5C1F0E", "#7A2A13", "#A33818", "#CC461D", "#E06030", "#FF8038", "#FFB070"]
+      },
+      "dark-bg": {
+        "role": "neutral",
+        "displayName": "Deep Void",
+        "canonical": "#0D0D0D",
+        "tonalRamp": ["#050505", "#0A0A0A", "#0D0D0D", "#141414", "#1C1C1C", "#242424", "#2E2E2E", "#3A3A3A"]
+      },
+      "dark-screen": {
+        "role": "neutral",
+        "displayName": "Warm Surface",
+        "canonical": "#231A16",
+        "tonalRamp": ["#0E0A08", "#16110E", "#1E1713", "#231A16", "#2D221C", "#3A2C24", "#48382E", "#5A4838"]
+      },
+      "seafoam-accent": {
+        "role": "primary",
+        "displayName": "Seafoam Mist",
+        "canonical": "#93E9BE",
+        "tonalRamp": ["#1A3D2A", "#265A3C", "#357A50", "#4A9A68", "#62BA82", "#7CD4A0", "#93E9BE", "#B8F2D6"]
+      },
+      "seafoam-bg": {
+        "role": "neutral",
+        "displayName": "Cool Void",
+        "canonical": "#0D1210",
+        "tonalRamp": ["#050806", "#090D0B", "#0D1210", "#141A16", "#1C2420", "#242E28", "#2E3A32", "#38483E"]
+      },
+      "seafoam-screen": {
+        "role": "neutral",
+        "displayName": "Cool Surface",
+        "canonical": "#1A2420",
+        "tonalRamp": ["#0A1210", "#101A16", "#16201C", "#1A2420", "#222E28", "#2C3A32", "#36483E", "#42584A"]
+      },
+      "bipolar-accent": {
+        "role": "primary",
+        "displayName": "Blush",
+        "canonical": "#FF5C8A",
+        "tonalRamp": ["#3D1421", "#5C1F32", "#7A2A44", "#A33858", "#CC466E", "#E06080", "#FF5C8A", "#FF8CAC"]
+      },
+      "bipolar-bg": {
+        "role": "neutral",
+        "displayName": "Indigo Void",
+        "canonical": "#080612",
+        "tonalRamp": ["#030208", "#05040D", "#080612", "#0E0B1A", "#141022", "#1A162C", "#221E38", "#2C2846"]
+      },
+      "bipolar-screen": {
+        "role": "neutral",
+        "displayName": "Indigo Surface",
+        "canonical": "#14102A",
+        "tonalRamp": ["#080614", "#0C0A1C", "#100E24", "#14102A", "#1A1634", "#221E40", "#2C284E", "#383460"]
+      }
+    },
+    "typographyMeta": {
+      "display": { "displayName": "Display", "purpose": "Mood labels and large status text on emotion screen." },
+      "body": { "displayName": "Body", "purpose": "Descriptions, settings text, secondary content." },
+      "label": { "displayName": "Label", "purpose": "Tab labels, badges, metadata, compact UI text." },
+      "mono": { "displayName": "Mono", "purpose": "Timestamps, queue track numbers, technical indicators." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "snappy", "value": "spring(response: 0.25, dampingFraction: 0.8)", "purpose": "Fast UI interactions: button taps, tab switches, hovers, dot state changes." },
+      { "name": "smooth", "value": "spring(response: 0.35, dampingFraction: 0.85)", "purpose": "Content transitions: theme changes, image crossfades, blur." },
+      { "name": "lyrics-spring", "value": "interpolatingSpring(stiffness: 60, damping: 18)", "purpose": "Lyrics line transitions: scroll, fade, depth-of-field." }
+    ],
+    "breakpoints": []
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Capsule button with theme accent fill. Used for primary actions (import playlist).",
+      "html": "<button class=\"ds-btn-primary\">Import Playlist</button>",
+      "css": ".ds-btn-primary { background: #FF8038; color: #fff; padding: 14px 32px; border: none; border-radius: 999px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; font-weight: 500; cursor: pointer; transition: opacity 0.2s ease; } .ds-btn-primary:hover { opacity: 0.9; } .ds-btn-primary:focus-visible { outline: 2px solid #FF8038; outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Floating surface container with subtle border. Used for config sections, cluster panels.",
+      "html": "<div class=\"ds-card\"><h3>Settings</h3><p>Content here</p></div>",
+      "css": ".ds-card { background: #231A16; color: #D9D9D9; padding: 28px; border-radius: 18px; border: 1px solid rgba(217,217,217,0.10); } .ds-card h3 { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 15px; font-weight: 600; margin: 0 0 12px 0; } .ds-card p { font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 13px; font-weight: 400; line-height: 1.4; margin: 0; color: #666666; }"
+    },
+    {
+      "name": "Pill Badge",
+      "kind": "chip",
+      "refersTo": "pill-badge",
+      "description": "Compact capsule indicator. Active state uses accent fill.",
+      "html": "<span class=\"ds-pill\">3 tracks</span>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; gap: 4px; background: #FF8038; color: #fff; padding: 6px 14px; border-radius: 999px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; font-weight: 600; } .ds-pill--inactive { background: #231A16; color: #6B4F3A; }"
+    },
+    {
+      "name": "Tab Pill",
+      "kind": "nav",
+      "refersTo": "tab-pill",
+      "description": "Individual tab item in the top tab bar. Capsule shape with sliding selection.",
+      "html": "<div class=\"ds-tab-pill\">Cella</div>",
+      "css": ".ds-tab-pill { display: inline-flex; align-items: center; padding: 10px 18px; border-radius: 999px; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 14px; font-weight: 500; color: #6B4F3A; background: transparent; cursor: pointer; transition: color 0.2s ease; } .ds-tab-pill:hover { color: #D9D9D9; } .ds-tab-pill--active { background: rgba(255,128,56,0.20); color: #FF8038; }"
+    },
+    {
+      "name": "Dot Matrix Dot",
+      "kind": "custom",
+      "refersTo": "dot-inactive",
+      "description": "Individual circle in the 9x5 dot matrix grid. Active dots glow with trail palette color.",
+      "html": "<div class=\"ds-dot-grid\"><div class=\"ds-dot ds-dot--active\"></div><div class=\"ds-dot\"></div><div class=\"ds-dot ds-dot--active\"></div></div>",
+      "css": ".ds-dot-grid { display: flex; flex-direction: column; gap: 24px; } .ds-dot { width: 36px; height: 36px; border-radius: 50%; background: #3E2D24; opacity: 0.6; transition: background 0.25s ease, opacity 0.25s ease; } .ds-dot--active { background: #FF8038; opacity: 0.9; }"
+    },
+    {
+      "name": "Player Indicator",
+      "kind": "custom",
+      "refersTo": "player-indicator",
+      "description": "Subtle status text below the emotion screen (playing/paused).",
+      "html": "<div class=\"ds-player-indicator\">Music Playing</div>",
+      "css": ".ds-player-indicator { height: 20px; display: flex; align-items: center; justify-content: center; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 12px; font-weight: 400; color: #666666; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Living Console",
+    "overview": "Cella's visual system is a control surface that breathes. Dark, focused backgrounds host soft floating surfaces that respond to music — the dot matrix pulses, the line visualizer trails, and the color palette shifts entirely between themes. Each theme (Dark, Seafoam, Bipolar) is a distinct personality, not a recolor; the system is chameleon by design.\n\nThe aesthetic is nocturnal precision meets organic warmth: deep, near-black backgrounds with carefully calibrated accent colors that feel alive when music flows. Components float above the darkness — soft-edged, gently bounded, never heavy. The dot matrix display is the emotional core: a 9x5 grid of circles that animate between states with spring physics, reacting to player state, mood, and analysis data.",
+    "keyCharacteristics": [
+      "Three chameleon themes that transform personality, not just palette",
+      "Soft floating surfaces with subtle borders over near-black depth",
+      "Reactive dot matrix as emotional feedback center",
+      "Spring-based motion language (snappy for UI, smooth for content)",
+      "High contrast accent on dark — accents appear only when music flows"
+    ],
+    "rules": [
+      { "name": "The Chameleon Rule", "body": "Theme switching replaces the entire color world — accent, surface, text, halo, trail. Never mix colors across themes.", "section": "colors" },
+      { "name": "The Accent Scarcity Rule", "body": "The theme accent color appears on 15% or less of any given screen. Its glow is the point.", "section": "colors" },
+      { "name": "The Silent Hierarchy Rule", "body": "Typography establishes order but never calls attention to itself. Weight and size do the work.", "section": "typography" },
+      { "name": "The Center-Stage Rule", "body": "The emotion screen occupies the visual center and the majority of screen real estate. Everything else orbits it.", "section": "layout" },
+      { "name": "The Floating Surface Rule", "body": "Cards float above the background via color lift alone. No shadows.", "section": "elevation" },
+      { "name": "The Soft Boundary Rule", "body": "Every bounded element has a visible corner radius. Nothing is sharp-edged except thin dividers.", "section": "shapes" }
+    ],
+    "dos": [
+      "Do keep the emotion screen as the visual center",
+      "Do use the full theme palette when switching themes",
+      "Do use capsule shape for all interactive elements",
+      "Do use spring animations (snappy for UI, smooth for content)",
+      "Do keep accent color scarce — it should glow, not flood",
+      "Do use tonal layering for depth — never shadows"
+    ],
+    "donts": [
+      "Don't mix colors across themes",
+      "Don't use drop shadows or elevation artifacts",
+      "Don't use sharp corners on any bounded element",
+      "Don't make typography decorative",
+      "Don't compete with the emotion screen",
+      "Don't use accent color for large background fills"
+    ]
+  }
+}

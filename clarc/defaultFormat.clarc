@@ -1,0 +1,12 @@
+CLARC/1
+
+[metadata]
+title: Song title
+artist: Artist name
+writer: Songwriter name
+album: Album name
+duration: 00:00
+
+[lyrics]
+[00:00.00] First lyric line
+[00:01.20] Second lyric line
