@@ -2,29 +2,22 @@
 //  ClusterGuide.swift
 //  Cella
 //
-//  First-visit walkthrough for the Cluster tab. Five paged glass cards:
-//  the .cluster library, the two playlist kinds, CueLab, adding songs,
-//  and making playlists. Auto-opens once per install (clusterGuideSeen);
-//  the toolbar guide button reopens it any time.
+//  Format walkthrough for the Cluster tab. Six paged glass cards: the
+//  .cluster library, the two playlist kinds, CueLab, adding songs,
+//  making playlists, and Metro Glass. Lives as a floating pill docked at
+//  the tab's bottom-right that expands into the walkthrough card in
+//  place; auto-opens once per install (clusterGuideSeen), and both the
+//  toolbar guide button and the pill reopen it any time.
 //
 
 import SwiftUI
 
-// MARK: - Cross-view signal
+// MARK: - Floating guide (pill → card, docked bottom-right)
 
-extension Notification.Name {
-    /// ClusterView posts this to present the guide (object = library display
-    /// name). The overlay itself lives at the window root (ContentView), so
-    /// the dim covers the tab bar too.
-    static let clusterGuideRequest = Notification.Name("clusterGuideRequest")
-}
-
-// MARK: - Guide overlay
-
-struct ClusterGuideOverlay: View {
-    /// Real library name for the page-1 chain visual (e.g. "musicLiblary"). cluster
+struct ClusterGuideFloating: View {
+    @Binding var isOpen: Bool
+    /// Real library name for the page-1 chain visual (e.g. "musicLiblary").
     let libraryName: String
-    var onClose: () -> Void
 
     @Environment(\.theme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -42,41 +35,95 @@ struct ClusterGuideOverlay: View {
         )
     }
 
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.45)
-                .ignoresSafeArea()
-                .onTapGesture { close() }
+    /// Corner anchor shared by pill and card: the card grows out of the pill.
+    private var dockTransition: AnyTransition {
+        .scale(scale: 0.72, anchor: .bottomTrailing).combined(with: .opacity)
+    }
 
-            VStack(spacing: 0) {
-                header
-                Divider()
-                    .overlay(.white.opacity(0.14))
-                    .padding(.horizontal, 22)
-                pageBody
-                    .padding(.horizontal, 26)
-                    .padding(.top, 18)
-                    .padding(.bottom, 8)
-                Spacer(minLength: 0)
-                footer
-                    .padding(.horizontal, 22)
-                    .padding(.bottom, 16)
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            if isOpen {
+                guideCard
+                    .transition(reduceMotion ? .opacity : dockTransition)
+            } else {
+                guidePill
+                    .transition(reduceMotion ? .opacity : dockTransition)
             }
-            .frame(width: 560, height: 430)
-            .aeroCard(radius: CardStyle.radius, wash: 0.08, tint: 0.2)
-            .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
-            .overlay(
-                RoundedRectangle(cornerRadius: CardStyle.radius)
-                    .stroke(.white.opacity(0.18), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.5), radius: 30)
-            .contentShape(RoundedRectangle(cornerRadius: CardStyle.radius))
         }
-        .onExitCommand { close() }
+        .animation(.snappy, value: isOpen)
     }
 
     private func close() {
-        withAnimation(.snappy) { onClose() }
+        withAnimation(.snappy) { isOpen = false }
+    }
+
+    // MARK: Resting state — the pill
+
+    private var guidePill: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "questionmark")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(theme.dotActive)
+            Text("Guide")
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(theme.textPrimary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(theme.dotActive.opacity(0.14))
+        )
+        .background(
+            Capsule()
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            Capsule()
+                .fill(
+                    LinearGradient(
+                        colors: [.white.opacity(0.22), .white.opacity(0.03)],
+                        startPoint: .top,
+                        endPoint: .center
+                    )
+                )
+        )
+        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 12, y: 5)
+        .contentShape(Capsule())
+        .onTapGesture {
+            withAnimation(.snappy) { isOpen = true }
+        }
+        .help("Open the Cluster guide")
+    }
+
+    // MARK: Expanded — the paged walkthrough card
+
+    private var guideCard: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+                .overlay(.white.opacity(0.14))
+                .padding(.horizontal, 22)
+            pageBody
+                .padding(.horizontal, 26)
+                .padding(.top, 18)
+                .padding(.bottom, 8)
+            Spacer(minLength: 0)
+            footer
+                .padding(.horizontal, 22)
+                .padding(.bottom, 16)
+        }
+        .frame(width: 560, height: 430)
+        .aeroCard(radius: CardStyle.radius, wash: 0.08, tint: 0.2)
+        .clipShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: CardStyle.radius)
+                .stroke(.white.opacity(0.18), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.5), radius: 30)
+        .contentShape(RoundedRectangle(cornerRadius: CardStyle.radius))
+        .onExitCommand { close() }
     }
 
     // MARK: - Page definitions

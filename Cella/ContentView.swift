@@ -19,18 +19,9 @@ struct ContentView: View {
     @StateObject private var commandInput = CommandInputController()
     @State private var detailPack: CellaPack?
     @State private var displayedPack: CellaPack?
-    /// Cluster guide overlay state (opened via .clusterGuideRequest).
-    @State private var showClusterGuide = false
-    @State private var clusterGuideName = ""
     /// Artists folder-open scene is modal edge-to-edge: ClusterView mirrors
     /// its open state via .clusterFolderVeil so the Metro tab bar dims too.
     @State private var clusterFolderVeil = false
-    /// Shared with ClusterView — the guide only auto-opens on first visit.
-    @AppStorage("clusterGuideSeen") private var clusterGuideSeen = false
-    /// Clarc format guide overlay state (opened via .clarcGuideRequest).
-    @State private var showClarcGuide = false
-    /// Shared with the Clarc editor — the format guide only auto-opens once.
-    @AppStorage("clarcGuideSeen") private var clarcGuideSeen = false
     @State private var pendingLRCAudioURL: URL?
     @State private var showCommandPalette = false
     @State private var commandText = ""
@@ -234,21 +225,6 @@ struct ContentView: View {
                 self.isFocused = true
             }
         }
-    }
-
-    /// Any dismissal (✕, Esc, backdrop, Get Started) marks the guide seen so it
-    /// never auto-opens again, even when the user skips through it.
-    private func dismissClusterGuide() {
-        clusterGuideSeen = true
-        withAnimation(.snappy) { showClusterGuide = false }
-    }
-
-    /// Clarc guide dismissal: mark seen, mirror the closed state back to the
-    /// editor (its R/M key monitor resumes), and drop the window-root overlay.
-    private func dismissClarcGuide() {
-        clarcGuideSeen = true
-        NotificationCenter.default.post(name: .clarcGuideRequest, object: false)
-        withAnimation(.snappy) { showClarcGuide = false }
     }
 
     private var bloomTransition: AnyTransition {
@@ -492,23 +468,6 @@ struct ContentView: View {
             .opacity(detailPack != nil ? 1 : 0)
             .allowsHitTesting(detailPack != nil)
 
-            // Cluster guide — presented at the window root so the dim covers
-            // the Metro tab bar too. ClusterView posts .clusterGuideRequest.
-            if showClusterGuide {
-                ClusterGuideOverlay(
-                    libraryName: clusterGuideName,
-                    onClose: { dismissClusterGuide() }
-                )
-                .transition(.scale(scale: 0.95).combined(with: .opacity))
-            }
-
-            // Clarc guide — same window-root presentation, same reasoning.
-            // The Clarc editor posts .clarcGuideRequest (object = true/false).
-            if showClarcGuide {
-                ClarcGuideOverlay(onClose: { dismissClarcGuide() })
-                    .transition(.scale(scale: 0.95).combined(with: .opacity))
-            }
-
             // Command palette — minimal input bar at cursor
             if showCommandPalette {
                 Color.black.opacity(0.15)
@@ -690,14 +649,6 @@ struct ContentView: View {
                 restoreMainFocus()
                 return .handled
             }
-            if showClusterGuide {
-                dismissClusterGuide()
-                return .handled
-            }
-            if showClarcGuide {
-                dismissClarcGuide()
-                return .handled
-            }
             if isEditingText { return .ignored }
             return .ignored
         }
@@ -741,17 +692,6 @@ struct ContentView: View {
             default:
                 break
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .clusterGuideRequest)) { note in
-            guard let name = note.object as? String else { return }
-            clusterGuideName = name
-            withAnimation(.snappy) { showClusterGuide = true }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .clarcGuideRequest)) { note in
-            // object = true presents the overlay; object = false is just the
-            // retire mirror (handled in dismissClarcGuide).
-            guard note.object as? Bool == true else { return }
-            withAnimation(.snappy) { showClarcGuide = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .clusterFolderVeil)) { note in
             // note.object is the opened pack path, or nil on close.
