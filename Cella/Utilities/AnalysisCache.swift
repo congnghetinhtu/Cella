@@ -59,7 +59,12 @@ enum AnalysisCache {
             return nil
         }
 
-        print("[AnalysisCache] HIT \(audioURL.lastPathComponent)")
+        guard analysis.schemaVersion == TrackAnalysis.currentSchemaVersion else {
+            print("[AnalysisCache] SCHEMA_MISMATCH \(audioURL.lastPathComponent) — v\(analysis.schemaVersion) != v\(TrackAnalysis.currentSchemaVersion), re-analyzing")
+            return nil
+        }
+
+        print("[AnalysisCache] HIT \(audioURL.lastPathComponent) (v\(analysis.schemaVersion))")
         return analysis
     }
 

@@ -22,8 +22,10 @@ class MixAudioEngine {
     private let playerB = AVAudioPlayerNode()
     private let timePitchA = AVAudioUnitTimePitch()
     private let timePitchB = AVAudioUnitTimePitch()
-    private let eqA = AVAudioUnitEQ(numberOfBands: 1)
-    private let eqB = AVAudioUnitEQ(numberOfBands: 1)
+    private let eqA = AVAudioUnitEQ(numberOfBands: 3)
+    private let eqB = AVAudioUnitEQ(numberOfBands: 3)
+    private let reverbA = AVAudioUnitReverb()
+    private let reverbB = AVAudioUnitReverb()
     private let hallReverb = AVAudioUnitReverb()
     private let profileEq: AVAudioUnitEQ
     private let surroundEq: AVAudioUnitEQ
@@ -67,6 +69,8 @@ class MixAudioEngine {
     private var otherTimePitch: AVAudioUnitTimePitch
     private var currentEQ: AVAudioUnitEQ { playerA === currentPlayer ? eqA : eqB }
     private var otherEQ: AVAudioUnitEQ { playerA === currentPlayer ? eqB : eqA }
+    private var currentReverb: AVAudioUnitReverb { playerA === currentPlayer ? reverbA : reverbB }
+    private var otherReverb: AVAudioUnitReverb { playerA === currentPlayer ? reverbB : reverbA }
 
     private var currentURL: URL?
     private var currentDuration: TimeInterval = 0
@@ -85,8 +89,6 @@ class MixAudioEngine {
     private var crossfadeTimer: Timer?
     private var trackEndTimer: Timer?
     private var preCrossfadeTimer: Timer?
-    private var preCrossfadeRampTimer: Timer?
-    private var preCrossfadeRampStartTime: Date?
     private var trackStartTime: Date?
     private var fxRampTimer: Timer?
     private var reverbRampTimer: Timer?
@@ -106,9 +108,14 @@ class MixAudioEngine {
     private var incomingCueOffset: Double = 0
     private var currentTrackAnalysis: TrackAnalysis?
     private var crossfadeStartTime: Date?
+    /// True when the armed crossfade trigger was picked by the second-half
+    /// energy-match search (rather than the legacy near-the-end search) — the
+    /// vocal never-cut floor only applies to the legacy path.
+    private var triggerFromEnergyMatch: Bool = false
 
     private var configurationObserver: NSObjectProtocol?
     private var actualIncomingDuration: TimeInterval = 0  // post-intro-skip, pre-beat-padding
+    private var fullIncomingDuration: TimeInterval = 0    // full source audio duration (untrimmed)
     private var pendingIncomingURL: URL?
     /// Seconds from loadTrack to the scheduled crossfade trigger. The view
     /// model uses it to stage the next track's buffer ahead of time.
@@ -121,6 +128,7 @@ class MixAudioEngine {
         let url: URL
         let buffer: AVAudioPCMBuffer
         let duration: TimeInterval
+        let fullDuration: TimeInterval
     }
     private var preparedCrossfade: PreparedCrossfade?
     private var crossfadePrepGeneration = 0
@@ -172,7 +180,6 @@ class MixAudioEngine {
         crossfadeTimer?.invalidate()
         trackEndTimer?.invalidate()
         preCrossfadeTimer?.invalidate()
-        preCrossfadeRampTimer?.invalidate()
         tempoRampTimer?.invalidate()
         fxRampTimer?.invalidate()
         profileRampTimer?.invalidate()
@@ -290,6 +297,8 @@ class MixAudioEngine {
         engine.attach(timePitchB)
         engine.attach(eqA)
         engine.attach(eqB)
+        engine.attach(reverbA)
+        engine.attach(reverbB)
         engine.attach(profileEq)
         engine.attach(surroundEq)
         engine.attach(hallReverb)
@@ -301,8 +310,17 @@ class MixAudioEngine {
         engine.connect(playerB, to: timePitchB, format: format)
         engine.connect(timePitchA, to: eqA, format: format)
         engine.connect(timePitchB, to: eqB, format: format)
-        engine.connect(eqA, to: mixerNode, format: format)
-        engine.connect(eqB, to: mixerNode, format: format)
+        engine.connect(eqA, to: reverbA, format: format)
+        engine.connect(eqB, to: reverbB, format: format)
+        engine.connect(reverbA, to: mixerNode, format: format)
+        engine.connect(reverbB, to: mixerNode, format: format)
+
+        reverbA.loadFactoryPreset(.mediumHall)
+        reverbA.wetDryMix = 0
+        reverbA.bypass = true
+        reverbB.loadFactoryPreset(.mediumHall)
+        reverbB.wetDryMix = 0
+        reverbB.bypass = true
 
         mixerNode.volume = 1.0
         engine.connect(mixerNode, to: profileEq, format: format)
@@ -394,6 +412,8 @@ class MixAudioEngine {
 
         resetEQ(eqA)
         resetEQ(eqB)
+        resetReverb(reverbA)
+        resetReverb(reverbB)
 
         currentPlayer.volume = 1.0
         currentTimePitch.rate = rate
@@ -425,22 +445,10 @@ class MixAudioEngine {
         isPlaying = true
 
         let triggerOffset = remainingAtStart - beatAlignedCrossfadeTime
-
-        // Floor: crossfade must not start before the outgoing vocal ends.
-        // If the bar-aligned trigger fires too early, push it later so it
-        // overlaps the vocal's resolving tail instead of cutting it short.
-        let vocalEndFloor: Double
-        if let vocalEnds = analysis?.vocalOffsetTimestamps, !vocalEnds.isEmpty {
-            let lastVocalEnd = vocalEnds.last!
-            // Delay = seconds from now until vocalEnd. Crossfade finishes at track end.
-            vocalEndFloor = max(0, remainingAtStart - lastVocalEnd)
-        } else {
-            vocalEndFloor = 0
-        }
-        let finalDelay = max(0.1, triggerOffset, vocalEndFloor)
+        let finalDelay = max(0.1, triggerOffset)
         crossfadeTriggerDelay = finalDelay
 
-        print("[Engine] Playing: \(url.lastPathComponent) — \(String(format: "%.1f", duration))s @ rate \(String(format: "%.3f", rate)), crossfade in \(String(format: "%.2f", finalDelay))s (bar=\(String(format: "%.2f", triggerOffset)), vocalEnd=\(String(format: "%.2f", vocalEndFloor)))")
+        print("[Engine] Playing: \(url.lastPathComponent) — \(String(format: "%.1f", duration))s @ rate \(String(format: "%.3f", rate)), crossfade in \(String(format: "%.2f", finalDelay))s (bar=\(String(format: "%.2f", triggerOffset)))")
 
         // Start low-pass filter 5 seconds before crossfade for smooth prep
         schedulePreCrossfadeEQ(delay: finalDelay - 5.0)
@@ -507,6 +515,8 @@ class MixAudioEngine {
         StereoWidthEffect.currentWidth = 1.0
         resetEQ(eqA)
         resetEQ(eqB)
+        resetReverb(reverbA)
+        resetReverb(reverbB)
         isPlaying = false
         isCrossfading = false
         soloPlayThrough = false
@@ -593,16 +603,30 @@ class MixAudioEngine {
                 }
                 return
             }
-            let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
-            beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
-                duration: seekDuration,
-                rate: Double(currentRate),
-                barTimestamps: currentBarTimestamps,
-                crossfadeDuration: maxFade,
-                outgoingAnalysis: currentTrackAnalysis,
-                incomingAnalysis: nil
-            )
-            scheduleTrackEndTimer(delay: max(0.1, remainingAtStart - beatAlignedCrossfadeTime))
+            // Reuse the armed trigger (bar seam in FULL-song time). If the user
+            // scrubbed past the planned seam (e.g. near the end to preview the
+            // AutoMix), pick an upcoming bar a few seconds ahead instead of
+            // waiting until 0.0s remaining and cutting into silence!
+            let remaining = trueRemaining()
+            let newDelay: TimeInterval
+            if remaining > beatAlignedCrossfadeTime {
+                newDelay = remaining - beatAlignedCrossfadeTime
+            } else if remaining > 4.0 {
+                let targetMinTime = time + 2.5
+                let minFadeRoom = min(config.crossfadeDuration, remaining * 0.55)
+                let maxSafeTime = max(targetMinTime, currentDuration - max(4.0, minFadeRoom))
+                if let bar = currentBarTimestamps.first(where: { $0 >= targetMinTime && $0 <= maxSafeTime }) {
+                    newDelay = max(0.5, bar - time)
+                } else {
+                    newDelay = max(1.5, remaining - minFadeRoom)
+                }
+            } else {
+                newDelay = 0.25
+            }
+            crossfadeTriggerDelay = newDelay
+            schedulePreCrossfadeEQ(delay: newDelay - 5.0)
+            scheduleTrackEndTimer(delay: newDelay)
+            print("[Engine] Seek to \(String(format: "%.1f", time))s — transition armed in \(String(format: "%.1f", newDelay))s (remaining=\(String(format: "%.1f", remaining))s)")
         } catch {
             print("[Engine] Seek failed: \(error)")
         }
@@ -624,42 +648,41 @@ class MixAudioEngine {
         incomingURL: URL,
         params: CrossfadeParams,
         incomingFirstBeat: Double
-    ) throws -> (buffer: AVAudioPCMBuffer?, duration: TimeInterval) {
+    ) throws -> (buffer: AVAudioPCMBuffer?, duration: TimeInterval, fullDuration: TimeInterval) {
         let incomingFile = try AudioHelpers.readAudio(url: incomingURL)
         let incomingDuration = incomingFile.duration
         // Use engine processing format sample rate for frame calculations,
         // since readEntireFile converts buffers to engine format.
         let sampleRate = config.processingFormat.sampleRate
 
-        if params.skipIntro && params.vocalConnectionPoint > 0 {
+        if params.vocalConnectionPoint > 0.05 {
             let skipTime = params.vocalConnectionPoint
             let duration = max(1.0, incomingDuration - skipTime)  // trimmed buffer length
-            print("[Engine] Skipping \(String(format: "%.1f", skipTime))s intro → matched entry point")
+            print("[Engine] Entry trim \(String(format: "%.2f", skipTime))s (skipIntro=\(params.skipIntro))")
 
             let fileBuffer = try readEntireFile(incomingFile)
             let skipFrames = AVAudioFramePosition(skipTime * sampleRate)
             if skipFrames > 0, skipFrames < AVAudioFramePosition(fileBuffer.frameLength) {
                 let remainingFrames = fileBuffer.frameLength - AVAudioFrameCount(skipFrames)
                 if let trimmed = AudioHelpers.extractBuffer(fileBuffer, from: skipFrames, frameCount: remainingFrames) {
-                    return (trimmed, duration)
+                    return (trimmed, duration, incomingDuration)
                 }
             }
-            return (nil, duration)
+            return (nil, duration, incomingDuration)
         }
 
         let fileBuffer = try readEntireFile(incomingFile)
-        // Cue incoming to its first beat (caller pads silence for alignment,
-        // then applies the splice micro-fade).
-        if incomingFirstBeat > 0.01 {
+        // Cue incoming to its first beat only when beat-phase locking is active.
+        if params.beatPhaseLock && incomingFirstBeat > 0.01 {
             let cueFrames = AVAudioFramePosition(incomingFirstBeat * sampleRate)
             if cueFrames > 0, cueFrames < AVAudioFramePosition(fileBuffer.frameLength) {
                 let remaining = fileBuffer.frameLength - AVAudioFrameCount(cueFrames)
                 if let cued = AudioHelpers.extractBuffer(fileBuffer, from: cueFrames, frameCount: remaining) {
-                    return (cued, max(1.0, incomingDuration - incomingFirstBeat))
+                    return (cued, max(1.0, incomingDuration - incomingFirstBeat), incomingDuration)
                 }
             }
         }
-        return (fileBuffer, incomingDuration)
+        return (fileBuffer, incomingDuration, incomingDuration)
     }
 
     /// Background-decodes + trims the upcoming track ahead of the automatic
@@ -684,7 +707,12 @@ class MixAudioEngine {
             // Hop to main for the handoff so crossfadeToNext (main) never races it.
             DispatchQueue.main.async { [weak self, buffer] in
                 guard let self, gen == self.crossfadePrepGeneration else { return }
-                self.preparedCrossfade = PreparedCrossfade(url: incomingURL, buffer: buffer, duration: made.duration)
+                self.preparedCrossfade = PreparedCrossfade(
+                    url: incomingURL,
+                    buffer: buffer,
+                    duration: made.duration,
+                    fullDuration: made.fullDuration
+                )
             }
         }
     }
@@ -754,26 +782,26 @@ class MixAudioEngine {
                 outgoingAnalysis: outgoingAnalysis,
                 incomingAnalysis: incomingAnalysis
             )
-            crossfadeDuration *= moodParams.durationMultiplier
+            // Only apply mood duration multipliers to beatmatch/bassSwap blends;
+            // echoOut, ambientBlend, and quickPhraseCut are already precisely sized.
+            if params.style == .beatmatchBlend || params.style == .bassSwap {
+                if moodParams.bothEnergetic {
+                    crossfadeDuration *= 1.15
+                } else {
+                    crossfadeDuration *= moodParams.durationMultiplier
+                }
+            }
             self.moodEqLowPassEndHz = moodParams.eqLowPassEndHz
 
             // ── 1. BPM SYNC — during the crossfade window ───────────────
-            // Time-stretch the incoming track so its beats ride the outgoing
-            // grid through the whole blend. After the handoff the engine
-            // glides back to 1.0 (see completeCrossfade) — the rest of the
-            // song plays at its natural tempo.
             let outBPM = outgoingAnalysis?.bpm ?? 0
             let inBPM = incomingAnalysis?.bpm ?? 0
             incomingTargetRate = tempoRate
-            print("[Engine] Tempo match: out \(String(format: "%.1f", outBPM)) BPM → in \(String(format: "%.1f", inBPM)) BPM @ rate \(String(format: "%.4f", tempoRate))\(params.tempoCompatible ? "" : " (INCOMPATIBLE — bar cut)")")
+            print("[Engine] Style=\(params.style.rawValue) (\(params.styleReason)) | out \(String(format: "%.1f", outBPM)) BPM → in \(String(format: "%.1f", inBPM)) BPM @ rate \(String(format: "%.4f", tempoRate))")
 
             // ── 2. BEAT PHASE ALIGNMENT ──────────────────────────────────
-            // Align incoming's first beat with outgoing's bar boundary at crossfade point.
-            // Compute delay = outgoingNextBar - outgoingCurrentTime.
-            // Prepend that many seconds of silence to incoming buffer so its downbeat
-            // lands exactly on the outgoing's bar line.
-            let incomingFirstBeat = incomingAnalysis?.beatTimestamps.first ?? 0
-            incomingCueOffset = incomingFirstBeat
+            let incomingFirstBeat = params.beatPhaseLock ? (incomingAnalysis?.beatTimestamps.first ?? 0) : 0
+            incomingCueOffset = params.vocalConnectionPoint > 0.05 ? params.vocalConnectionPoint : incomingFirstBeat
             currentTrackAnalysis = incomingAnalysis
 
             currentCrossfadeDuration = crossfadeDuration
@@ -785,57 +813,32 @@ class MixAudioEngine {
             otherPlayer.reset()
             otherPlayer.volume = 0
 
+            // Prepare per-deck EQ & Reverb cleanly before playback starts.
+            resetEQ(currentEQ)
+            resetEQ(otherEQ)
+            resetReverb(currentReverb)
+            resetReverb(otherReverb)
+
+            // Bass-Swap prep: start incoming with low-end cut so both kicks never collide.
+            if params.style == .bassSwap {
+                otherEQ.bands[0].filterType = .highPass
+                otherEQ.bands[0].frequency = config.bassSwapCutoffHz
+                otherEQ.bands[0].bypass = false
+            }
+
             // Store loudness-matching gains so track-to-track volume stays consistent.
             self.outgoingGain = Float(params.outgoingGainCompensation)
             self.incomingGain = Float(params.incomingGainCompensation)
 
-
-
-            // Beat phase: land the incoming first beat on an outgoing bar line.
-            // The automatic trigger already fires ON a bar line, so snap to the
-            // NEAREST bar within a small jitter window instead of always taking
-            // the strictly-next one. Waiting a full extra bar left the incoming
-            // silent while the gain ramp (started at the trigger) was already
-            // ~1 bar in — desyncing the blend and pushing the handoff off the
-            // incoming grid that the dual-grid duration quantization targeted.
-            // With ~0 delay the incoming downbeat coincides with the crossfade
-            // start, so ramp and audio move together and the handoff lands on a
-            // mutual bar line. Genuinely mid-bar triggers still wait for the
-            // next bar as before.
-            let outgoingNow = self.currentTime
-            var beatPhaseDelay: Double = 0
-            if let outBars = outgoingAnalysis?.barTimestamps, !outBars.isEmpty {
-                // Covers trigger-timer + main-thread jitter without hopping a bar.
-                let onGridTolerance = 0.15
-                var targetBar: Double?
-                for barTime in outBars {
-                    if barTime >= outgoingNow - onGridTolerance {
-                        targetBar = barTime
-                        break
-                    }
-                }
-                // Past the last bar: extrapolate one bar beyond it.
-                if targetBar == nil, let lastBar = outBars.last, let outBPM = outgoingAnalysis?.bpm, outBPM > 0 {
-                    targetBar = lastBar + 240.0 / outBPM
-                }
-                if let targetBar {
-                    beatPhaseDelay = max(0, targetBar - outgoingNow)
-                }
-            }
-            print("[Engine] Beat phase delay: \(String(format: "%.3f", beatPhaseDelay))s (outgoingNow=\(String(format: "%.2f", outgoingNow)), incomingFirstBeat=\(String(format: "%.3f", incomingFirstBeat)))")
-            blendTempoRate = tempoRate
-            blendPadDelay = beatPhaseDelay
-
             // ── 3. INCOMING BUFFER — staged if the warmup beat us here ──
-            // The full decode + trim normally happens seconds earlier on a
-            // background thread (prepareCrossfadeBuffer). Only fall back to
-            // the synchronous path when nothing was staged (manual skip into
-            // an unprepared track) — same bytes, same result.
+            // Fetch/decode BEFORE measuring outgoingNow so decode latency never
+            // shifts beat-phase alignment!
             let sampleRate = config.processingFormat.sampleRate
             let prePad: AVAudioPCMBuffer?
             if let staged = preparedCrossfade, staged.url == incomingURL {
                 prePad = staged.buffer
                 actualIncomingDuration = staged.duration
+                fullIncomingDuration = staged.fullDuration
                 preparedCrossfade = nil
             } else {
                 if preparedCrossfade != nil { preparedCrossfade = nil }
@@ -846,7 +849,32 @@ class MixAudioEngine {
                 )
                 prePad = made.buffer
                 actualIncomingDuration = made.duration
+                fullIncomingDuration = made.fullDuration
             }
+
+            // Beat phase: land incoming downbeat on an outgoing bar line ONLY when beatPhaseLock is true.
+            // Measured RIGHT BEFORE silence padding & play() so phase is tight to the millisecond.
+            let outgoingNow = self.currentTime
+            var beatPhaseDelay: Double = 0
+            if params.beatPhaseLock, let outBars = outgoingAnalysis?.barTimestamps, !outBars.isEmpty {
+                let onGridTolerance = 0.35
+                var targetBar: Double?
+                for barTime in outBars {
+                    if barTime >= outgoingNow - onGridTolerance {
+                        targetBar = barTime
+                        break
+                    }
+                }
+                if targetBar == nil, let lastBar = outBars.last, let outBPM = outgoingAnalysis?.bpm, outBPM > 0 {
+                    targetBar = lastBar + 240.0 / outBPM
+                }
+                if let targetBar {
+                    beatPhaseDelay = max(0, targetBar - outgoingNow)
+                }
+            }
+            print("[Engine] Beat phase delay: \(String(format: "%.3f", beatPhaseDelay))s (lock=\(params.beatPhaseLock), outgoingNow=\(String(format: "%.2f", outgoingNow)))")
+            blendTempoRate = tempoRate
+            blendPadDelay = beatPhaseDelay
 
             // Silence pad needs the transition-time beatPhaseDelay, so it
             // always runs here — but it is a fast memcpy, not a decode.
@@ -872,10 +900,9 @@ class MixAudioEngine {
 
             otherPlayer.play()
             crossfadeStartTime = Date()
-            // Outgoing track position at crossfade start (for correct vocal sampling).
-            // Track plays at 1.0x (timePitch bypassed) so real seconds = track seconds.
-            let outElapsed = -(self.trackStartTime ?? Date()).timeIntervalSinceNow
-            self.outgoingCrossfadeStartPos = max(0, outElapsed)
+            // Outgoing track position in FULL-song coordinates (seek/intro-trim aware)
+            // for accurate real-time vocal sampling & energy curve exponent.
+            self.outgoingCrossfadeStartPos = max(0, self.currentTime)
 
             // Energy-aware curve exponent: measure energy ratio at transition.
             // When the outgoing is much louder, the incoming fades in more gradually
@@ -894,11 +921,22 @@ class MixAudioEngine {
 
             print("[Engine] Automix: \(String(format: "%.1f", crossfadeDuration))s, strategy \(params.vocalStrategy), curveExp \(String(format: "%.2f", self.curveExponent)), moodExpBias \(String(format: "%.2f", moodParams.curveExponentBias))")
 
-            // ── 4. CROSSFADE VOLUME ENVELOPE ──────────────────────
+            // ── 4. PHASE-ALIGNED CROSSFADE VOLUME & STYLE DSP ENVELOPE ──
             isCrossfading = true
             let rampInterval = 0.02
-            let crossfadeSteps = Int(crossfadeDuration / rampInterval)
-            var currentStep = 0
+            let crossfadeSteps = max(1, Int(crossfadeDuration / rampInterval))
+            let padSteps = Int((beatPhaseDelay / rampInterval).rounded(.up))
+            var currentStep = -padSteps
+            var smoothedOutDuckDB: Float = 0
+            var smoothedInDuckDB: Float = 0
+            let transitionStyle = params.style
+            let vocalStrategy = params.vocalStrategy
+            let outAnalysisForLoop = outgoingAnalysis
+            let inAnalysisForLoop = incomingAnalysis
+            let outStartPos = self.outgoingCrossfadeStartPos
+            let inStartPos = self.incomingCueOffset
+            let inRateForLoop = Double(tempoRate)
+
             crossfadeTimer?.invalidate()
             crossfadeTimer = Timer.scheduledTimer(withTimeInterval: rampInterval, repeats: true) { [weak self] timer in
                 guard let self = self, self.isCrossfading else {
@@ -908,50 +946,215 @@ class MixAudioEngine {
 
                 currentStep += 1
 
-                // ── Energy-equalized crossfade ─────────────────────────
-                let progress = min(1.0, Double(currentStep) / Double(max(1, crossfadeSteps)))
-                // Smoothstep S-curve on raw progress: gentle start, gentle finish, fast middle.
-                // Prevents incoming from jumping in too early.
-                let s = progress * progress * (3.0 - 2.0 * progress)
-                let warpedProgress: Double
-                if self.curveExponent != 1.0 {
-                    warpedProgress = pow(s, self.curveExponent)
-                } else {
-                    warpedProgress = s
+                // During the beat-phase pad (currentStep < 0) the incoming buffer
+                // is still playing silence — keep outgoing clean at full volume.
+                if currentStep < 0 {
+                    self.currentPlayer.volume = self.clampVolume(self.outgoingGain)
+                    self.otherPlayer.volume = 0
+                    return
                 }
-                let outAmplitude = Float(1.0 - warpedProgress)
-                let inAmplitude = Float(warpedProgress)
-                let outVol = outAmplitude * self.outgoingGain
-                let inVol = inAmplitude * self.incomingGain
-                self.currentPlayer.volume = self.clampVolume(outVol)
-                self.otherPlayer.volume = self.clampVolume(inVol)
+
+                let progress = min(1.0, max(0.0, Double(currentStep) / Double(crossfadeSteps)))
+                let s = progress * progress * (3.0 - 2.0 * progress)  // smoothstep
+
+                // ── DJ-style & Context-Aware Volume Envelope ───────────────
+                let outAmplitude: Float
+                let inAmplitude: Float
+                switch transitionStyle {
+                case .bassSwap:
+                    // Real DJ Bass-Swap deck curve:
+                    // 0.00–0.45: outgoing stays strong (1.0 → 0.86) while incoming rises (0.0 → 0.86) under HPF.
+                    // 0.45–0.58: mid-phrase bass swap — incoming hits full power (0.86 → 1.0), outgoing holds steady then yields.
+                    // 0.58–1.00: outgoing rolls off cleanly (0.86 → 0.0) with HPF + LPF while incoming leads at 1.0.
+                    if progress < 0.45 {
+                        let t = progress / 0.45
+                        let st = t * t * (3.0 - 2.0 * t)
+                        outAmplitude = Float(1.0 - 0.14 * st)
+                        inAmplitude = Float(0.86 * st)
+                    } else if progress <= 0.58 {
+                        let t = (progress - 0.45) / 0.13
+                        let st = t * t * (3.0 - 2.0 * t)
+                        outAmplitude = Float(0.86 - 0.10 * st)
+                        inAmplitude = Float(0.86 + 0.14 * st)
+                    } else {
+                        let t = (progress - 0.58) / 0.42
+                        let st = t * t * (3.0 - 2.0 * t)
+                        outAmplitude = Float(0.76 * cos(st * .pi / 2.0))
+                        inAmplitude = 1.0
+                    }
+                case .beatmatchBlend:
+                    // DJ energy-preserving blend: hold combined groove high instead of dipping mid-fade.
+                    if progress < 0.50 {
+                        let t = progress / 0.50
+                        let st = t * t * (3.0 - 2.0 * t)
+                        outAmplitude = Float(1.0 - 0.18 * st)
+                        inAmplitude = Float(0.88 * st)
+                    } else {
+                        let t = (progress - 0.50) / 0.50
+                        let st = t * t * (3.0 - 2.0 * t)
+                        outAmplitude = Float(0.82 * cos(st * .pi / 2.0))
+                        inAmplitude = Float(0.88 + 0.12 * st)
+                    }
+                case .echoOut:
+                    // Outgoing drops into a lush reverb tail while incoming enters cleanly.
+                    let outP = min(1.0, progress / 0.68)
+                    let outS = outP * outP * (3.0 - 2.0 * outP)
+                    let inP = max(0.0, (progress - 0.15) / 0.70)
+                    let inClamped = min(1.0, inP)
+                    let inS = inClamped * inClamped * (3.0 - 2.0 * inClamped)
+                    outAmplitude = Float(cos(outS * .pi / 2.0))
+                    inAmplitude = Float(sin(inS * .pi / 2.0))
+                case .ambientBlend:
+                    let warped = pow(s, max(1.15, self.curveExponent))
+                    let angle = warped * .pi / 2.0
+                    outAmplitude = Float(cos(angle))
+                    inAmplitude = Float(sin(angle))
+                case .quickPhraseCut:
+                    let warped = pow(s, 0.85)
+                    let angle = warped * .pi / 2.0
+                    outAmplitude = Float(cos(angle))
+                    inAmplitude = Float(sin(angle))
+                }
+
+                self.currentPlayer.volume = self.clampVolume(outAmplitude * self.outgoingGain)
+                self.otherPlayer.volume = self.clampVolume(inAmplitude * self.incomingGain)
 
                 if currentStep >= crossfadeSteps {
-                    self.lastIncomingVolume = self.clampVolume(inVol)
+                    self.lastIncomingVolume = self.clampVolume(self.incomingGain)
                 }
 
-                // ── Low-pass filter on outgoing ──────────────────────────────
-                // Smoothly rolls off highs on the outgoing track as it fades.
-                // Keeps midrange from clashing with the incoming track.
-                // EQ intensity adapts to mood: calm = more filtering, energetic = less.
-                // If pre-crossfade ramp already started, continue from its position.
-                if self.config.eqFadeEnabled {
-                    // Compute starting progress from where pre-crossfade ramp left off
-                    let preProgress: Double
-                    if let rampStart = self.preCrossfadeRampStartTime {
-                        let elapsed = Date().timeIntervalSince(rampStart)
-                        preProgress = min(1.0, elapsed / 5.0)  // 5s ramp duration
+                // ── Style-specific 3-Band EQ & Per-Deck Reverb DSP ─────────
+                let outEQ = self.currentEQ
+                let inEQ = self.otherEQ
+                let outRev = self.currentReverb
+
+                switch transitionStyle {
+                case .bassSwap:
+                    // Band 0 (HPF): swap low-end cleanly around mid-phrase (0.45 → 0.62)
+                    let bassHz = self.config.bassSwapCutoffHz
+                    if progress < 0.45 {
+                        outEQ.bands[0].bypass = true
+                        inEQ.bands[0].filterType = .highPass
+                        inEQ.bands[0].frequency = bassHz
+                        inEQ.bands[0].bypass = false
+                    } else if progress <= 0.62 {
+                        let t = Float((progress - 0.45) / 0.17)
+                        let swapS = t * t * (3.0 - 2.0 * t)
+                        let outHP = 20.0 * pow(bassHz / 20.0, swapS)
+                        let inHP = bassHz * pow(20.0 / bassHz, swapS)
+                        outEQ.bands[0].filterType = .highPass
+                        outEQ.bands[0].frequency = outHP
+                        outEQ.bands[0].bypass = outHP < 25.0
+                        inEQ.bands[0].filterType = .highPass
+                        inEQ.bands[0].frequency = inHP
+                        inEQ.bands[0].bypass = inHP < 25.0
                     } else {
-                        preProgress = 0
+                        outEQ.bands[0].filterType = .highPass
+                        outEQ.bands[0].frequency = bassHz
+                        outEQ.bands[0].bypass = false
+                        inEQ.bands[0].bypass = true
                     }
-                    let adjustedProgress = min(1.0, preProgress + (1.0 - preProgress) * progress)
-                    let eqP = Float(adjustedProgress * adjustedProgress * (3.0 - 2.0 * adjustedProgress))  // smoothstep
-                    let lpCut = self.config.eqLowPassStartHz * pow(self.moodEqLowPassEndHz / self.config.eqLowPassStartHz, eqP)
-                    // Apply low-pass to outgoing only — incoming stays clean
-                    let outEQ = self.currentEQ
-                    outEQ.bands[0].filterType = .lowPass
-                    outEQ.bands[0].frequency = lpCut
-                    outEQ.bands[0].bypass = false
+                    // Band 2 (LPF): gentle warm roll-off on outgoing highs
+                    if self.config.eqFadeEnabled {
+                        let lpCut = self.config.eqLowPassStartHz * pow(self.moodEqLowPassEndHz / self.config.eqLowPassStartHz, Float(s))
+                        outEQ.bands[2].filterType = .lowPass
+                        outEQ.bands[2].frequency = lpCut
+                        outEQ.bands[2].bypass = false
+                    }
+
+                case .echoOut:
+                    // Per-deck reverb tail ONLY on outgoing deck + HPF to keep tail airy
+                    let revP = min(1.0, Float(progress / 0.55))
+                    let revS = revP * revP * (3.0 - 2.0 * revP)
+                    outRev.bypass = false
+                    outRev.wetDryMix = self.config.echoOutMaxWetMix * revS
+
+                    let hpCut = 20.0 * pow(200.0 / 20.0, Float(s))
+                    outEQ.bands[0].filterType = .highPass
+                    outEQ.bands[0].frequency = hpCut
+                    outEQ.bands[0].bypass = hpCut < 25.0
+
+                    if self.config.eqFadeEnabled {
+                        let lpCut = self.config.eqLowPassStartHz * pow(3200.0 / self.config.eqLowPassStartHz, Float(s))
+                        outEQ.bands[2].filterType = .lowPass
+                        outEQ.bands[2].frequency = lpCut
+                        outEQ.bands[2].bypass = false
+                    }
+
+                case .ambientBlend:
+                    if self.config.eqFadeEnabled {
+                        let lpCut = self.config.eqLowPassStartHz * pow(2200.0 / self.config.eqLowPassStartHz, Float(s))
+                        outEQ.bands[2].filterType = .lowPass
+                        outEQ.bands[2].frequency = lpCut
+                        outEQ.bands[2].bypass = false
+                    }
+
+                case .beatmatchBlend:
+                    // Gentle HPF in the final 40% to clear outgoing sub-bass + LPF on highs
+                    if progress > 0.60 {
+                        let hpP = Float((progress - 0.60) / 0.40)
+                        let hpCut = 20.0 * pow(140.0 / 20.0, hpP)
+                        outEQ.bands[0].filterType = .highPass
+                        outEQ.bands[0].frequency = hpCut
+                        outEQ.bands[0].bypass = hpCut < 25.0
+                    }
+                    if self.config.eqFadeEnabled {
+                        let lpCut = self.config.eqLowPassStartHz * pow(self.moodEqLowPassEndHz / self.config.eqLowPassStartHz, Float(s))
+                        outEQ.bands[2].filterType = .lowPass
+                        outEQ.bands[2].frequency = lpCut
+                        outEQ.bands[2].bypass = false
+                    }
+
+                case .quickPhraseCut:
+                    if self.config.eqFadeEnabled {
+                        let lpCut = self.config.eqLowPassStartHz * pow(4000.0 / self.config.eqLowPassStartHz, Float(s))
+                        outEQ.bands[2].filterType = .lowPass
+                        outEQ.bands[2].frequency = lpCut
+                        outEQ.bands[2].bypass = false
+                    }
+                }
+
+                // ── Dynamic Vocal Mid-Ducking (Band 1 @ 1800 Hz) ───────────
+                // Ducks the background deck's vocal presence band in real time
+                // when the priority deck is actively singing (prevents vocal clash).
+                if transitionStyle == .beatmatchBlend || transitionStyle == .bassSwap,
+                   vocalStrategy != .standard {
+                    let elapsedBlend = Double(currentStep) * rampInterval
+                    let outVocal = Self.sampleVocalActivity(outAnalysisForLoop, at: outStartPos + elapsedBlend)
+                    let inVocal = Self.sampleVocalActivity(inAnalysisForLoop, at: inStartPos + elapsedBlend * inRateForLoop)
+                    let maxDuck = self.config.vocalDuckMaxDB  // negative dB (e.g. -4.5)
+
+                    var targetOutDuck: Float = 0
+                    var targetInDuck: Float = 0
+
+                    switch vocalStrategy {
+                    case .duckIncoming, .priorityOutgoing:
+                        if outVocal > 0.30 {
+                            targetInDuck = maxDuck * min(1.0, (outVocal - 0.25) / 0.55)
+                        }
+                    case .duckOutgoing, .priorityIncoming:
+                        if inVocal > 0.30 {
+                            targetOutDuck = maxDuck * min(1.0, (inVocal - 0.25) / 0.55)
+                        }
+                    case .standard:
+                        break
+                    }
+
+                    // Exponential smoothing avoids zipper noise on EQ gain changes
+                    smoothedOutDuckDB += (targetOutDuck - smoothedOutDuckDB) * 0.25
+                    smoothedInDuckDB += (targetInDuck - smoothedInDuckDB) * 0.25
+
+                    outEQ.bands[1].filterType = .parametric
+                    outEQ.bands[1].frequency = self.config.vocalDuckFreqHz
+                    outEQ.bands[1].bandwidth = 1.2
+                    outEQ.bands[1].gain = smoothedOutDuckDB
+                    outEQ.bands[1].bypass = abs(smoothedOutDuckDB) < 0.15
+
+                    inEQ.bands[1].filterType = .parametric
+                    inEQ.bands[1].frequency = self.config.vocalDuckFreqHz
+                    inEQ.bands[1].bandwidth = 1.2
+                    inEQ.bands[1].gain = smoothedInDuckDB
+                    inEQ.bands[1].bypass = abs(smoothedInDuckDB) < 0.15
                 }
 
                 // ── End ─────────────────────────────────────────────────
@@ -1036,22 +1239,67 @@ class MixAudioEngine {
             scheduleTrackEndTimer(delay: 0.1)
             return
         }
-        let maxFadeDuration = max(config.crossfadeDuration * 1.5, 12.0)
+        let finalDelay = max(0.1, remaining - beatAlignedCrossfadeTime)
+        schedulePreCrossfadeEQ(delay: finalDelay - 5.0)
+        scheduleTrackEndTimer(delay: finalDelay)
+    }
+
+    /// Refreshes the current track's analysis + bar grid in place after the
+    /// library analysis pass attaches richer data to a track that already
+    /// loaded (import flow analyzes after loading). The caller re-arms the
+    /// transition right after so the new grid is actually used.
+    func refreshCurrentTrackAnalysis(_ analysis: TrackAnalysis) {
+        currentTrackAnalysis = analysis
+        if !analysis.barTimestamps.isEmpty { currentBarTimestamps = analysis.barTimestamps }
+    }
+
+    /// Re-arms the automatic transition timer now that the next track (and its
+    /// analysis) is known — e.g. once the queue resolves the successor of the
+    /// current song. Recomputes the beat-aligned trigger with BOTH analyses so
+    /// the second-half energy-match search can score real RMS/slope fit, then
+    /// re-arms the timer. Safe to call any time during playback (idempotent).
+    /// `incomingEntryTime` (the actual landing point of the incoming buffer,
+    /// after intro trim) anchors the energy comparison to the real audio.
+    func rescheduleForNextTrack(
+        nextAnalysis: TrackAnalysis?,
+        incomingEntryTime: Double = 0,
+        crossfadeDuration: Double? = nil
+    ) {
+        guard !soloPlayThrough, isPlaying, currentDuration > 0 else { return }
+        cancelTrackEndTimer()
+        cancelPreCrossfadeEQ()
+        let effectiveFade = max(crossfadeDuration ?? config.crossfadeDuration, 8.0)
         beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
             duration: currentDuration,
             rate: Double(currentRate),
             barTimestamps: currentBarTimestamps,
-            crossfadeDuration: maxFadeDuration,
+            crossfadeDuration: effectiveFade,
             outgoingAnalysis: currentTrackAnalysis,
-            incomingAnalysis: nil
+            incomingAnalysis: nextAnalysis,
+            incomingEntryTime: incomingEntryTime
         )
-        var vocalDelay: Double = 0
-        if let vocalEnds = currentTrackAnalysis?.vocalOffsetTimestamps, !vocalEnds.isEmpty {
-            vocalDelay = max(0, vocalEnds.last! - currentTime)
+        let remaining = trueRemaining()
+        let finalDelay: TimeInterval
+        if remaining > beatAlignedCrossfadeTime {
+            finalDelay = max(0.1, remaining - beatAlignedCrossfadeTime)
+        } else if remaining > 4.0 {
+            // Already past the optimal bar (e.g. analysis finished late in the song):
+            // trigger on the next clean bar instead of waiting until 0s left.
+            let now = currentTime
+            let minFadeRoom = min(effectiveFade, remaining * 0.55)
+            let maxSafe = max(now + 1.5, currentDuration - max(4.0, minFadeRoom))
+            if let nextBar = currentBarTimestamps.first(where: { $0 >= now + 1.0 && $0 <= maxSafe }) {
+                finalDelay = max(0.5, nextBar - now)
+            } else {
+                finalDelay = max(0.5, remaining - minFadeRoom)
+            }
+        } else {
+            finalDelay = 0.1
         }
-        let finalDelay = max(0.1, remaining - beatAlignedCrossfadeTime, vocalDelay)
+        crossfadeTriggerDelay = finalDelay
         schedulePreCrossfadeEQ(delay: finalDelay - 5.0)
         scheduleTrackEndTimer(delay: finalDelay)
+        print("[Engine] Transition for next track re-armed in " + String(format: "%.2f", finalDelay) + "s (pos=\(String(format: "%.1f", currentTime))/\(String(format: "%.1f", currentDuration))s, triggerFromEnd=\(String(format: "%.1f", beatAlignedCrossfadeTime))s, energyMatch=\(triggerFromEnergyMatch))")
     }
 
     private func restartTrackEndTimer() {
@@ -1080,54 +1328,16 @@ class MixAudioEngine {
     private func cancelPreCrossfadeEQ() {
         preCrossfadeTimer?.invalidate()
         preCrossfadeTimer = nil
-        preCrossfadeRampTimer?.invalidate()
-        preCrossfadeRampTimer = nil
     }
 
-    /// Starts a 5-second low-pass filter ramp on the outgoing player
-    /// before the crossfade begins. Smoothly rolls off highs so the
-    /// transition feels prepared, not abrupt.
+    /// Pre-roll-off DISABLED. The outgoing used to start low-passing 5 seconds
+    /// BEFORE the crossfade even began — the song sounded filtered/dull long
+    /// before any blend was audible. The blend's own EQ fade (see the crossfade
+    /// envelope below) handles the handoff, so there is deliberately nothing to
+    /// schedule here; this stays as a no-op so callers remain valid.
     private func schedulePreCrossfadeEQ(delay: TimeInterval) {
+        _ = delay
         cancelPreCrossfadeEQ()
-        guard delay > 0.5, config.eqFadeEnabled else { return }
-        preCrossfadeTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            guard let self = self, self.isPlaying, !self.isCrossfading else { return }
-            self.preCrossfadeTimer = nil
-            self.startPreCrossfadeRamp()
-        }
-    }
-
-    private func startPreCrossfadeRamp() {
-        let rampDuration: TimeInterval = 5.0  // 5 seconds to roll off
-        let startHz = config.eqLowPassStartHz  // 20000
-        let endHz = self.moodEqLowPassEndHz     // mood-adapted target
-        let interval: TimeInterval = 0.1
-        let steps = Int(rampDuration / interval)
-        var currentStep = 0
-        preCrossfadeRampStartTime = Date()
-
-        preCrossfadeRampTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] timer in
-            guard let self = self, self.isPlaying, !self.isCrossfading else {
-                timer.invalidate()
-                self?.preCrossfadeRampTimer = nil
-                return
-            }
-            currentStep += 1
-            let progress = min(1.0, Double(currentStep) / Double(max(1, steps)))
-            // Smoothstep for gentle roll-off
-            let s = progress * progress * (3.0 - 2.0 * progress)
-            let cutHz = startHz * pow(endHz / startHz, Float(s))
-            let outEQ = self.currentEQ
-            outEQ.bands[0].filterType = .lowPass
-            outEQ.bands[0].frequency = cutHz
-            outEQ.bands[0].bypass = false
-
-            if currentStep >= steps {
-                timer.invalidate()
-                self.preCrossfadeRampTimer = nil
-                self.preCrossfadeRampStartTime = nil
-            }
-        }
     }
 
     /// Time (seconds) of the outgoing track's last musical content (vocal OR energy
@@ -1199,105 +1409,117 @@ class MixAudioEngine {
         barTimestamps: [Double],
         crossfadeDuration: Double,
         outgoingAnalysis: TrackAnalysis?,
-        incomingAnalysis: TrackAnalysis?
+        incomingAnalysis: TrackAnalysis?,
+        incomingEntryTime: Double = 0
     ) -> Double {
+        // ── Second-half energy match ─────────────────────────
+        // Prefer a bar boundary in the second half of the outgoing track whose
+        // local energy segment matches the incoming track's entry (RMS level
+        // + slope direction). The search spans the BODY of the outgoing track
+        // (from ~35% onward, after the intro) and actively favours seams in
+        // the 40–70% region, so the handoff adapts to the music instead of
+        // always being pulled toward the outro. Returns nil — falling back to
+        // the legacy near-the-end search — when no viable candidate scores
+        // well or the incoming analysis is unknown.
+        triggerFromEnergyMatch = false
+        if let energyBar = energyMatchedTransitionBar(
+            duration: duration,
+            rate: rate,
+            minTriggerTime: crossfadeDuration,
+            barTimestamps: barTimestamps,
+            outgoingAnalysis: outgoingAnalysis,
+            incomingAnalysis: incomingAnalysis,
+            crossfadeDuration: crossfadeDuration,
+            incomingEntryTime: incomingEntryTime
+        ) {
+            triggerFromEnergyMatch = true
+            let adjusted = duration / rate
+            print("[Engine] Energy-matched transition at bar " +
+                  String(format: "%.2f", energyBar) +
+                  "s (score wins the adaptive seam search)")
+            return adjusted - energyBar
+        }
+
         guard !barTimestamps.isEmpty, rate > 0 else {
             return crossfadeDuration
         }
 
         let adjustedDuration = duration / rate
-        let minTriggerTime = crossfadeDuration
-
-        // Get energy profiles for matching
-        let outEnergy = outgoingAnalysis?.energyProfile ?? []
-        let inEnergy = incomingAnalysis?.energyProfile ?? []
-
-        // Outgoing intro region — avoid triggering during it
-        let outIntroEnd = outgoingAnalysis?.introRegion?.end ?? 0
-
-        // BPM alignment — closer BPMs = better beat sync during crossfade
-        let outBPM = outgoingAnalysis?.bpm ?? 0
-        let inBPM = incomingAnalysis?.bpm ?? 0
-        let bpmScore: Double
-        if outBPM > 0, inBPM > 0 {
-            let bpmDiff = abs(outBPM - inBPM) / max(outBPM, inBPM)
-            bpmScore = max(0, 1.0 - bpmDiff * 5.0)
+        let effectiveEnd: Double
+        if let trail = outgoingAnalysis?.trailingSilence, trail > 1.0 {
+            effectiveEnd = min(adjustedDuration, trail / rate)
         } else {
-            bpmScore = 0.5
+            effectiveEnd = adjustedDuration
         }
+        let minTriggerTime = max(crossfadeDuration, 12.0)
 
-        // Find bar boundaries that leave enough time for crossfade
-        var candidates: [(barTime: Double, triggerPoint: Double, score: Double)] = []
-
-        // Compute vocal end so we can skip bar boundaries that would cut the vocal.
-        let vocalEnd = Self.lastContentEndTime(analysis: outgoingAnalysis, duration: adjustedDuration)
+        // Proactive Apple AutoMix fallback (when incoming analysis is unknown or
+        // energyMatchedTransitionBar returned nil): pick a clean 8/16-bar phrase
+        // boundary in the 72–88% zone (or right at outro start), NEVER waiting
+        // until 12s before dead silence!
+        let outIntroEnd = outgoingAnalysis?.introRegion?.end ?? 0
+        let outroStart = outgoingAnalysis?.outroRegion?.start ?? 0
         let chorusEnd = Self.lastHighEnergySectionEnd(analysis: outgoingAnalysis)
+        let lower = max(effectiveEnd * 0.68, outIntroEnd)
+        let upper = effectiveEnd - minTriggerTime
 
-        for barTime in barTimestamps.reversed() {
-            let triggerPoint = adjustedDuration - barTime
-            if triggerPoint >= minTriggerTime {
-                // Skip if this bar is during the outgoing intro
-                if barTime < outIntroEnd {
-                    continue
-                }
+        var bestBar: Double?
+        var bestRank = -Double.infinity
 
-                // Skip bar boundaries before the vocal ends — crossfading here cuts the vocal.
-                // Allow a 2s margin so the crossfade can overlap the vocal's resolving tail.
-                if vocalEnd > 0 && barTime < vocalEnd - 2.0 {
-                    continue
-                }
+        if upper > lower {
+            let chorusCap = min(chorusEnd - 0.5, effectiveEnd * 0.86)
+            for (barIndex, barTime) in barTimestamps.enumerated() {
+                guard barTime >= lower, barTime <= upper else { continue }
 
-                // Never start crossfade before the last chorus/drop ends.
-                if chorusEnd > 0 && barTime < chorusEnd {
-                    continue
-                }
-
-                // Compute energy match score
-                let energyScore = computeEnergyMatchScore(
-                    outgoingTime: barTime,
-                    outgoingDuration: adjustedDuration,
-                    outgoingEnergy: outEnergy,
-                    incomingEnergy: inEnergy
-                )
-
-                // Phrase bonus: prefer 8-bar and 16-bar boundaries
-                let barIndex = barTimestamps.firstIndex(of: barTime) ?? 0
                 let phraseScore: Double
                 if barIndex % 16 == 0 {
-                    phraseScore = 1.0  // 16-bar phrase boundary — best
+                    phraseScore = 1.0
                 } else if barIndex % 8 == 0 {
-                    phraseScore = 0.8  // 8-bar phrase boundary — good
+                    phraseScore = 0.85
                 } else if barIndex % 4 == 0 {
-                    phraseScore = 0.5  // 4-bar boundary — okay
+                    phraseScore = 0.55
                 } else {
-                    phraseScore = 0.2  // Single bar — least preferred
+                    phraseScore = 0.20
                 }
 
-                // Combined score: 50% energy + 30% phrase + 20% BPM
-                let combinedScore = energyScore * 0.5 + phraseScore * 0.3 + bpmScore * 0.2
-                candidates.append((barTime, triggerPoint, combinedScore))
+                let pos = barTime / max(1.0, effectiveEnd)
+                let posScore: Double
+                if pos >= 0.74 && pos <= 0.88 {
+                    posScore = 1.0
+                } else if pos >= 0.68 && pos < 0.74 {
+                    posScore = 0.6
+                } else {
+                    posScore = 0.3
+                }
+
+                let outroBonus = (outroStart > effectiveEnd * 0.65 && abs(barTime - outroStart) <= 4.5) ? 0.35 : 0.0
+                let chorusPenalty = (chorusEnd > 0 && chorusCap <= upper && barTime < chorusCap) ? 0.25 : 0.0
+                let vCost = vocalCost(
+                    at: barTime,
+                    windowSeconds: 3.0,
+                    activity: outgoingAnalysis?.vocalActivity ?? [],
+                    duration: adjustedDuration
+                )
+                let rank = posScore * 0.45 + phraseScore * 0.30 + (1.0 - vCost) * 0.25 + outroBonus - chorusPenalty
+                if rank > bestRank {
+                    bestRank = rank
+                    bestBar = barTime
+                }
             }
         }
 
-        // Prefer bar boundaries closest to (but after) the vocal end.
-        let scored = candidates.map { c -> (cand: (barTime: Double, triggerPoint: Double, score: Double), rank: Double) in
-            let dist = c.barTime - vocalEnd
-            // Closer to vocal end = better (prefer just past the vocal tail).
-            let proximity = max(0.0, 1.0 - abs(max(0, dist)) / 6.0)
-            let rank = c.score * 0.4 + proximity * 0.6
-            return (c, rank)
+        if let bar = bestBar {
+            let triggerPoint = adjustedDuration - bar
+            print("[Engine] Phrase-aligned bar at \(String(format: "%.2f", bar))s → \(String(format: "%.1f", triggerPoint))s from end (rank \(String(format: "%.2f", bestRank)))")
+            return triggerPoint
         }
 
-        let best = scored.max(by: { $0.rank < $1.rank })?.cand
-
-        if let best {
-            print("[Engine] Best bar at \(String(format: "%.2f", best.barTime))s → trigger in \(String(format: "%.2f", best.triggerPoint))s (vocalEnd=\(String(format: "%.2f", vocalEnd)), score \(String(format: "%.3f", best.score)))")
-            return best.triggerPoint
-        }
-
-        // Fallback
-        print("[Engine] No bar boundary found, using fallback crossfade at \(String(format: "%.2f", crossfadeDuration))s from end")
-        return crossfadeDuration
+        // Ultimate fallback (no bars available): aim ~18% before audible end (clamped 16–32s).
+        let proportionalLead = min(32.0, max(minTriggerTime + 4.0, effectiveEnd * 0.18))
+        let silenceMargin = max(0, adjustedDuration - effectiveEnd)
+        let fallbackFromEnd = min(adjustedDuration * 0.35, silenceMargin + proportionalLead)
+        print("[Engine] No bar boundary found, using smart proportional trigger at \(String(format: "%.2f", fallbackFromEnd))s from end")
+        return fallbackFromEnd
     }
 
     /// Scores how well the outgoing energy trajectory matches the incoming energy trajectory.
@@ -1346,6 +1568,204 @@ class MixAudioEngine {
         return levelScore * 0.6 + slopeScore * 0.4
     }
 
+    // MARK: - Adaptive Energy-Matched Transition
+
+    /// Finds a bar boundary in the BODY of the outgoing track (from ~35%
+    /// onward, after the intro) where the outgoing energy segment matches the
+    /// incoming track's entry energy — RMS level plus slope direction. A
+    /// position prior favours the 40–70% region and penalises the outro, so
+    /// the seam adapts to the music (Apple-Automix-like) instead of being
+    /// magnetically pulled to the end of the song. The crossfade may start as
+    /// early as 35% in; the incoming entry (after intro trim) is the reference.
+    ///
+    /// Returns the bar timestamp (seconds) of the winning seam, or nil when
+    /// nothing scores well or either track has no usable analysis — the caller
+    /// then falls back to the legacy near-the-end search.
+    private func energyMatchedTransitionBar(
+        duration: Double,
+        rate: Double,
+        minTriggerTime: Double,
+        barTimestamps: [Double],
+        outgoingAnalysis: TrackAnalysis?,
+        incomingAnalysis: TrackAnalysis?,
+        crossfadeDuration: Double,
+        incomingEntryTime: Double = 0
+    ) -> Double? {
+        guard !barTimestamps.isEmpty, duration > 0, rate > 0 else { return nil }
+        guard let out = outgoingAnalysis else { return nil }
+        // The incoming analysis drives the energy match — without it the search
+        // degenerates to the legacy heuristics, so bail out and let the fallback run.
+        guard let inn = incomingAnalysis else { return nil }
+        guard !out.energyProfile.isEmpty, !inn.energyProfile.isEmpty else { return nil }
+
+        let adjustedDuration = duration / rate
+        let effectiveEnd: Double
+        if out.trailingSilence > 1.0 {
+            effectiveEnd = min(adjustedDuration, out.trailingSilence / rate)
+        } else {
+            effectiveEnd = adjustedDuration
+        }
+
+        let outIntroEnd = out.introRegion?.end ?? 0
+        // Proactive Apple AutoMix zone: search 68%..effectiveEnd - max(crossfadeDuration, 14s)
+        // so transitions overlap active groove/outro instead of waiting for silence at 96%.
+        let chorusEnd = Self.lastHighEnergySectionEnd(analysis: out)
+        let outroStart = out.outroRegion?.start ?? 0
+        let rawLower = max(effectiveEnd * 0.68, outIntroEnd)
+        let minLeadOut = max(minTriggerTime, 14.0)
+        let upper = effectiveEnd - minLeadOut
+        guard upper > 1.0 else { return nil }
+        // Protect final chorus climax, but cap protection at 86% of audible length so
+        // songs whose chorus runs all the way to the end still mix out cleanly in their final bars.
+        let chorusCap = min(chorusEnd - 0.5, effectiveEnd * 0.86)
+        let protectedLower = (chorusEnd > 0 && chorusCap <= upper) ? max(rawLower, chorusCap) : rawLower
+        let lower = min(protectedLower, upper)
+        guard upper >= lower else { return nil }
+
+        let outEnergy = out.energyProfile
+        var inEnergy = inn.energyProfile
+        // Anchor the comparison to the ACTUAL landing segment of the incoming
+        // buffer (after intro trim) — index 0 may be a skipped intro that never
+        // plays, which would misjudge the seam energy.
+        if incomingEntryTime > 0.5, inn.duration > 0, !inEnergy.isEmpty {
+            let entryIdx = max(0, min(inEnergy.count - 1,
+                                      Int(incomingEntryTime / inn.duration * Double(inEnergy.count))))
+            if entryIdx > 0, inEnergy.count - entryIdx >= 8 {
+                inEnergy = Array(inEnergy[entryIdx...])
+            }
+        }
+        let activity = out.vocalActivity
+
+        var bestBar: Double?
+        var bestScore = 0.0
+
+        for bar in barTimestamps {
+            guard bar >= lower, bar <= upper else { continue }
+
+            // Energy seam fit: outgoing segment at the candidate vs incoming at 0.
+            let energyScore = computeEnergyMatchScore(
+                outgoingTime: bar,
+                outgoingDuration: adjustedDuration,
+                outgoingEnergy: outEnergy,
+                incomingEnergy: inEnergy
+            )
+
+            // Phrase bonus: prefer 8-/16-bar boundaries.
+            let barIndex = barTimestamps.firstIndex(of: bar) ?? 0
+            let phraseScore: Double
+            if barIndex % 16 == 0 {
+                phraseScore = 1.0
+            } else if barIndex % 8 == 0 {
+                phraseScore = 0.8
+            } else if barIndex % 4 == 0 {
+                phraseScore = 0.5
+            } else {
+                phraseScore = 0.2
+            }
+
+            // BPM proximity — closer tempos = tighter blend through the handoff.
+            let bpmScore: Double
+            if let outBPM = out.bpm, let inBPM = inn.bpm, outBPM > 0, inBPM > 0 {
+                let bpmDiff = abs(outBPM - inBPM) / max(outBPM, inBPM)
+                bpmScore = max(0, 1.0 - bpmDiff * 5.0)
+            } else {
+                bpmScore = 0.5
+            }
+
+            // Vocal cost: short window — the blend ducks anyway; only the
+            // moment the crossfade opens matters. A 12s window vetoed every
+            // mid-song seam in vocal-dense songs, pushing transitions to the
+            // sparse outro — which is exactly what this search must avoid.
+            let vocalCost = vocalCost(at: bar, windowSeconds: min(crossfadeDuration, 3.0),
+                                      activity: activity, duration: adjustedDuration)
+            let vocalScore = max(0, 1.0 - vocalCost)
+
+            // Section awareness: penalise seams that land deep inside a
+            // high-energy section (chorus / bridge). Cutting mid-chorus is the
+            // "skipped the chorus and jumped" feel the listener flags — prefer
+            // section starts, phrase boundaries, or lower-energy regions.
+            var sectionPenalty: Double = 0
+            let sections = out.structureSections
+            if !sections.isEmpty {
+                for s in sections {
+                    if (s.label == "chorus" || s.label == "bridge")
+                        && bar > s.startTime + max(4.0, s.duration * 0.25)
+                        && bar < s.endTime - 1.0 {
+                        sectionPenalty = max(sectionPenalty, 0.2)
+                        break
+                    }
+                }
+            }
+
+            // Position prior: Apple AutoMix sweet spot is 74–88% of audible track
+            // (trims long outros and keeps groove alive; penalizes waiting past 90%).
+            let position = bar / max(1.0, effectiveEnd)
+            let positionPrior: Double
+            if position >= 0.74 && position <= 0.88 {
+                positionPrior = 0.25
+            } else if position >= 0.68 && position < 0.74 {
+                positionPrior = 0.08
+            } else if position > 0.88 && position <= 0.91 {
+                positionPrior = 0.02
+            } else {
+                positionPrior = -0.14
+            }
+
+            // Outro-start bonus: starting the blend right as the outro begins
+            // (after the final chorus resolves) is the cleanest musical handoff.
+            let outroBonus: Double
+            if outroStart > effectiveEnd * 0.65, abs(bar - outroStart) <= 4.5 {
+                outroBonus = 0.22
+            } else {
+                outroBonus = 0.0
+            }
+
+            // Momentum: never cut straight through a rising, above-average
+            // "good mood" build — that is the abrupt-change the ear notices.
+            // Reward natural gaps where the energy dips or is already falling.
+            let centerIdx = max(0, min(outEnergy.count - 1,
+                                       Int(bar / adjustedDuration * Double(outEnergy.count))))
+            let win = max(1, outEnergy.count / 34)  // ~3s either side
+            let lo = max(0, centerIdx - win)
+            let hi = min(outEnergy.count, centerIdx + win + 1)
+            let localAvg = outEnergy[lo..<hi].reduce(0, +) / Float(max(1, hi - lo))
+            let ratio = Double(outEnergy[centerIdx]) / max(0.001, Double(localAvg))
+            let slopeAt = Double(outEnergy[min(outEnergy.count - 1, centerIdx + win * 2)]
+                - outEnergy[max(0, centerIdx - win * 2)])
+            let buildPenalty = -0.12 * min(1, max(0, (ratio - 1.05) * 3))
+                * min(1, max(0, slopeAt * 6))
+            let gapBonus = 0.05 * min(1, max(0, -slopeAt * 4))
+            let momentum = buildPenalty + gapBonus
+
+            let combined = energyScore * 0.45 + phraseScore * 0.18 + bpmScore * 0.15
+                + vocalScore * 0.17 + positionPrior + outroBonus + momentum - sectionPenalty
+            if combined > bestScore {
+                bestScore = combined
+                bestBar = bar
+            }
+        }
+
+        // Accept any solid musical phrase match instead of falling back to the rigid last-12s cut.
+        guard bestScore >= 0.40, let bar = bestBar else { return nil }
+        print("[Engine] Adaptive energy seam: bar " + String(format: "%.2f", bar) +
+              "s — RMS/slope match " + String(format: "%.3f", bestScore))
+        return bar
+    }
+
+    /// Max (mean) outgoing vocal activity over the crossfade window starting at
+    /// `time` — higher means the candidate starts deep inside a vocal line.
+    private func vocalCost(at time: Double, windowSeconds: Double,
+                           activity: [Float], duration: Double) -> Double {
+        guard !activity.isEmpty, duration > 0, windowSeconds > 0 else { return 0 }
+        let startIdx = max(0, min(activity.count - 1,
+                                  Int(time / duration * Double(activity.count))))
+        let rawEnd = Int((time + windowSeconds) / duration * Double(activity.count))
+        let endIdx = min(activity.count, max(startIdx + 1, rawEnd))
+        let slice = activity[startIdx..<endIdx]
+        guard !slice.isEmpty else { return Double(activity[startIdx]) }
+        return Double(slice.reduce(0, +) / Float(slice.count))
+    }
+
     // MARK: - Vocal Preservation
 
     private func clampVolume(_ volume: Float) -> Float {
@@ -1353,9 +1773,39 @@ class MixAudioEngine {
     }
 
     private func resetEQ(_ eq: AVAudioUnitEQ) {
+        // Band 0: High-Pass (Bass Swap)
+        eq.bands[0].filterType = .highPass
+        eq.bands[0].frequency = 20.0
         eq.bands[0].bypass = true
-        eq.bands[0].frequency = config.eqLowPassStartHz
-        eq.bands[0].filterType = .lowPass
+
+        // Band 1: Parametric Mid (Dynamic Vocal Ducking)
+        if eq.bands.count > 1 {
+            eq.bands[1].filterType = .parametric
+            eq.bands[1].frequency = config.vocalDuckFreqHz
+            eq.bands[1].bandwidth = 1.2
+            eq.bands[1].gain = 0
+            eq.bands[1].bypass = true
+        }
+
+        // Band 2: Low-Pass (Warm Roll-off)
+        if eq.bands.count > 2 {
+            eq.bands[2].filterType = .lowPass
+            eq.bands[2].frequency = config.eqLowPassStartHz
+            eq.bands[2].bypass = true
+        }
+    }
+
+    private func resetReverb(_ reverb: AVAudioUnitReverb) {
+        reverb.wetDryMix = 0
+        reverb.bypass = true
+    }
+
+    /// Samples a track's vocal activity (0.0–1.0) at a given timestamp in seconds.
+    private static func sampleVocalActivity(_ analysis: TrackAnalysis?, at time: Double) -> Float {
+        guard let analysis, !analysis.vocalActivity.isEmpty, analysis.duration > 0 else { return 0 }
+        let ratio = max(0.0, min(1.0, time / analysis.duration))
+        let idx = min(analysis.vocalActivity.count - 1, Int(ratio * Double(analysis.vocalActivity.count)))
+        return analysis.vocalActivity[idx]
     }
 
     // MARK: - Hall Reverb (Motions tab only)
@@ -1623,6 +2073,9 @@ class MixAudioEngine {
         let durationMultiplier: Double
         /// Whether both tracks share a similar mood (for logging).
         let moodsMatch: Bool
+        /// True when both tracks are energetic (happy/angry) — the energy-driven
+        /// duration from computeCrossfadeDuration already decides the blend.
+        let bothEnergetic: Bool
     }
 
     /// Computes mood-aware crossfade parameters.
@@ -1688,7 +2141,8 @@ class MixAudioEngine {
             curveExponentBias: curveBias,
             eqLowPassEndHz: eqEndHz,
             durationMultiplier: durationMult,
-            moodsMatch: moodsMatch
+            moodsMatch: moodsMatch,
+            bothEnergetic: outEnergetic && inEnergetic
         )
     }
 
@@ -1823,7 +2277,7 @@ class MixAudioEngine {
         let inPlayerID = otherPlayer === playerA ? "A" : "B"
         print("[Engine] Pre-swap: current=\(outPlayerID) vol=\(String(format: "%.3f", currentPlayer.volume)), other=\(inPlayerID) vol=\(String(format: "%.3f", otherPlayer.volume))")
         print("[Engine] Pre-swap: currentTimePitch rate=\(String(format: "%.4f", currentTimePitch.rate)) bypass=\(currentTimePitch.bypass), otherTimePitch rate=\(String(format: "%.4f", otherTimePitch.rate)) bypass=\(otherTimePitch.bypass)")
-        print("[Engine] Pre-swap: eqA band0 freq=\(String(format: "%.0f", eqA.bands[0].frequency))Hz bypass=\(eqA.bands[0].bypass), eqB band0 freq=\(String(format: "%.0f", eqB.bands[0].frequency))Hz bypass=\(eqB.bands[0].bypass)")
+        print("[Engine] Pre-swap: eqA lpf=\(String(format: "%.0f", eqA.bands[2].frequency))Hz hpf=\(String(format: "%.0f", eqA.bands[0].frequency))Hz rev=\(String(format: "%.0f", reverbA.wetDryMix))%, eqB lpf=\(String(format: "%.0f", eqB.bands[2].frequency))Hz hpf=\(String(format: "%.0f", eqB.bands[0].frequency))Hz rev=\(String(format: "%.0f", reverbB.wetDryMix))%")
         print("[Engine] Pre-swap: currentRate=\(String(format: "%.4f", currentRate)), isCrossfading=\(isCrossfading), isPlaying=\(isPlaying)")
         print("[Engine] Pre-swap: actualIncomingDuration=\(String(format: "%.2f", actualIncomingDuration)), currentDuration=\(String(format: "%.2f", currentDuration)), seekOffset=\(String(format: "%.2f", seekOffset))")
 
@@ -1844,20 +2298,26 @@ class MixAudioEngine {
 
         resetEQ(eqA)
         resetEQ(eqB)
+        resetReverb(reverbA)
+        resetReverb(reverbB)
 
         currentPlayer.volume = lastIncomingVolume
         otherPlayer.volume = 0
 
-        currentDuration = incomingDuration
+        // Keep engine clock in FULL-song coordinates (matching TrackAnalysis,
+        // barTimestamps, lyrics, and seek) even when incoming intro was trimmed!
+        let fullDur = max(fullIncomingDuration, incomingCueOffset + actualIncomingDuration)
+        currentDuration = fullDur
         isCrossfading = false
         isPlaying = true
 
         let elapsed = -(crossfadeStartTime ?? Date()).timeIntervalSinceNow
-        // Track-seconds of the incoming buffer consumed: the pad plays first
+        // Track-seconds of the trimmed incoming buffer consumed: pad plays first
         // (real seconds), then audio at the blend rate.
         let consumedTrack = max(0, elapsed - blendPadDelay) * Double(blendTempoRate)
         let remaining = max(0.1, actualIncomingDuration - consumedTrack)
-        seekOffset = max(0, actualIncomingDuration - remaining)
+        // True playback timestamp in full-song coordinates = cue offset + consumed!
+        seekOffset = min(fullDur, incomingCueOffset + consumedTrack)
         trackStartTime = Date()
 
         if abs(blendTempoRate - 1.0) < 0.001 {
@@ -1868,33 +2328,28 @@ class MixAudioEngine {
             otherTimePitch.rate = 1.0
             otherTimePitch.bypass = true
         } else {
-            // Glide back to natural tempo over 2s instead of snapping —
-            // the handoff stays beat-fit all the way home.
+            // Glide back to natural tempo smoothly — duration scales with tempo delta
+            // (4s for tiny tweaks up to 8s for wider stretches) so recovery is imperceptible.
+            let delta = Double(abs(blendTempoRate - 1.0))
+            let glideDuration = 4.0 + min(4.0, delta * 35.0)
             currentRate = blendTempoRate
             remainingAtStart = remaining
             currentTimePitch.bypass = false
             currentTimePitch.rate = blendTempoRate
             otherTimePitch.rate = 1.0
             otherTimePitch.bypass = true
-            startTempoRamp(node: currentTimePitch, from: blendTempoRate, to: 1.0, duration: 2.0) { [weak self] in
+            startTempoRamp(node: currentTimePitch, from: blendTempoRate, to: 1.0, duration: glideDuration) { [weak self] in
                 self?.currentTimePitch.bypass = true
                 self?.currentRate = 1.0
             }
         }
 
-        onCrossfadeCompleted?()
-
-        // ── Diagnostic: verify state after swap ────────────────────────
-        let newCurrentPlayerID = currentPlayer === playerA ? "A" : "B"
-        let newOtherPlayerID = otherPlayer === playerA ? "A" : "B"
-        print("[Engine] Post-swap: currentPlayer=\(newCurrentPlayerID) (was \(inPlayerID)), otherPlayer=\(newOtherPlayerID) (was \(outPlayerID))")
-        print("[Engine] Post-swap: currentTimePitch rate=\(String(format: "%.4f", currentTimePitch.rate)) bypass=\(currentTimePitch.bypass), otherTimePitch rate=\(String(format: "%.4f", otherTimePitch.rate)) bypass=\(otherTimePitch.bypass)")
-        print("[Engine] Post-swap: remaining=\(String(format: "%.2f", remaining)), seekOffset=\(String(format: "%.2f", seekOffset)), currentRate=\(String(format: "%.4f", currentRate))")
-        print("[Engine] Post-swap: currentPlayer playing=\(currentPlayer.isPlaying), otherPlayer playing=\(otherPlayer.isPlaying)")
-
-        let maxFade = max(config.crossfadeDuration * 1.5, 12.0)
+        // Arm default phrase-aligned fallback BEFORE notifying ViewModel so that
+        // `onCrossfadeCompleted -> scheduleCrossfadeWarmup -> rescheduleForNextTrack`
+        // ALWAYS wins with the true next-track analysis instead of getting overwritten!
+        let maxFade = max(config.crossfadeDuration * 1.2, 12.0)
         beatAlignedCrossfadeTime = computeBeatAlignedCrossfadeTime(
-            duration: incomingDuration,
+            duration: fullDur,
             rate: 1.0,
             barTimestamps: currentBarTimestamps,
             crossfadeDuration: maxFade,
@@ -1903,6 +2358,14 @@ class MixAudioEngine {
         )
         crossfadeTriggerDelay = max(0.1, remainingAtStart - beatAlignedCrossfadeTime)
         scheduleTrackEndTimer(delay: crossfadeTriggerDelay)
+
+        onCrossfadeCompleted?()
+
+        // ── Diagnostic: verify state after swap ────────────────────────
+        let newCurrentPlayerID = currentPlayer === playerA ? "A" : "B"
+        let newOtherPlayerID = otherPlayer === playerA ? "A" : "B"
+        print("[Engine] Post-swap: currentPlayer=\(newCurrentPlayerID) (was \(inPlayerID)), otherPlayer=\(newOtherPlayerID) (was \(outPlayerID))")
+        print("[Engine] Post-swap: fullDur=\(String(format: "%.1f", fullDur))s, pos=\(String(format: "%.1f", seekOffset))s (cue=\(String(format: "%.1f", incomingCueOffset))s), remaining=\(String(format: "%.1f", remaining))s, nextTriggerIn=\(String(format: "%.1f", crossfadeTriggerDelay))s")
     }
 
 }

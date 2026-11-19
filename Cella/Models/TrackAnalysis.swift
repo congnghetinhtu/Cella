@@ -9,6 +9,13 @@ import Foundation
 import AVFoundation
 
 struct TrackAnalysis: Sendable, Codable {
+    /// Schema version for `.cellax` cache validation. Bump whenever analysis
+    /// semantics or required fields change so stale caches re-analyze cleanly.
+    static let currentSchemaVersion: Int = 4
+
+    /// Cache schema version written with this analysis.
+    let schemaVersion: Int
+
     // MARK: - Audio Analysis Results
 
     /// Beats per minute detected by spfk-tempo.
@@ -19,6 +26,9 @@ struct TrackAnalysis: Sendable, Codable {
 
     /// Bar boundary positions as timestamps (seconds from start).
     let barTimestamps: [Double]
+
+    /// Beat grid confidence (0.0 = free-time/ambient, 1.0 = locked percussive beat).
+    let beatConfidence: Float
 
     /// Musical key signature (tonic + mode) for the dominant range.
     let keySignature: KeySignature?
@@ -34,6 +44,9 @@ struct TrackAnalysis: Sendable, Codable {
     /// RMS energy envelope over time (one value per window).
     let energyProfile: [Float]
 
+    /// Low-frequency (20–200 Hz) bass energy envelope over time (0.0–1.0 normalized).
+    let bassEnergyProfile: [Float]
+
     /// Whether the track contains vocals.
     let hasVocals: Bool
 
@@ -42,6 +55,12 @@ struct TrackAnalysis: Sendable, Codable {
 
     /// Total duration in seconds.
     let duration: Double
+
+    /// Leading silence duration (seconds) before musical content rises above -50 dBFS.
+    let leadingSilence: Double
+
+    /// Timestamp (seconds from start) where audible content ends (drops below -45 dBFS).
+    let trailingSilence: Double
 
     // MARK: - Spectral Features (averages over analysis window)
 

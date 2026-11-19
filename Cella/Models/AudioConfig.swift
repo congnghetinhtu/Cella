@@ -24,8 +24,8 @@ struct AudioConfig {
     /// Buffer size for real-time audio rendering.
     var bufferSize: AVAudioFrameCount = 4096
 
-    /// Default crossfade duration in seconds.
-    var crossfadeDuration: Double = 8.0
+    /// Default crossfade duration in seconds (~4–6 bars for unmistakable beat-matched groove lock).
+    var crossfadeDuration: Double = 10.0
 
     /// Order the queue so every handoff starts where the previous track ends
     /// (a slight build is ideal, hard drops are penalised).
@@ -83,6 +83,32 @@ struct AudioConfig {
     /// High-pass filter end cutoff (Hz) — incoming reaches here at progress=1.
     /// Disabled by default (20→20 = no change).
     var eqHighPassEndHz: Float = 20.0
+
+    // MARK: - Apple AutoMix-Style DSP & Decision Tuning (Zero-config)
+
+    /// Minimum beat confidence (0–1) required on both tracks before engaging
+    /// beat-sync time-stretching and phase-locked transitions.
+    var minBeatConfidenceForSync: Float = 0.35
+
+    /// High-pass cutoff (Hz) used for clean Bass Swap between decks.
+    var bassSwapCutoffHz: Float = 240.0
+
+    /// Center frequency (Hz) for dynamic vocal mid-range ducking.
+    var vocalDuckFreqHz: Float = 1800.0
+
+    /// Maximum attenuation (dB) applied to the background deck's mid band
+    /// when the priority deck has active vocals.
+    var vocalDuckMaxDB: Float = -5.5
+
+    /// Peak wet/dry mix (0–100) for per-deck Echo-Out reverb tail on outgoing track.
+    var echoOutMaxWetMix: Float = 70.0
+
+    /// Maximum wait time (seconds) before starting a manual skip blend.
+    var manualSkipMaxWaitSeconds: Double = 1.5
+
+    /// Target duration range (seconds) for responsive manual skip blends.
+    var manualSkipMinDuration: Double = 3.0
+    var manualSkipMaxDuration: Double = 5.0
 
     /// Final mix peak limit (linear).
     var finalPeakLimit: Float = 0.95

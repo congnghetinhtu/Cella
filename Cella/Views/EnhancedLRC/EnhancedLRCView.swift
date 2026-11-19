@@ -105,12 +105,13 @@ struct EnhancedLRCView: View {
                 // shortcuts like Cmd+R): never record.
                 if showBulkPaste { return event }
                 if event.modifierFlags.contains(.command) { return event }
-                if event.keyCode == 15 {
+                // R = kVK_ANSI_R (19), M = kVK_ANSI_M (12) — Carbon virtual key codes.
+                if event.keyCode == 19 {
                     viewModel.toggleRecording()
                     return nil
                 }
-                if viewModel.isRecording, event.keyCode == 46 {
-                    viewModel.recordLine()
+                if viewModel.isRecording, event.keyCode == 12 {
+                    viewModel.recordLine(eventTime: event.timestamp)
                     return nil
                 }
                 return event
