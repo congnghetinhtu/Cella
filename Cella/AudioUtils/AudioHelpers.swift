@@ -231,82 +231,176 @@ enum AudioHelpers {
         return rmsValues
     }
 
-    // MARK: - Beat Detection (onset-based, no pitch shift)
+    // MARK: - Beat Detection (log-spectral-flux + autocorrelation confidence)
 
-    /// Detects actual beat positions from positive spectral flux onsets, phase-locked
-    /// to the strongest onset near the start. Tempo is taken from external BPM.
-    /// Returns (beat timestamps, time of first beat, relative score).
-    static func detectBeats(buffer: AVAudioPCMBuffer, bpm: Double) -> (beats: [Double], firstBeat: Double, score: Float) {
-        guard let channelData = buffer.floatChannelData, bpm > 0 else { return ([], 0, 0) }
+    /// Detects beat positions from log-compressed, bass-weighted positive spectral flux.
+    /// Computes `confidence` (0.0 = free-time/ambient, 1.0 = locked percussive beat) via
+    /// normalized autocorrelation at 1×/2× beat period vs off-beat lags, which is robust
+    /// on dense mastered Pop/EDM tracks and immune to single cymbal spikes or phase drift.
+    static func detectBeats(
+        buffer: AVAudioPCMBuffer,
+        bpm: Double
+    ) -> (beats: [Double], firstBeat: Double, confidence: Float, effectiveBPM: Double) {
+        guard let channelData = buffer.floatChannelData, bpm > 0 else { return ([], 0, 0, bpm) }
         let frameLength = Int(buffer.frameLength)
-        guard frameLength >= 2048 else { return ([], 0, 0) }
+        guard frameLength >= 2048 else { return ([], 0, 0, bpm) }
         let sampleRate = Double(buffer.format.sampleRate)
         let mono = channelData[0]
 
         let windowSize = 2048
-        let hop = 1024
+        let hop = 512
         let halfN = windowSize / 2
         let log2n = vDSP_Length(log2(Float(windowSize)))
-        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return ([], 0, 0) }
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return ([], 0, 0, bpm) }
         defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        let binHz = Float(sampleRate) / Float(windowSize)
+        let kickLo = max(1, Int(40.0 / binHz))
+        let kickHi = min(halfN - 1, Int(220.0 / binHz))
+        let snareLo = max(1, Int(1000.0 / binHz))
+        let snareHi = min(halfN - 1, Int(6000.0 / binHz))
 
         var window = [Float](repeating: 0, count: windowSize)
         vDSP_hann_window(&window, vDSP_Length(windowSize), Int32(vDSP_HANN_NORM))
 
         var envelope = [Float]()
-        var prevMag = [Float](repeating: 0, count: halfN)
+        envelope.reserveCapacity(frameLength / hop)
+        var prevLogMag = [Float](repeating: 0, count: halfN)
+        var isFirstFrame = true
         var position = 0
+
         while position + windowSize <= frameLength {
             var windowed = [Float](repeating: 0, count: windowSize)
-            for i in 0..<windowSize { windowed[i] = mono[position + i] * window[i] }
+            vDSP_vmul(mono + position, 1, window, 1, &windowed, 1, vDSP_Length(windowSize))
 
             var realPart = [Float](repeating: 0, count: halfN)
             var imagPart = [Float](repeating: 0, count: halfN)
-            var split = DSPSplitComplex(realp: &realPart, imagp: &imagPart)
-            windowed.withUnsafeBytes { ptr in
-                ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { cp in
-                    vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(halfN))
+            var magSq = [Float](repeating: 0, count: halfN)
+            realPart.withUnsafeMutableBufferPointer { realPtr in
+                imagPart.withUnsafeMutableBufferPointer { imagPtr in
+                    guard let realBase = realPtr.baseAddress,
+                          let imagBase = imagPtr.baseAddress else { return }
+                    var split = DSPSplitComplex(realp: realBase, imagp: imagBase)
+                    windowed.withUnsafeBytes { ptr in
+                        ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { cp in
+                            vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(halfN))
+                        }
+                    }
+                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                    vDSP_zvmags(&split, 1, &magSq, 1, vDSP_Length(halfN))
                 }
             }
-            vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
 
-            var mag = [Float](repeating: 0, count: halfN)
-            vDSP_zvmags(&split, 1, &mag, 1, vDSP_Length(halfN))
-
-            // Positive spectral flux only.
+            // Log-compressed amplitude spectrum makes kick/snare onsets stand out
+            // cleanly even in loudly mastered Pop/V-Pop/EDM mixes.
             var flux: Float = 0
-            for k in 0..<halfN {
-                let d = mag[k] - prevMag[k]
-                if d > 0 { flux += d }
-                prevMag[k] = mag[k]
+            if isFirstFrame {
+                for k in 0..<halfN {
+                    prevLogMag[k] = log1p(50.0 * sqrt(max(0, magSq[k])))
+                }
+                envelope.append(0)
+                isFirstFrame = false
+            } else {
+                for k in 1..<halfN {
+                    let cur = log1p(50.0 * sqrt(max(0, magSq[k])))
+                    let d = cur - prevLogMag[k]
+                    if d > 0 {
+                        let weight: Float
+                        if k >= kickLo && k <= kickHi {
+                            weight = 2.0
+                        } else if k >= snareLo && k <= snareHi {
+                            weight = 1.2
+                        } else {
+                            weight = 0.5
+                        }
+                        flux += d * weight
+                    }
+                    prevLogMag[k] = cur
+                }
+                envelope.append(flux)
             }
-            envelope.append(flux)
             position += hop
         }
-        guard envelope.count > 4 else { return ([], 0, 0) }
 
-        // Normalize envelope.
-        var maxF: Float = 0
-        vDSP_maxmgv(envelope, 1, &maxF, vDSP_Length(envelope.count))
-        if maxF > 0 {
-            var inv = 1.0 / maxF
-            vDSP_vsmul(envelope, 1, &inv, &envelope, 1, vDSP_Length(envelope.count))
+        let envCount = envelope.count
+        guard envCount > 16 else { return ([], 0, 0, bpm) }
+
+        // Adaptive local mean subtraction (~0.35s window) removes continuous vocal/synth floor.
+        let hopTime = Double(hop) / sampleRate
+        let localHalf = max(2, Int((0.18 / hopTime).rounded()))
+        var onset = [Float](repeating: 0, count: envCount)
+        var runningSum: Float = 0
+        for i in 0..<min(localHalf, envCount) { runningSum += envelope[i] }
+        for i in 0..<envCount {
+            if i + localHalf < envCount { runningSum += envelope[i + localHalf] }
+            if i - localHalf - 1 >= 0 { runningSum -= envelope[i - localHalf - 1] }
+            let winLen = Float(min(envCount - 1, i + localHalf) - max(0, i - localHalf) + 1)
+            let localMean = runningSum / max(1, winLen)
+            onset[i] = max(0, envelope[i] - localMean * 1.05)
         }
 
-        let hopTime = Double(hop) / sampleRate
-        let beatPeriod = Double(60.0 / bpm) / hopTime
+        // Normalize by 95th percentile (immune to single outlier spikes).
+        // Real percussive music has p95 log-flux >> 20; steady pads/sines sit below 8.
+        let sorted = onset.sorted()
+        let p95 = sorted[Int(Double(envCount - 1) * 0.95)]
+        guard p95 > 8.0 else { return ([], 0, 0, bpm) }
+        let invP95 = 1.0 / p95
+        for i in 0..<envCount {
+            onset[i] = min(2.0, onset[i] * invP95)
+        }
 
-        // Phase search: find start offset (within first ~2 beats) that best fits the grid.
-        let searchRange = max(1, Int(beatPeriod * 2))
+        let effectiveBpm = bpm
+        let beatPeriod = (60.0 / effectiveBpm) / hopTime
+        guard beatPeriod >= 2.0 else { return ([], 0, 0, effectiveBpm) }
+
+        // Autocorrelation-based beatConfidence: compare onset periodicity at
+        // 1× and 2× beatPeriod against off-beat lags (0.35× and 0.65× beatPeriod).
+        func autocorr(atLag lag: Int) -> Float {
+            guard lag > 0, lag < envCount - 4 else { return 0 }
+            var sum: Float = 0
+            let n = envCount - lag
+            vDSP_dotpr(onset, 1, Array(onset[lag...]), 1, &sum, vDSP_Length(n))
+            return sum / Float(n)
+        }
+
+        let lag1 = Int(beatPeriod.rounded())
+        let lag2 = Int((beatPeriod * 2.0).rounded())
+        let off1 = max(1, Int((beatPeriod * 0.35).rounded()))
+        let off2 = max(1, Int((beatPeriod * 0.65).rounded()))
+
+        // Allow ±1 frame tolerance around the beat lag for slight tempo imprecision.
+        let rBeat1 = max(autocorr(atLag: lag1), max(autocorr(atLag: max(1, lag1 - 1)), autocorr(atLag: lag1 + 1)))
+        let rBeat2 = max(autocorr(atLag: lag2), max(autocorr(atLag: max(1, lag2 - 1)), autocorr(atLag: lag2 + 1)))
+        let rOnBeat = (rBeat1 * 0.65 + rBeat2 * 0.35)
+        let rOffBeat = max(1e-5, (autocorr(atLag: off1) + autocorr(atLag: off2)) * 0.5)
+        let rZero = max(1e-5, autocorr(atLag: 0))
+
+        // Contrast ratio (on-beat vs off-beat) + absolute periodicity strength.
+        let contrast = rOnBeat / rOffBeat
+        let normStrength = rOnBeat / rZero
+        let contrastScore = min(1.0, max(0.0, (contrast - 1.08) / 1.15))
+        let strengthScore = min(1.0, max(0.0, normStrength / 0.25))
+        let confidence = min(1.0, max(0.0, contrastScore * 0.7 + strengthScore * 0.3))
+
+        // Phase search on a middle body segment (~60s) so free-time intros don't
+        // misalign the downbeat and long tracks don't drift out of phase.
+        let bodyStart = envCount > 2000 ? envCount / 5 : 0
+        let bodyEnd = min(envCount, bodyStart + Int(60.0 / hopTime))
+        let searchRange = max(1, Int(beatPeriod.rounded()))
         var bestOffset = 0
         var bestScore: Float = -1
-        let step = max(1, Int(beatPeriod))
+
         for s in 0..<searchRange {
             var score: Float = 0
-            var k = s
-            while k < envelope.count {
-                score += envelope[k]
-                k += step
+            var beatNum = 0
+            while true {
+                let idx = bodyStart + Int((Double(s) + Double(beatNum) * beatPeriod).rounded())
+                guard idx < bodyEnd else { break }
+                var local = onset[idx]
+                if idx > 0 { local += 0.4 * onset[idx - 1] }
+                if idx + 1 < envCount { local += 0.4 * onset[idx + 1] }
+                score += local
+                beatNum += 1
             }
             if score > bestScore {
                 bestScore = score
@@ -314,8 +408,10 @@ enum AudioHelpers {
             }
         }
 
-        let firstBeat = Double(bestOffset) * hopTime
-        let beatInterval = 60.0 / bpm
+        // Project the locked phase back to the first beat >= 0.
+        let lockedTime = Double(bodyStart + bestOffset) * hopTime
+        let beatInterval = 60.0 / effectiveBpm
+        let firstBeat = lockedTime.truncatingRemainder(dividingBy: beatInterval)
         var beats = [Double]()
         var t = firstBeat
         let total = Double(frameLength) / sampleRate
@@ -323,7 +419,59 @@ enum AudioHelpers {
             beats.append(t)
             t += beatInterval
         }
-        return (beats, firstBeat, bestScore)
+        return (beats, firstBeat, confidence, effectiveBpm)
+    }
+
+    // MARK: - Silence Boundary Detection
+
+    /// Measures leading silence (seconds from start before audio exceeds -50 dBFS)
+    /// and trailing silence onset (timestamp where audio stays below -45 dBFS to the end).
+    static func detectSilenceBounds(
+        buffer: AVAudioPCMBuffer,
+        leadingThreshold: Float = 0.00316,   // ~ -50 dBFS
+        trailingThreshold: Float = 0.00562   // ~ -45 dBFS
+    ) -> (leading: Double, trailing: Double) {
+        guard let channelData = buffer.floatChannelData else { return (0, 0) }
+        let frameLength = Int(buffer.frameLength)
+        let sampleRate = buffer.format.sampleRate
+        guard frameLength > 0, sampleRate > 0 else { return (0, 0) }
+
+        let totalDuration = Double(frameLength) / sampleRate
+        let windowSize = max(256, Int(sampleRate * 0.05)) // 50ms windows
+        let mono = channelData[0]
+        let windowCount = frameLength / windowSize
+        guard windowCount > 0 else { return (0, totalDuration) }
+
+        var rmsPerWindow = [Float](repeating: 0, count: windowCount)
+        for w in 0..<windowCount {
+            var rms: Float = 0
+            vDSP_rmsqv(mono + (w * windowSize), 1, &rms, vDSP_Length(windowSize))
+            rmsPerWindow[w] = rms
+        }
+
+        let windowSec = Double(windowSize) / sampleRate
+
+        var leading = 0.0
+        for w in 0..<windowCount {
+            if rmsPerWindow[w] >= leadingThreshold {
+                leading = Double(w) * windowSec
+                break
+            }
+        }
+
+        var trailing = totalDuration
+        for w in stride(from: windowCount - 1, through: 0, by: -1) {
+            if rmsPerWindow[w] >= trailingThreshold {
+                trailing = min(totalDuration, Double(w + 1) * windowSec)
+                break
+            }
+        }
+
+        // Guard against completely silent/unusual files
+        if trailing <= leading {
+            return (0, totalDuration)
+        }
+        return (leading, trailing)
     }
 
     // MARK: - Peak Amplitude
@@ -344,55 +492,52 @@ enum AudioHelpers {
 
     // MARK: - Vocal Onset/Offset Detection
 
+    /// Detects vocal phrase boundaries directly from the spectral vocalActivity
+    /// envelope using moving-average smoothing + hysteresis thresholds.
+    /// Avoids false triggers from percussive drums or synth intros.
     static func detectVocalBoundaries(
-        buffer: AVAudioPCMBuffer,
-        windowSize: Int = 4096,
-        hopSize: Int = 4096,
-        onsetThreshold: Float = 0.03,
-        offsetThreshold: Float = 0.015,
-        minGapDuration: Double = 0.3
+        vocalActivity: [Float],
+        duration: Double,
+        onsetThreshold: Float = 0.42,
+        offsetThreshold: Float = 0.22,
+        minGapDuration: Double = 0.5
     ) -> (onsets: [Double], offsets: [Double]) {
-        guard let channelData = buffer.floatChannelData else { return ([], []) }
-        let frameLength = Int(buffer.frameLength)
-        let sampleRate = buffer.format.sampleRate
-        let channelCount = Int(buffer.format.channelCount)
+        guard vocalActivity.count >= 3, duration > 0 else { return ([], []) }
 
-        var rmsValues = [Float]()
-        var offset = 0
-        while offset + windowSize <= frameLength {
-            var rms: Float = 0
-            for ch in 0..<channelCount {
-                var chRms: Float = 0
-                vDSP_rmsqv(channelData[ch] + offset, 1, &chRms, vDSP_Length(windowSize))
-                rms = max(rms, chRms)
-            }
-            rmsValues.append(rms)
-            offset += hopSize
+        // 3-window moving average smooth to reject single-frame transient spikes.
+        var smoothed = [Float](repeating: 0, count: vocalActivity.count)
+        for i in 0..<vocalActivity.count {
+            let lo = max(0, i - 1)
+            let hi = min(vocalActivity.count - 1, i + 1)
+            var sum: Float = 0
+            for j in lo...hi { sum += vocalActivity[j] }
+            smoothed[i] = sum / Float(hi - lo + 1)
         }
 
-        guard rmsValues.count >= 3 else { return ([], []) }
-
+        let windowDuration = duration / Double(smoothed.count)
         var onsets = [Double]()
         var offsets = [Double]()
-        let windowDuration = Double(hopSize) / sampleRate
+        var inVocal = false
 
-        for i in 1..<(rmsValues.count - 1) {
-            let prev = rmsValues[i - 1]
-            let curr = rmsValues[i]
+        for i in 0..<smoothed.count {
+            let val = smoothed[i]
+            let time = Double(i) * windowDuration
 
-            if prev < onsetThreshold && curr >= onsetThreshold {
-                let time = Double(i) * windowDuration
+            if !inVocal && val >= onsetThreshold {
                 if onsets.isEmpty || (time - onsets.last!) >= minGapDuration {
                     onsets.append(time)
                 }
-            }
-
-            if prev >= offsetThreshold && curr < offsetThreshold {
-                let time = Double(i) * windowDuration
+                inVocal = true
+            } else if inVocal && val <= offsetThreshold {
                 if offsets.isEmpty || (time - offsets.last!) >= minGapDuration {
                     offsets.append(time)
                 }
+                inVocal = false
             }
+        }
+
+        if inVocal {
+            offsets.append(duration)
         }
 
         return (onsets, offsets)

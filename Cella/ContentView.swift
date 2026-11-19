@@ -775,6 +775,10 @@ struct ContentView: View {
                 lrcViewModel.togglePlayback()
             }
             bloomOnNextTabChange = false
+            if tab == .cella {
+                // Pick up CLARC edits saved in the LRC tab before this switch.
+                viewModel.reloadCurrentLyrics()
+            }
             if tab == .enhancedLRC {
                 // Edit timing in quiet — but only when the editor holds audio.
                 // Empty editor: Cella keeps playing.

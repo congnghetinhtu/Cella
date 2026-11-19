@@ -65,7 +65,13 @@ enum MixEngine {
     // MARK: - Tempo Compatibility
 
     /// BPM compatibility with harmonic ratio detection (2:1, 3:2, 4:3).
+    /// Free-time/ambient tracks (low beatConfidence) return a neutral score so they
+    /// aren't penalized when they can hand off cleanly via Ambient/Echo-Out.
     private static func tempoCompatibility(a: TrackAnalysis, b: TrackAnalysis) -> Double {
+        let minConf = AudioConfig.standard.minBeatConfidenceForSync
+        if a.beatConfidence < minConf || b.beatConfidence < minConf {
+            return 0.65
+        }
         guard let bpmA = a.bpm, let bpmB = b.bpm else { return 0.5 }
 
         // Direct match
@@ -121,7 +127,7 @@ enum MixEngine {
     // MARK: - Key Compatibility
 
     /// Key compatibility using circle of fifths + relative major/minor recognition.
-    private static func keyCompatibility(a: TrackAnalysis, b: TrackAnalysis) -> Double {
+    static func keyCompatibility(a: TrackAnalysis, b: TrackAnalysis) -> Double {
         guard let keyA = a.keySignature, let keyB = b.keySignature else { return 0.5 }
 
         // Check semitone distance (circle of fifths aware)
@@ -206,19 +212,21 @@ enum MixEngine {
     }
 
     /// Transition energy compatibility compares where the outgoing track ends
-    /// to where the incoming one begins. A slight build is ideal; drops cost
-    /// more than rises of the same size.
+    /// (excluding trailing silence) to where the incoming one begins (excluding
+    /// leading silence). A slight build is ideal; drops cost more than rises.
     private static func transitionEnergyCompatibility(outgoing: TrackAnalysis, incoming: TrackAnalysis) -> Double {
-        let outEnd = segmentAverage(outgoing.energyProfile, region: .end, count: 24)
-        let inStart = segmentAverage(incoming.energyProfile, region: .start, count: 24)
+        let outSlice = audibleEdgeSegment(outgoing, region: .end, count: 24)
+        let inSlice = audibleEdgeSegment(incoming, region: .start, count: 24)
+        let outEnd = outSlice.isEmpty ? 0 : outSlice.reduce(0, +) / Float(outSlice.count)
+        let inStart = inSlice.isEmpty ? 0 : inSlice.reduce(0, +) / Float(inSlice.count)
 
         guard outEnd > 0 || inStart > 0 else { return energyCompatibility(a: outgoing, b: incoming) }
 
         let target = outEnd + MixTuning.energyBuildDelta
         let levelScore = seamEnergyFit(incoming: inStart, target: target)
 
-        let outSlope = segmentSlope(outgoing.energyProfile, region: .end, count: 24)
-        let inSlope = segmentSlope(incoming.energyProfile, region: .start, count: 24)
+        let outSlope = sliceSlope(outSlice)
+        let inSlope = sliceSlope(inSlice)
         let slopeDelta = abs(Double(outSlope - inSlope))
         let slopeScore = max(0.0, 1.0 - slopeDelta * 4.0)
 
@@ -480,10 +488,40 @@ enum MixEngine {
         guard let analysis = track.analysis else {
             return SeamEnergy(startEnergy: 0, endEnergy: 0)
         }
-        return SeamEnergy(
-            startEnergy: segmentAverage(analysis.energyProfile, region: .start, count: 24),
-            endEnergy: segmentAverage(analysis.energyProfile, region: .end, count: 24)
-        )
+        let startSeg = audibleEdgeSegment(analysis, region: .start, count: 24)
+        let endSeg = audibleEdgeSegment(analysis, region: .end, count: 24)
+        let startAvg = startSeg.isEmpty ? 0 : startSeg.reduce(0, +) / Float(startSeg.count)
+        let endAvg = endSeg.isEmpty ? 0 : endSeg.reduce(0, +) / Float(endSeg.count)
+        return SeamEnergy(startEnergy: startAvg, endEnergy: endAvg)
+    }
+
+    /// Extracts an edge energy window anchored to audible audio (skipping leading/trailing silence).
+    private static func audibleEdgeSegment(_ analysis: TrackAnalysis, region: SegmentRegion, count: Int) -> [Float] {
+        let values = analysis.energyProfile
+        guard !values.isEmpty else { return [] }
+        let dur = max(0.1, analysis.duration)
+        let n = values.count
+        switch region {
+        case .start:
+            let startIdx = max(0, min(n - 1, Int((analysis.leadingSilence / dur) * Double(n))))
+            let endIdx = min(n, startIdx + count)
+            return Array(values[startIdx..<endIdx])
+        case .end:
+            let trail = analysis.trailingSilence > 0 ? min(dur, analysis.trailingSilence) : dur
+            let endIdx = max(1, min(n, Int((trail / dur) * Double(n))))
+            let startIdx = max(0, endIdx - count)
+            return Array(values[startIdx..<endIdx])
+        }
+    }
+
+    private static func sliceSlope(_ segment: [Float]) -> Float {
+        guard segment.count >= 2 else { return 0 }
+        let midpoint = segment.count / 2
+        let first = segment[..<midpoint]
+        let second = segment[midpoint...]
+        let firstAvg = first.reduce(0, +) / Float(max(1, first.count))
+        let secondAvg = second.reduce(0, +) / Float(max(1, second.count))
+        return secondAvg - firstAvg
     }
 
     // MARK: - Best Energy Flow Ordering

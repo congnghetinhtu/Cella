@@ -52,6 +52,7 @@ class PlayerViewModel {
 
     private var requestedStartFileName: String?
     private var cacheTask: Task<Void, Never>?
+    private var activeAnalysisHeadURL: URL?
 
     /// Blend (smooth crossfade to) state. When set, the currently playing track
     /// keeps playing while the target pack is prepared; we crossfade directly
@@ -73,6 +74,13 @@ class PlayerViewModel {
     var nextLyrics: [LrcLine] = []
     var lyricsMode: LyricsMode = .off
     var currentLyricsTrackURL: URL?
+
+    /// During a crossfade the audible track is already switching, but the
+    /// engine's currentTime still tracks the outgoing player until the handoff
+    /// completes. Override the lyric clock with the incoming entry point so
+    /// the Cella tab shows the NEW song's lyrics at the right place from the
+    /// first blended beat — cleared once the engine swaps players.
+    var lyricTimeOverride: TimeInterval?
 
     /// Last track lyrics were resolved for (hit or miss). Until this matches
     /// the current track, "no lyrics" UI stays hidden — no centered flash.
@@ -162,11 +170,14 @@ class PlayerViewModel {
             showDropNotice("Not a lyric file")
             return
         }
+        // CLARC is the native lyric format — a legacy .lrc drop is re-targeted
+        // as the .clarc twin so lyric input never lands as plain LRC.
+        let destExt = (ext == "lrc") ? "clarc" : ext
         guard FileManager.default.fileExists(atPath: srcURL.path) else { return }
         let albumDir = track.url.deletingLastPathComponent()
         let lrcDir = albumDir.appendingPathComponent("lrc")
         let base = track.url.deletingPathExtension().lastPathComponent
-        let dest = lrcDir.appendingPathComponent(base + "." + ext)
+        let dest = lrcDir.appendingPathComponent(base + "." + destExt)
         do {
             try FileManager.default.createDirectory(at: lrcDir, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: dest.path) {
@@ -376,9 +387,20 @@ class PlayerViewModel {
     private func completePendingSwitch() {
         guard let pending = pendingSwitchCompletion else { return }
         pendingSwitchCompletion = nil
+        // The engine has swapped players — drop the incoming lyric override
+        // so the real clock drives the (already loaded) new song's lyrics.
+        lyricTimeOverride = nil
         // Force-sync clock BEFORE state flip so lyrics index the new song immediately.
         syncPlaybackTime()
         pending()
+    }
+
+    /// Call at crossfade start: the incoming track is audible from the first
+    /// blended beat, so the Cella tab must show ITS lyrics (at its actual entry
+    /// point) instead of continuing to highlight the outgoing song.
+    private func beginCrossfadeLyrics(for incoming: TrackAsset, entryTime: Double) {
+        loadLyrics(for: incoming.url)
+        lyricTimeOverride = max(0, entryTime)
     }
 
     private func startNowPlayingTimer() {
@@ -394,9 +416,12 @@ class PlayerViewModel {
 
     private func syncPlaybackTime() {
         lagProbeTick()
-        let newTime = audioEngine.currentTime
+        let engineTime = audioEngine.currentTime
         let newDuration = audioEngine.duration
-        if abs(newTime - currentTime) > 2.0 {
+        // While blending, the incoming song is already audible — show its
+        // lyrics at its own entry point instead of the outgoing clock.
+        let newTime = lyricTimeOverride ?? engineTime
+        if abs(newTime - currentTime) > 2.0 && lyricTimeOverride == nil {
             print("[TICK] currentTime jump \(String(format: "%.1f", currentTime)) -> \(String(format: "%.1f", newTime)) dur=\(String(format: "%.1f", newDuration)) state=\(playerState)")
         }
         // Epsilon guard: @Observable notifies on every set, so unconditional
@@ -458,6 +483,20 @@ class PlayerViewModel {
         guard let queue = mixQueue, !queue.isEmpty else { return }
         let clamped = max(0, min(time, audioEngine.duration))
         audioEngine.seek(to: clamped)
+        if playerState == .playing, queue.count > 1,
+           let current = queue.currentTrack, let next = queue.nextTrack,
+           next.url != current.url {
+            let params = crossfader.computeCrossfadeParams(outgoing: current, incoming: next)
+            if audioEngine.crossfadeTriggerDelay <= 12.0 {
+                audioEngine.prepareCrossfadeBuffer(
+                    incomingURL: next.url,
+                    params: params,
+                    incomingAnalysis: next.analysis
+                )
+            } else {
+                scheduleCrossfadeWarmup()
+            }
+        }
         syncPlaybackTime()
         updateNowPlayingInfo()
     }
@@ -511,25 +550,31 @@ class PlayerViewModel {
         guard let trackURL = mixQueue?.currentTrack?.url,
               let lyricURL = resolveOrCreateLrcURL(for: trackURL) else { return false }
 
+        // CLARC is the native lyric format — every insert lands in a .clarc
+        // document (converting a legacy .lrc source), never raw .lrc lines.
+        var meta = ClarcMetadata()
+        var lines = [LrcLine]()
         if lyricURL.pathExtension.lowercased() == "clarc" {
-            // CLARC: parse the doc, drop the new event in, recompose.
-            var doc = ClarcParser.load(from: lyricURL)
-            doc.lines.append(LrcLine(time: time, text: text))
-            doc.lines.sort { $0.time < $1.time }
-            let content = ClarcParser.compose(metadata: doc.metadata, lines: doc.lines)
-            do {
-                try content.write(to: lyricURL, atomically: true, encoding: .utf8)
-            } catch {
-                print("[Clarc] Lyric insert failed: \(error)")
-                return false
-            }
+            let doc = ClarcParser.load(from: lyricURL)
+            meta = doc.metadata
+            lines = doc.lines
         } else {
-            // .lrc keeps the raw line surgery (timestamps never reformat).
-            var lines = (try? String(contentsOf: lyricURL))?.components(separatedBy: .newlines) ?? []
-            let newLine = "[\(lrcTimestamp(time))]\(text)"
-            lines.append(newLine)
-            let sorted = sortLrcLines(lines)
-            try? sorted.joined(separator: "\n").write(to: lyricURL, atomically: true, encoding: .utf8)
+            let loaded = LrcParser.load(from: lyricURL)
+            meta = ClarcParser.from(lrc: loaded.metadata)
+            lines = loaded.lines
+        }
+        lines.append(LrcLine(time: time, text: text))
+        lines.sort { $0.time < $1.time }
+        let content = ClarcParser.compose(metadata: meta, lines: lines)
+        let writeURL: URL = lyricURL.pathExtension.lowercased() == "clarc"
+            ? lyricURL
+            : (lyricURL.deletingLastPathComponent().appendingPathComponent(
+                   lyricURL.deletingPathExtension().lastPathComponent + ".clarc"))
+        do {
+            try content.write(to: writeURL, atomically: true, encoding: .utf8)
+        } catch {
+            print("[Clarc] Lyric insert failed: \(error)")
+            return false
         }
         loadLyrics(for: trackURL)
 
@@ -812,6 +857,11 @@ class PlayerViewModel {
             if t.albumName == nil || t.albumName!.isEmpty {
                 t.albumName = albumDir.lastPathComponent
             }
+            // Cached library analysis — the crossfade arms off bar grid/analysis;
+            // without it every handoff waits for the end of the track.
+            if t.analysis == nil, let cached = AnalysisCache.load(for: fileURL) {
+                t.analysis = cached
+            }
             tracks.append(t)
         }
         guard !tracks.isEmpty else {
@@ -825,12 +875,16 @@ class PlayerViewModel {
             return
         }
         totalTrackCount = tracks.count
-        analyzedTrackCount = 0
+        analyzedTrackCount = tracks.filter { $0.analysis != nil }.count
         mixQueue = MixQueue(tracks: tracks, transitions: Array(repeating: nil, count: max(0, tracks.count - 1)), currentIndex: 0)
         do {
-            try loadTrackAndRestore(url: tracks[0].url, barTimestamps: [], analysis: nil)
+            try loadTrackAndRestore(url: tracks[0].url,
+                                    barTimestamps: tracks[0].analysis?.barTimestamps ?? [],
+                                    analysis: tracks[0].analysis)
             audioEngine.play()
             playerState = .playing
+            scheduleCrossfadeWarmup()
+            startBackgroundQueueAnalysis()
             log("Playing artist \(artist.name): \(tracks.count) tracks")
         } catch {
             importError = "Failed to play \(artist.name): \(error.localizedDescription)"
@@ -850,9 +904,13 @@ class PlayerViewModel {
            let idx = mixQueue?.tracks.firstIndex(where: { $0.url == s }) {
             mixQueue?.currentIndex = idx
             if let track = mixQueue?.currentTrack {
-                try? loadTrackAndRestore(url: track.url, barTimestamps: [], analysis: nil)
+                try? loadTrackAndRestore(url: track.url,
+                                         barTimestamps: track.analysis?.barTimestamps ?? [],
+                                         analysis: track.analysis)
                 audioEngine.play()
                 playerState = .playing
+                scheduleCrossfadeWarmup()
+                startBackgroundQueueAnalysis()
             }
         }
         _ = savedFirst
@@ -886,11 +944,13 @@ class PlayerViewModel {
 
             let params = self.crossfader.computeCrossfadeParams(
                 outgoing: outgoing,
-                incoming: incoming
+                incoming: incoming,
+                context: .manualSkip
             )
 
-            print("[PlayerViewModel] CROSSFADE-SRC=crossfadeToTrack out=\(outgoing.fileName) in=\(incoming.fileName)")
+            print("[PlayerViewModel] CROSSFADE-SRC=crossfadeToTrack style=\(params.style.rawValue) dur=\(String(format: "%.2f", params.duration))s entry=\(String(format: "%.2f", params.vocalConnectionPoint))s out=\(outgoing.fileName) in=\(incoming.fileName)")
             self.announceIntroSkip(params: params)
+            self.beginCrossfadeLyrics(for: incoming, entryTime: params.vocalConnectionPoint)
             let started = self.audioEngine.crossfadeToNext(
                 outgoingURL: outgoing.url,
                 incomingURL: incoming.url,
@@ -1174,16 +1234,37 @@ class PlayerViewModel {
         guard let queue = mixQueue, queue.count > 1,
               let current = queue.currentTrack, let next = queue.nextTrack,
               next.url != current.url else { return }
+        // If current or next track is missing valid analysis (e.g. user jumped ahead
+        // in a large pack before background analysis reached it), reprioritize now.
+        if current.analysis == nil || next.analysis == nil {
+            startBackgroundQueueAnalysis()
+        }
+        // Compute the upcoming transition once, then re-arm the automatic
+        // trigger with the REAL incoming landing segment (after intro trim)
+        // so the second-half energy seam compares against audio that plays.
+        let params = crossfader.computeCrossfadeParams(outgoing: current, incoming: next)
+        audioEngine.rescheduleForNextTrack(
+            nextAnalysis: next.analysis,
+            incomingEntryTime: params.vocalConnectionPoint,
+            crossfadeDuration: params.duration
+        )
         // Fire early enough that even a long lossless decode usually lands
-        // before the trigger; the transition never waits for it.
-        let delay = max(1.0, audioEngine.crossfadeTriggerDelay - 8.0)
+        // before the trigger; if trigger is already close, stage immediately.
+        let triggerIn = audioEngine.crossfadeTriggerDelay
+        if triggerIn <= 10.0 {
+            audioEngine.prepareCrossfadeBuffer(
+                incomingURL: next.url,
+                params: params,
+                incomingAnalysis: next.analysis
+            )
+            return
+        }
+        let delay = max(1.0, triggerIn - 10.0)
         let currentURL = current.url, nextURL = next.url
         crossfadeWarmupTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
             guard let self,
                   self.mixQueue?.currentTrack?.url == currentURL,
-                  let q = self.mixQueue, let nxt = q.nextTrack, nxt.url == nextURL,
-                  let cur = q.currentTrack else { return }
-            let params = self.crossfader.computeCrossfadeParams(outgoing: cur, incoming: nxt)
+                  let q = self.mixQueue, let nxt = q.nextTrack, nxt.url == nextURL else { return }
             self.audioEngine.prepareCrossfadeBuffer(
                 incomingURL: nxt.url,
                 params: params,
@@ -1193,6 +1274,14 @@ class PlayerViewModel {
     }
 
     // MARK: - Lyrics
+
+    /// Re-reads the lyric file for the current track from disk. Called when
+    /// returning to the Cella tab so freshly saved CLARC timings render
+    /// immediately instead of the stale in-memory copy loaded before editing.
+    func reloadCurrentLyrics() {
+        guard let track = mixQueue?.currentTrack else { return }
+        loadLyrics(for: track.url)
+    }
 
     private func loadLyrics(for trackURL: URL) {
         // Resolution token: marks that lyrics were looked up for THIS track
@@ -1309,7 +1398,8 @@ class PlayerViewModel {
             if let nextTrack = queue.nextTrack, nextTrack.url != outgoingTrack.url {
                 let warmParams = self.crossfader.computeCrossfadeParams(
                     outgoing: outgoingTrack,
-                    incoming: nextTrack
+                    incoming: nextTrack,
+                    context: .manualSkip
                 )
                 self.audioEngine.prepareCrossfadeBuffer(
                     incomingURL: nextTrack.url,
@@ -1317,8 +1407,7 @@ class PlayerViewModel {
                     incomingAnalysis: nextTrack.analysis
                 )
             }
-            // Beat-fit: hold the blend for the next outgoing downbeat so the
-            // handoff always lands on a bar line.
+            // Responsive beat-fit: hold briefly (1–2 beats, max ~1.5s) then fast-blend.
             waitForDownbeatThen(outgoing: outgoingTrack) { [weak self] in
                 guard let self else { return }
                 guard self.playerState == .playing,
@@ -1330,11 +1419,13 @@ class PlayerViewModel {
 
                 let params = self.crossfader.computeCrossfadeParams(
                     outgoing: outgoingTrack,
-                    incoming: nextTrack
+                    incoming: nextTrack,
+                    context: .manualSkip
                 )
 
-                print("[PlayerViewModel] CROSSFADE-SRC=skipForward out=\(outgoingTrack.fileName) in=\(nextTrack.fileName)")
+                print("[PlayerViewModel] CROSSFADE-SRC=skipForward style=\(params.style.rawValue) dur=\(String(format: "%.2f", params.duration))s entry=\(String(format: "%.2f", params.vocalConnectionPoint))s out=\(outgoingTrack.fileName) in=\(nextTrack.fileName)")
                 self.announceIntroSkip(params: params)
+                self.beginCrossfadeLyrics(for: nextTrack, entryTime: params.vocalConnectionPoint)
                 let started = self.audioEngine.crossfadeToNext(
                     outgoingURL: outgoingTrack.url,
                     incomingURL: nextTrack.url,
@@ -1389,16 +1480,26 @@ class PlayerViewModel {
         pendingDownbeatTimer = nil
     }
 
-    /// Seconds until the outgoing track's next bar boundary (0 = now).
+    /// Seconds until a responsive rhythmic cue for manual skip:
+    /// prefers the next bar if within `manualSkipMaxWaitSeconds` (1.5s),
+    /// otherwise snaps to the next 1–2 beats so manual Next always feels crisp.
     private func nextDownbeatDelay(outgoing: TrackAsset) -> Double {
-        let bars = outgoing.analysis?.barTimestamps ?? []
-        guard !bars.isEmpty else { return 0 }
-        let now = audioEngine.currentTime
-        for barTime in bars where barTime > now + 0.05 {
-            return max(0, barTime - now)
+        guard let analysis = outgoing.analysis else { return 0 }
+        let maxWait = AudioConfig.standard.manualSkipMaxWaitSeconds
+        // Free-time / ambient tracks don't need a beat wait.
+        guard analysis.beatConfidence >= AudioConfig.standard.minBeatConfidenceForSync else {
+            return 0
         }
-        if let lastBar = bars.last, let bpm = outgoing.analysis?.bpm, bpm > 0 {
-            return max(0, lastBar + 240.0 / bpm - now)
+        let now = audioEngine.currentTime
+        if let nextBar = analysis.barTimestamps.first(where: { $0 > now + 0.05 }) {
+            let barDelay = nextBar - now
+            if barDelay <= maxWait {
+                return max(0, barDelay)
+            }
+        }
+        // Bar is too far away — land on the next beat instead (typically 0.3–0.7s).
+        if let nextBeat = analysis.beatTimestamps.first(where: { $0 > now + 0.05 }) {
+            return min(maxWait, max(0, nextBeat - now))
         }
         return 0
     }
@@ -1460,6 +1561,14 @@ class PlayerViewModel {
                 if track.artist == nil || track.artist!.isEmpty { track.artist = meta.artist }
                 if track.albumName == nil || track.albumName!.isEmpty { track.albumName = meta.album }
             }
+        }
+
+        // 3. Attach the cached library analysis if present. The engine's
+        //    automatic transition arms itself off barTimestamps/analysis —
+        //    without it the trigger is hard-pinned to the end of the track,
+        //    no matter how good the energy seams are.
+        if track.analysis == nil, let cached = AnalysisCache.load(for: url) {
+            track.analysis = cached
         }
 
         return track
@@ -1632,7 +1741,8 @@ class PlayerViewModel {
                 do {
                     try self.loadTrackAndRestore(
                         url: tracks[0].url,
-                        barTimestamps: tracks[0].analysis?.barTimestamps ?? []
+                        barTimestamps: tracks[0].analysis?.barTimestamps ?? [],
+                        analysis: tracks[0].analysis
                     )
                     self.audioEngine.play()
                     self.playerState = .playing
@@ -1684,9 +1794,25 @@ class PlayerViewModel {
                             self.analyzedTrackCount = completed
                             self.analysisProgress = Double(completed) / Double(total)
 
-                            // Buffer analysis results — avoid per-callback COW copy of MixQueue tracks array.
-                            // Results are merged into the queue after all analysis completes.
-
+                            // Immediately attach analysis for the currently playing track or
+                            // its immediate successor so Track 1 → Track 2 gets full AutoMix
+                            // within ~1–2s without waiting for the entire pack to finish!
+                            if let analysis = analyzedAsset.analysis, var q = self.mixQueue {
+                                let isCurrent = q.currentTrack?.url == analyzedAsset.url
+                                let isNext = q.nextTrack?.url == analyzedAsset.url
+                                if isCurrent || isNext {
+                                    if let idx = q.tracks.firstIndex(where: { $0.url == analyzedAsset.url }) {
+                                        q.tracks[idx].analysis = analysis
+                                        self.mixQueue = q
+                                    }
+                                    if isCurrent {
+                                        self.audioEngine.refreshCurrentTrackAnalysis(analysis)
+                                    }
+                                    if self.playerState == .playing {
+                                        self.scheduleCrossfadeWarmup()
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -1711,6 +1837,17 @@ class PlayerViewModel {
 
                     self.analysisProgress = 1.0
                     self.analyzedTrackCount = self.totalTrackCount
+
+                    // The library analysis ran AFTER the first track loaded —
+                    // the queue was rebuilt, but the engine still holds an
+                    // empty bar grid / no analysis for it. Refresh the current
+                    // track's data inside the engine, then re-arm the automatic
+                    // transition — it armed at load with a nil grid and would
+                    // otherwise fire only at the very end of the track forever.
+                    if let current = self.mixQueue?.currentTrack, let analysis = current.analysis {
+                        self.audioEngine.refreshCurrentTrackAnalysis(analysis)
+                    }
+                    self.scheduleCrossfadeWarmup()
 
                     let analyzedCount = analyzedTracks.filter { $0.analysis != nil }.count
                     let currentAnalysis = self.mixQueue?.currentTrack?.analysis
@@ -1745,7 +1882,8 @@ class PlayerViewModel {
             if let fallback = mixQueue?.currentTrack {
                 try? loadTrackAndRestore(
                     url: fallback.url,
-                    barTimestamps: fallback.analysis?.barTimestamps ?? []
+                    barTimestamps: fallback.analysis?.barTimestamps ?? [],
+                    analysis: fallback.analysis
                 )
                 audioEngine.play()
             }
@@ -1761,6 +1899,7 @@ class PlayerViewModel {
             outgoing: source,
             incoming: incoming
         )
+        beginCrossfadeLyrics(for: incoming, entryTime: params.vocalConnectionPoint)
         let started = audioEngine.crossfadeToNext(
             outgoingURL: source.url,
             incomingURL: incoming.url,
@@ -1774,7 +1913,8 @@ class PlayerViewModel {
             log("Blend refused by engine — hard switch to \(incoming.fileName)")
             try? loadTrackAndRestore(
                 url: incoming.url,
-                barTimestamps: incoming.analysis?.barTimestamps ?? []
+                barTimestamps: incoming.analysis?.barTimestamps ?? [],
+                analysis: incoming.analysis
             )
             audioEngine.play()
             playerState = .playing
@@ -1860,9 +2000,12 @@ class PlayerViewModel {
 
             let params = crossfader.computeCrossfadeParams(
                 outgoing: outgoingTrack,
-                incoming: nextTrack
+                incoming: nextTrack,
+                context: .automatic
             )
+            log("AutoMix [\(params.style.rawValue)] → \(nextName) (\(String(format: "%.1f", params.duration))s, \(params.styleReason))")
 
+            beginCrossfadeLyrics(for: nextTrack, entryTime: params.vocalConnectionPoint)
             let started = audioEngine.crossfadeToNext(
                 outgoingURL: outgoingTrack.url,
                 incomingURL: nextTrack.url,
@@ -1896,7 +2039,8 @@ class PlayerViewModel {
                 do {
                     try loadTrackAndRestore(
                         url: firstTrack.url,
-                        barTimestamps: firstTrack.analysis?.barTimestamps ?? []
+                        barTimestamps: firstTrack.analysis?.barTimestamps ?? [],
+                        analysis: firstTrack.analysis
                     )
                     playerState = .playing
                 } catch {
@@ -2000,9 +2144,6 @@ class PlayerViewModel {
         requestedStartFileName = startFileName
 
         print("[PlayerViewModel] Import: \(url.path) blend=\(blend) blendPending=\(blendPending) artist=\(activeArtistFilter ?? "nil") thread=\(Thread.isMainThread ? "main" : "bg")")
-
-        // Capture start file for background cache task (before it's cleared)
-        let capturedStartFile = startFileName
 
         // Cancel previous background cache task
         cacheTask?.cancel()
@@ -2131,10 +2272,12 @@ class PlayerViewModel {
             do {
                 try loadTrackAndRestore(
                     url: tracks[startIndex].url,
-                    barTimestamps: tracks[startIndex].analysis?.barTimestamps ?? []
+                    barTimestamps: tracks[startIndex].analysis?.barTimestamps ?? [],
+                    analysis: tracks[startIndex].analysis
                 )
                 audioEngine.play()
                 playerState = .playing
+                scheduleCrossfadeWarmup()
                 print("[PlayerViewModel] Now playing: \(tracks[startIndex].fileName)")
             } catch {
                 print("[PlayerViewModel] Failed to start playback: \(error)")
@@ -2144,92 +2287,89 @@ class PlayerViewModel {
             blendIntoRequested()
         }
 
-        // Background: generate .cellax cache files for the played album only
-        cacheTask = Task.detached(priority: .utility) {
-            let audioExtensions = Set(["mp3", "wav", "m4a", "flac", "aac", "caf", "ogg", "aif"])
-            let fm = FileManager.default
-            let contents = (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: nil)) ?? []
+        // Immediately analyze any missing or stale-schema tracks in priority order
+        // (current track → next track → rest of queue), attaching each result live!
+        startBackgroundQueueAnalysis()
+    }
 
-            // Find the album directory containing the played track
-            let startFile = capturedStartFile
-            var targetAlbumDir: URL?
+    /// Prioritizes analyzing any tracks in `mixQueue` whose `analysis == nil`
+    /// (either uncached or invalidated by a newer TrackAnalysis schema version).
+    /// Analyzes the currently playing track FIRST, the next track SECOND, then the
+    /// rest of the queue in play order — attaching each result live and re-arming
+    /// AutoMix immediately instead of waiting for the entire album to finish.
+    private func startBackgroundQueueAnalysis() {
+        guard let queue = mixQueue, !queue.tracks.isEmpty else {
+            cacheTask?.cancel()
+            activeAnalysisHeadURL = nil
+            return
+        }
 
-            if let startFile {
-                // Search subfolders for the track
-                let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
-                for sub in subfolders {
-                    let subContents = (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
-                    if subContents.contains(where: { $0.lastPathComponent == startFile }) {
-                        targetAlbumDir = sub
-                        break
-                    }
-                }
-                // Check root
-                if targetAlbumDir == nil {
-                    let rootAudio = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-                    if rootAudio.contains(where: { $0.lastPathComponent == startFile }) {
-                        targetAlbumDir = url
-                    }
-                }
+        let total = queue.tracks.count
+        let startIdx = queue.currentIndex
+        var orderedMissing: [URL] = []
+        for offset in 0..<total {
+            let idx = (startIdx + offset) % total
+            if queue.tracks[idx].analysis == nil {
+                orderedMissing.append(queue.tracks[idx].url)
             }
+        }
+        guard let firstMissing = orderedMissing.first else {
+            activeAnalysisHeadURL = nil
+            print("[PlayerViewModel] Queue analysis: all \(total) tracks already have valid v\(TrackAnalysis.currentSchemaVersion) analysis")
+            return
+        }
 
-            // Fallback: if no start file or not found, analyze all albums
-            var albumDirs: [URL] = []
-            if let target = targetAlbumDir {
-                albumDirs = [target]
-            } else {
-                let subfolders = contents.filter { $0.hasDirectoryPath && $0.pathExtension.lowercased() != "cluster" }
-                for sub in subfolders {
-                    let subContents = (try? fm.contentsOfDirectory(at: sub, includingPropertiesForKeys: nil)) ?? []
-                    if subContents.contains(where: { audioExtensions.contains($0.pathExtension.lowercased()) }) {
-                        albumDirs.append(sub)
-                    }
-                }
-                let rootAudio = contents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-                if !rootAudio.isEmpty {
-                    albumDirs.insert(url, at: 0)
-                }
-            }
+        // If the running task is already analyzing this exact top-priority track, keep it running.
+        if let active = activeAnalysisHeadURL, active == firstMissing, cacheTask != nil {
+            return
+        }
 
-            let albumName = targetAlbumDir?.lastPathComponent ?? "all albums"
-            print("[PlayerViewModel] Background cache: \(albumDirs.count) album(s) in \(url.lastPathComponent) (target: \(albumName))")
+        cacheTask?.cancel()
+        activeAnalysisHeadURL = firstMissing
+        print("[PlayerViewModel] Background analysis: \(orderedMissing.count)/\(total) tracks need v\(TrackAnalysis.currentSchemaVersion) analysis (current & next prioritized)")
+        cacheTask = Task.detached(priority: .userInitiated) { [weak self] in
             let analyzer = TrackAnalyzer()
-            var totalAnalyzed = 0
+            var analyzedCount = 0
 
-            for albumDir in albumDirs {
-                if Task.isCancelled {
-                    print("[PlayerViewModel] Background cache cancelled — switching album")
-                    return
+            for audioURL in orderedMissing {
+                if Task.isCancelled { return }
+                await MainActor.run { [weak self] in
+                    self?.activeAnalysisHeadURL = audioURL
                 }
-                let albumContents = (try? fm.contentsOfDirectory(at: albumDir, includingPropertiesForKeys: nil)) ?? []
-                let audioFiles = albumContents.filter { audioExtensions.contains($0.pathExtension.lowercased()) }
-                let uncached = audioFiles.filter { !fm.fileExists(atPath: AnalysisCache.cacheURL(for: $0).path) }
+                do {
+                    let analysis = try await analyzer.analyze(url: audioURL)
+                    analyzedCount += 1
+                    print("[PlayerViewModel] Live analysis ready (\(analyzedCount)/\(orderedMissing.count)): \(audioURL.lastPathComponent) bpm=\(String(format: "%.1f", analysis.bpm ?? 0)) conf=\(String(format: "%.2f", analysis.beatConfidence)) bars=\(analysis.barTimestamps.count) leadSil=\(String(format: "%.1f", analysis.leadingSilence))s trail=\(String(format: "%.1f", analysis.trailingSilence))/\(String(format: "%.1f", analysis.duration))s")
 
-                let name = albumDir.lastPathComponent
-                if uncached.isEmpty {
-                    print("[PlayerViewModel] [\(name)] all \(audioFiles.count) cached — skip")
-                    continue
-                }
+                    await MainActor.run { [weak self] in
+                        guard let self, var q = self.mixQueue else { return }
+                        if let idx = q.tracks.firstIndex(where: { $0.url == audioURL }) {
+                            q.tracks[idx].analysis = analysis
+                            self.mixQueue = q
+                            self.analyzedTrackCount = q.tracks.filter { $0.analysis != nil }.count
+                            let isCurrent = q.currentTrack?.url == audioURL
+                            let isNext = q.nextTrack?.url == audioURL
+                            if isCurrent {
+                                self.audioEngine.refreshCurrentTrackAnalysis(analysis)
+                            }
+                            if (isCurrent || isNext) && self.playerState == .playing {
+                                self.scheduleCrossfadeWarmup()
+                            }
+                        }
+                    }
 
-                print("[PlayerViewModel] [\(name)] \(uncached.count) uncached of \(audioFiles.count)")
-                for audioURL in uncached {
-                    if Task.isCancelled {
-                        print("[PlayerViewModel] Background cache cancelled — switching album")
-                        return
+                    // Throttle slightly after the critical first two tracks so CPU stays light.
+                    if analyzedCount >= 2 {
+                        try? await Task.sleep(for: .milliseconds(150))
                     }
-                    do {
-                        let analysis = try await analyzer.analyze(url: audioURL)
-                        AnalysisCache.save(analysis, for: audioURL)
-                        totalAnalyzed += 1
-                        // Yield UI + throttle: 200ms between tracks
-                        try? await Task.sleep(for: .milliseconds(200))
-                    } catch {
-                        print("[PlayerViewModel] [\(name)] skip \(audioURL.lastPathComponent): \(error.localizedDescription)")
-                    }
+                } catch {
+                    print("[PlayerViewModel] Analysis skip \(audioURL.lastPathComponent): \(error.localizedDescription)")
                 }
             }
-
-            print("[PlayerViewModel] Background cache done: \(totalAnalyzed) analyzed")
+            await MainActor.run { [weak self] in
+                self?.activeAnalysisHeadURL = nil
+                self?.cacheTask = nil
+            }
         }
     }
 

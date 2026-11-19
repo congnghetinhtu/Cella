@@ -58,53 +58,80 @@ actor TrackAnalyzer {
         let keySignature = try? await keyResult
         let loudnessDesc = try? await loudnessResult
 
-        // Shared FFT setup for vocal detection + vocal activity (reuse across both)
-        let mono = buffer.floatChannelData![0]
-        let frameLength = Int(buffer.frameLength)
-        let sampleRate = Float(buffer.format.sampleRate)
+        // Shared FFT setup for vocal + bass band extraction
         let fftWindow = 4096
         let log2n = vDSP_Length(log2(Float(fftWindow)))
         let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
 
         // Compute all buffer-based features in one pass
         let energyProfile = AudioHelpers.getRMSProfile(buffer: buffer, windowSize: 8192)
-        let structureSections = detectSections(energyProfile: energyProfile, duration: audioFile.duration)
+        let silenceBounds = AudioHelpers.detectSilenceBounds(buffer: buffer)
+        let structureSections = detectSections(
+            energyProfile: energyProfile,
+            duration: audioFile.duration,
+            leadingSilence: silenceBounds.leading,
+            trailingSilence: silenceBounds.trailing
+        )
         let introOutro = detectIntroOutro(structureSections: structureSections)
         let spectral = AudioHelpers.computeSpectralFeatures(buffer: buffer)
         let avgRMS = averageEnergy(energyProfile)
         let peakAmp = AudioHelpers.peakAmplitude(buffer: buffer)
         let beatInfo = AudioHelpers.detectBeats(buffer: buffer, bpm: bpm ?? 0)
         let beatTimestamps = beatInfo.beats
-        let bpb = detectBarsPerBeat(beatTimestamps: beatTimestamps, bpm: bpm ?? 120)
-        let barTimestamps = stride(from: 0, to: beatTimestamps.count, by: bpb).map { beatTimestamps[$0] }
+        let beatConfidence = beatInfo.confidence
+        let effectiveBPM = beatInfo.effectiveBPM > 0 ? beatInfo.effectiveBPM : nil
 
-        // Vocal detection — share FFT setup
+        // Vocal + Bass band extraction in a single shared FFT pass
         let hasVocals: Bool
         let vocalActivity: [Float]
+        let bassEnergyProfile: [Float]
         let vocalBoundaries: (onsets: [Double], offsets: [Double])
 
         if let setup = fftSetup {
-            hasVocals = detectVocals(buffer: buffer, fftSetup: setup, log2n: log2n)
-            vocalActivity = detectVocalActivity(buffer: buffer, fftSetup: setup, log2n: log2n)
-            vocalBoundaries = AudioHelpers.detectVocalBoundaries(buffer: buffer)
+            let bands = extractBandProfiles(buffer: buffer, fftSetup: setup, log2n: log2n)
+            vocalActivity = bands.vocalActivity
+            bassEnergyProfile = bands.bassEnergy
+            vocalBoundaries = AudioHelpers.detectVocalBoundaries(
+                vocalActivity: vocalActivity,
+                duration: audioFile.duration
+            )
+            // Confirm vocal presence if sustained vocal activity appears in multiple windows
+            let activeWindows = vocalActivity.filter { $0 >= 0.42 }.count
+            hasVocals = activeWindows >= 3 || detectVocals(buffer: buffer, fftSetup: setup, log2n: log2n)
             vDSP_destroy_fftsetup(setup)
         } else {
             hasVocals = false
             vocalActivity = []
+            bassEnergyProfile = []
             vocalBoundaries = ([], [])
         }
 
+        // Build true 4/4 bar grid aligned to the strongest downbeat phase (0..3)
+        // measured by bass + RMS accents across the track body.
+        let downbeatPhase = detectDownbeatPhase(
+            beatTimestamps: beatTimestamps,
+            energyProfile: energyProfile,
+            bassEnergyProfile: bassEnergyProfile,
+            duration: audioFile.duration
+        )
+        let barTimestamps = stride(from: downbeatPhase, to: beatTimestamps.count, by: 4).map { beatTimestamps[$0] }
+
         let result = TrackAnalysis(
-            bpm: bpm,
+            schemaVersion: TrackAnalysis.currentSchemaVersion,
+            bpm: effectiveBPM,
             beatTimestamps: beatTimestamps,
             barTimestamps: barTimestamps,
+            beatConfidence: beatConfidence,
             keySignature: keySignature,
             loudnessIntegrated: loudnessDesc?.loudnessIntegrated,
             structureSections: structureSections,
             energyProfile: energyProfile,
+            bassEnergyProfile: bassEnergyProfile,
             hasVocals: hasVocals,
             vocalActivity: vocalActivity,
             duration: audioFile.duration,
+            leadingSilence: silenceBounds.leading,
+            trailingSilence: silenceBounds.trailing,
             spectralCentroid: spectral.centroid,
             spectralRolloff: spectral.rolloff,
             spectralBandwidth: spectral.bandwidth,
@@ -224,34 +251,75 @@ actor TrackAnalyzer {
         try LoudnessAnalyzer.analyze(url: url, minimumDuration: 5)
     }
 
-    // MARK: - Structure Detection (energy-based)
+    // MARK: - Structure Detection (relative-energy & position aware)
 
-    private func detectSections(energyProfile: [Float], duration: Double) -> [TrackAnalysis.StructureSection] {
-        guard energyProfile.count >= 4 else { return [] }
+    private func detectSections(
+        energyProfile: [Float],
+        duration: Double,
+        leadingSilence: Double,
+        trailingSilence: Double
+    ) -> [TrackAnalysis.StructureSection] {
+        guard energyProfile.count >= 6, duration > 0 else { return [] }
 
-        let windowDuration = duration / Double(energyProfile.count * 2)
-        var sections: [TrackAnalysis.StructureSection] = []
-        var sectionStart = 0
-        var prevEnergy = energyProfile[0]
+        let count = energyProfile.count
+        let timePerSample = duration / Double(count)
 
-        for i in 1..<energyProfile.count {
-            let energyDiff = abs(energyProfile[i] - prevEnergy)
-            if energyDiff > 0.2 {
-                let startTime = Double(sectionStart) * windowDuration * 2
-                let endTime = Double(i) * windowDuration * 2
-                let avgEnergy = averageRange(energyProfile, from: sectionStart, to: i)
-                let label = classifySection(avgEnergy: avgEnergy)
-                sections.append(TrackAnalysis.StructureSection(startTime: startTime, endTime: endTime, label: label))
-                sectionStart = i
-            }
-            prevEnergy = energyProfile[i]
+        // Smooth energy profile with a ~4s moving average so transient beats don't split sections.
+        let smoothHalf = max(1, Int((2.0 / max(timePerSample, 0.05)).rounded()))
+        var smoothed = [Float](repeating: 0, count: count)
+        for i in 0..<count {
+            let lo = max(0, i - smoothHalf)
+            let hi = min(count - 1, i + smoothHalf)
+            var sum: Float = 0
+            for j in lo...hi { sum += energyProfile[j] }
+            smoothed[i] = sum / Float(hi - lo + 1)
         }
 
-        let startTime = Double(sectionStart) * windowDuration * 2
-        if startTime < duration {
-            let avgEnergy = averageRange(energyProfile, from: sectionStart, to: energyProfile.count)
-            let label = classifySection(avgEnergy: avgEnergy)
-            sections.append(TrackAnalysis.StructureSection(startTime: startTime, endTime: duration, label: label))
+        // Compute relative percentiles across audible samples so quiet ballads and loud EDM both classify accurately.
+        let audible = smoothed.filter { $0 > 0.005 }.sorted()
+        guard !audible.isEmpty else { return [] }
+        let p25 = audible[Int(Double(audible.count - 1) * 0.25)]
+        let p45 = audible[Int(Double(audible.count - 1) * 0.45)]
+        let p70 = audible[Int(Double(audible.count - 1) * 0.70)]
+        let energySpan = max(0.02, audible.last! - audible.first!)
+        let splitThreshold = max(0.04, energySpan * 0.22)
+        let minSectionSamples = max(2, Int((8.0 / max(timePerSample, 0.05)).rounded()))
+
+        var boundaries = [0]
+        var anchorEnergy = smoothed[0]
+        for i in 1..<count {
+            if (i - boundaries.last!) >= minSectionSamples && abs(smoothed[i] - anchorEnergy) >= splitThreshold {
+                boundaries.append(i)
+                anchorEnergy = smoothed[i]
+            }
+        }
+        boundaries.append(count)
+
+        let effectiveEnd = max(leadingSilence + 1.0, trailingSilence)
+        var sections: [TrackAnalysis.StructureSection] = []
+        for idx in 0..<(boundaries.count - 1) {
+            let sIdx = boundaries[idx]
+            let eIdx = boundaries[idx + 1]
+            let startTime = Double(sIdx) * timePerSample
+            let endTime = min(duration, Double(eIdx) * timePerSample)
+            let avgEnergy = averageRange(smoothed, from: sIdx, to: eIdx)
+            let midRatio = ((startTime + endTime) * 0.5) / max(1.0, effectiveEnd)
+
+            let label: String
+            if avgEnergy < 0.006 {
+                label = "silence"
+            } else if idx == 0 && endTime <= duration * 0.30 && avgEnergy < p45 {
+                label = "intro"
+            } else if startTime >= effectiveEnd * 0.72 && avgEnergy < p45 {
+                label = "outro"
+            } else if avgEnergy >= p70 {
+                label = "chorus"
+            } else if midRatio > 0.55 && midRatio < 0.85 && avgEnergy <= p25 {
+                label = "bridge"
+            } else {
+                label = "verse"
+            }
+            sections.append(TrackAnalysis.StructureSection(startTime: startTime, endTime: endTime, label: label))
         }
 
         return sections
@@ -263,17 +331,6 @@ actor TrackAnalyzer {
         return slice.reduce(0, +) / Float(slice.count)
     }
 
-    private func classifySection(avgEnergy: Float) -> String {
-        switch avgEnergy {
-        case 0..<0.05: return "silence"
-        case 0.05..<0.15: return "intro"
-        case 0.15..<0.3: return "verse"
-        case 0.3..<0.5: return "chorus"
-        case 0.5..<0.7: return "bridge"
-        default: return "outro"
-        }
-    }
-
     // MARK: - Intro/Outro Detection
 
     private func detectIntroOutro(
@@ -282,6 +339,7 @@ actor TrackAnalyzer {
         var intro: (start: Double, end: Double)?
         var outro: (start: Double, end: Double)?
 
+        // Intro: only contiguous leading intro/silence sections from the start of the track.
         for section in structureSections {
             if section.label == "intro" || section.label == "silence" {
                 if intro == nil {
@@ -289,9 +347,21 @@ actor TrackAnalyzer {
                 } else {
                     intro = (start: intro!.start, end: section.endTime)
                 }
+            } else {
+                break
             }
+        }
+
+        // Outro: only contiguous trailing outro/silence sections at the end of the track.
+        for section in structureSections.reversed() {
             if section.label == "outro" || section.label == "silence" {
-                outro = (start: section.startTime, end: section.endTime)
+                if outro == nil {
+                    outro = (start: section.startTime, end: section.endTime)
+                } else {
+                    outro = (start: section.startTime, end: outro!.end)
+                }
+            } else {
+                break
             }
         }
 
@@ -355,25 +425,50 @@ actor TrackAnalyzer {
         return vocalVotes >= 1
     }
 
-    /// Detects per-window vocal activity — accepts shared FFTSetup.
-    private func detectVocalActivity(buffer: AVAudioPCMBuffer, fftSetup: FFTSetup, log2n: vDSP_Length) -> [Float] {
-        guard let channelData = buffer.floatChannelData else { return [] }
+    /// Single-pass FFT band extractor: computes both per-window `vocalActivity`
+    /// (300–3400 Hz vocal-band ratio + spectral centroid + ZCR + RMS) and
+    /// `bassEnergy` (20–200 Hz low-end energy normalized to 0.0–1.0).
+    private func extractBandProfiles(
+        buffer: AVAudioPCMBuffer,
+        fftSetup: FFTSetup,
+        log2n: vDSP_Length
+    ) -> (vocalActivity: [Float], bassEnergy: [Float]) {
+        guard let channelData = buffer.floatChannelData else { return ([], []) }
         let frameLength = Int(buffer.frameLength)
-        guard frameLength > 4096 else { return [] }
+        let windowSize = 4096
+        let hopSize = 4096
+        let halfN = windowSize / 2
+        guard frameLength >= windowSize else { return ([], []) }
 
         let mono = channelData[0]
         let sampleRate = Float(buffer.format.sampleRate)
-        let windowSize = 4096
-        let hopSize = 4096
+        let binHz = sampleRate / Float(windowSize)
 
+        let bassLo = max(1, Int(20.0 / binHz))
+        let bassHi = min(halfN - 1, Int(200.0 / binHz))
+        let vocalLo = max(1, Int(300.0 / binHz))
+        let vocalHi = min(halfN - 1, Int(3400.0 / binHz))
+
+        var hann = [Float](repeating: 0, count: windowSize)
+        vDSP_hann_window(&hann, vDSP_Length(windowSize), Int32(vDSP_HANN_NORM))
+
+        var windowed = [Float](repeating: 0, count: windowSize)
+        var realPart = [Float](repeating: 0, count: halfN)
+        var imagPart = [Float](repeating: 0, count: halfN)
+        var magnitudes = [Float](repeating: 0, count: halfN)
+
+        let capacity = frameLength / hopSize
         var activity = [Float]()
-        activity.reserveCapacity(frameLength / hopSize)
-        var position = 0
+        var bassRaw = [Float]()
+        activity.reserveCapacity(capacity)
+        bassRaw.reserveCapacity(capacity)
 
+        var position = 0
         while position + windowSize <= frameLength {
             var rms: Float = 0
             vDSP_rmsqv(mono + position, 1, &rms, vDSP_Length(windowSize))
 
+            // Zero-crossing rate
             var crossings: vDSP_Length = 0
             for i in 1..<windowSize {
                 if (mono[position + i] >= 0) != (mono[position + i - 1] >= 0) {
@@ -382,41 +477,75 @@ actor TrackAnalyzer {
             }
             let zcr = Float(crossings) / Float(windowSize)
 
-            let centroid = AudioHelpers.computeWindowSpectralCentroid(
-                data: mono + position,
-                frameCount: windowSize,
-                sampleRate: sampleRate,
-                fftSetup: fftSetup,
-                log2n: log2n
-            )
+            // Forward FFT
+            vDSP_vmul(mono + position, 1, hann, 1, &windowed, 1, vDSP_Length(windowSize))
+            realPart.withUnsafeMutableBufferPointer { realPtr in
+                imagPart.withUnsafeMutableBufferPointer { imagPtr in
+                    guard let realBase = realPtr.baseAddress,
+                          let imagBase = imagPtr.baseAddress else { return }
+                    var split = DSPSplitComplex(realp: realBase, imagp: imagBase)
+                    windowed.withUnsafeBytes { ptr in
+                        ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { cp in
+                            vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(halfN))
+                        }
+                    }
+                    vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(kFFTDirection_Forward))
+                    vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(halfN))
+                }
+            }
+
+            var totalEnergy: Float = 0
+            var bassSum: Float = 0
+            var vocalSum: Float = 0
+            var weightedFreqSum: Float = 0
+
+            for k in 1..<halfN {
+                let m = magnitudes[k]
+                totalEnergy += m
+                weightedFreqSum += m * (Float(k) * binHz)
+                if k >= bassLo && k <= bassHi { bassSum += m }
+                if k >= vocalLo && k <= vocalHi { vocalSum += m }
+            }
+
+            let centroid = totalEnergy > 1e-10 ? (weightedFreqSum / totalEnergy) : 0
+            let vocalRatio = totalEnergy > 1e-10 ? (vocalSum / totalEnergy) : 0
+            let bassRMS = sqrt(max(0, bassSum)) / Float(windowSize)
+            bassRaw.append(bassRMS)
 
             var score: Float = 0
             if rms > 0.004 {
-                let centroidLow: Float = 300
-                let centroidHigh: Float = 6000
-                let centroidMid = (centroidLow + centroidHigh) / 2.0
-                let centroidRange = centroidHigh - centroidLow
-                let centroidDist = abs(centroid - centroidMid) / (centroidRange / 2.0)
-                let centroidScore = exp(-centroidDist * centroidDist * 1.2)
+                let centroidMid: Float = 2200
+                let centroidRange: Float = 2400
+                let centroidDist = abs(centroid - centroidMid) / centroidRange
+                let centroidScore = exp(-centroidDist * centroidDist * 1.1)
 
-                let zcrMid: Float = 0.12
-                let zcrRange: Float = 0.20
-                let zcrDist = abs(zcr - zcrMid) / (zcrRange / 2.0)
-                let zcrScore = exp(-zcrDist * zcrDist * 1.2)
+                let zcrMid: Float = 0.11
+                let zcrRange: Float = 0.10
+                let zcrDist = abs(zcr - zcrMid) / zcrRange
+                let zcrScore = exp(-zcrDist * zcrDist * 1.1)
 
+                let bandScore = min(1.0, vocalRatio * 1.6)
                 let energyScore = min(1.0, rms * 4.0)
-                score = (centroidScore * 0.4 + zcrScore * 0.35 + energyScore * 0.25)
-                if centroid < 150 { score *= 0.6 }
-                if centroid > 7000 { score *= 0.7 }
-                if zcr < 0.003 { score *= 0.6 }
-                if zcr > 0.32 { score *= 0.8 }
+                score = (bandScore * 0.40 + centroidScore * 0.25 + zcrScore * 0.20 + energyScore * 0.15)
+                if centroid < 200 { score *= 0.45 }
+                if centroid > 6500 { score *= 0.65 }
+                if zcr < 0.005 { score *= 0.55 }
+                if zcr > 0.30 { score *= 0.70 }
             }
 
             activity.append(min(1.0, max(0.0, score)))
             position += hopSize
         }
 
-        return activity
+        // Normalize bassEnergy to 0.0–1.0 using 95th percentile so a single sub spike doesn't squash the curve.
+        var bassEnergy = bassRaw
+        if !bassRaw.isEmpty {
+            let sorted = bassRaw.sorted()
+            let ref = max(1e-5, sorted[Int(Double(sorted.count - 1) * 0.95)])
+            bassEnergy = bassRaw.map { min(1.0, $0 / ref) }
+        }
+
+        return (activity, bassEnergy)
     }
 
     // MARK: - Downsampling
@@ -474,24 +603,50 @@ actor TrackAnalyzer {
         return Double(sum) / Double(profile.count)
     }
 
-    private func detectBarsPerBeat(beatTimestamps: [Double], bpm: Double) -> Int {
-        guard beatTimestamps.count >= 12 else { return 4 }
-        let beatInterval = 60.0 / bpm
-        var score4 = 0, score3 = 0
-        for i in stride(from: 0, to: min(beatTimestamps.count, 48), by: 1) {
-            let mod4 = beatTimestamps[i].truncatingRemainder(dividingBy: beatInterval * 4)
-            let mod3 = beatTimestamps[i].truncatingRemainder(dividingBy: beatInterval * 3)
-            if mod4 < beatInterval * 0.5 { score4 += 1 }
-            if mod3 < beatInterval * 0.5 { score3 += 1 }
+    /// Selects which beat offset (0, 1, 2, or 3) corresponds to beat 1 (the downbeat)
+    /// of a 4/4 bar by summing bass + RMS accent strength across the track body.
+    private func detectDownbeatPhase(
+        beatTimestamps: [Double],
+        energyProfile: [Float],
+        bassEnergyProfile: [Float],
+        duration: Double
+    ) -> Int {
+        guard beatTimestamps.count >= 8, duration > 0 else { return 0 }
+        let startBeat = min(beatTimestamps.count / 5, 32)
+        let endBeat = min(beatTimestamps.count, startBeat + 128)
+        guard endBeat > startBeat + 4 else { return 0 }
+
+        var phaseScores = [Float](repeating: 0, count: 4)
+        for i in startBeat..<endBeat {
+            let t = beatTimestamps[i]
+            let ratio = max(0, min(0.9999, t / duration))
+            var accent: Float = 0
+            if !bassEnergyProfile.isEmpty {
+                let bIdx = Int(ratio * Double(bassEnergyProfile.count))
+                accent += bassEnergyProfile[bIdx] * 0.65
+            }
+            if !energyProfile.isEmpty {
+                let eIdx = Int(ratio * Double(energyProfile.count))
+                accent += energyProfile[eIdx] * 0.35
+            }
+            phaseScores[i % 4] += accent
         }
-        return score3 > score4 ? 3 : 4
+
+        var bestPhase = 0
+        var bestScore = phaseScores[0]
+        for p in 1..<4 where phaseScores[p] > bestScore {
+            bestScore = phaseScores[p]
+            bestPhase = p
+        }
+        return bestPhase
     }
 
     private func emptyAnalysis() -> TrackAnalysis {
         TrackAnalysis(
-            bpm: nil, beatTimestamps: [], barTimestamps: [], keySignature: nil,
-            loudnessIntegrated: nil, structureSections: [], energyProfile: [],
-            hasVocals: false, vocalActivity: [], duration: 0,
+            schemaVersion: TrackAnalysis.currentSchemaVersion,
+            bpm: nil, beatTimestamps: [], barTimestamps: [], beatConfidence: 0, keySignature: nil,
+            loudnessIntegrated: nil, structureSections: [], energyProfile: [], bassEnergyProfile: [],
+            hasVocals: false, vocalActivity: [], duration: 0, leadingSilence: 0, trailingSilence: 0,
             spectralCentroid: 0, spectralRolloff: 0, spectralBandwidth: 0, spectralFlatness: 0,
             averageRMS: 0, peakAmplitude: 0, introRegion: nil, outroRegion: nil,
             vocalOnsetTimestamps: [], vocalOffsetTimestamps: []

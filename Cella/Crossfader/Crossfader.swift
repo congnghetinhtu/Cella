@@ -18,6 +18,12 @@ enum VocalTransitionStrategy: Sendable {
     case priorityIncoming      // Both have vocals, incoming is stronger: outgoing ducks
 }
 
+/// Whether a transition was triggered automatically at track end or manually by the user.
+enum TransitionContext: Sendable {
+    case automatic
+    case manualSkip
+}
+
 /// Parameters for a crossfade transition.
 struct CrossfadeParams: Sendable {
     /// Duration of the crossfade in seconds.
@@ -26,16 +32,26 @@ struct CrossfadeParams: Sendable {
     /// Crossfade point in the outgoing track (seconds from start).
     let crossfadeStart: Double
 
+    /// Context-aware DJ transition style selected for this track pair.
+    let style: TransitionStyle
+
+    /// Human-readable reason explaining why this style was selected (for debug logs).
+    let styleReason: String
+
+    /// Whether the incoming track should be beat-phase-aligned to an outgoing bar line.
+    /// False for free-time/ambient transitions where forcing a beat pad feels unnatural.
+    let beatPhaseLock: Bool
+
     /// Vocal transition strategy for this crossfade.
     let vocalStrategy: VocalTransitionStrategy
 
     /// Transition log entry for this crossfade.
     let transitionLog: TransitionLog
 
-    /// Whether the incoming track's intro should be skipped to align vocals.
+    /// Whether the incoming track's intro should be skipped to align energy/vocals.
     let skipIntro: Bool
 
-    /// Optimal vocal connection point in incoming track (seconds).
+    /// Actual entry point in incoming track (seconds, always >= leadingSilence).
     let vocalConnectionPoint: Double
 
     /// Gain compensation for incoming track (1.0 = no change). Computed from LUFS/RMS difference.
@@ -46,15 +62,15 @@ struct CrossfadeParams: Sendable {
 
     /// Incoming playback rate during the blend (1.0 = natural tempo).
     /// Computed from outgoing/incoming BPM (harmonic-aware); applied to the
-    /// incoming timePitch node, then glided back to 1.0 after the handoff.
+    /// incoming timePitch node only when beat-sync is active, then glided back to 1.0.
     let tempoRate: Double
 
     /// False when the BPM gap fits no direct or harmonic ratio within
-    /// `maxBpmAdjustment` — the engine plays a short bar-aligned cut instead.
+    /// `maxBpmAdjustment`, or when beat confidence is too low to beatmatch.
     let tempoCompatible: Bool
 }
 
-/// Renders crossfade buffers with tempo alignment, key correction, and vocal ducking.
+/// Renders crossfade buffers with tempo alignment, vocal-aware EQ, and context-aware DJ styles.
 struct Crossfader {
     let config: AudioConfig
 
@@ -67,31 +83,50 @@ struct Crossfader {
     /// Computes crossfade parameters for a transition between two tracks.
     func computeCrossfadeParams(
         outgoing: TrackAsset,
-        incoming: TrackAsset
+        incoming: TrackAsset,
+        context: TransitionContext = .automatic
     ) -> CrossfadeParams {
         let outAnalysis = outgoing.analysis
         let inAnalysis = incoming.analysis
 
-        // Tempo match FIRST: the rate + compatibility drive the duration
-        // (dual-grid quantization) and the engine's timePitch behavior.
-        let match = Self.computeTempoMatch(
+        let outConf = outAnalysis?.beatConfidence ?? 0
+        let inConf = inAnalysis?.beatConfidence ?? 0
+        let bothRhythmic = outConf >= config.minBeatConfidenceForSync && inConf >= config.minBeatConfidenceForSync
+
+        // Tempo match FIRST: only beat-sync when both tracks have reliable beats.
+        let rawMatch = Self.computeTempoMatch(
             outBPM: outAnalysis?.bpm,
             inBPM: inAnalysis?.bpm,
             maxAdjustment: config.maxBpmAdjustment
         )
+        let tempoCompatible = bothRhythmic && rawMatch.compatible
+
+        // Select context-aware transition style (Bass-Swap, Beatmatch, Echo-Out, Ambient, Quick Cut).
+        let decision = selectTransitionStyle(
+            outgoing: outAnalysis,
+            incoming: inAnalysis,
+            bothRhythmic: bothRhythmic,
+            tempoCompatible: tempoCompatible,
+            context: context
+        )
+
+        let effectiveTempoRate = decision.useTempoSync ? rawMatch.rate : 1.0
 
         let crossfadeDuration = Self.computeCrossfadeDuration(
             from: outgoing,
             to: incoming,
             config: config,
-            tempoRate: match.rate,
-            tempoCompatible: match.compatible
+            style: decision.style,
+            tempoRate: effectiveTempoRate,
+            tempoCompatible: tempoCompatible,
+            context: context
         )
 
-        // Crossfade starts near the end of the outgoing track
+        // Crossfade starts near the end of the outgoing track (anchored to trailingSilence when known).
         let crossfadeStart: Double
-        if let outDuration = outAnalysis?.duration, outDuration > 0 {
-            crossfadeStart = max(0, outDuration - crossfadeDuration)
+        if let out = outAnalysis, out.duration > 0 {
+            let effectiveEnd = out.trailingSilence > 1.0 ? min(out.duration, out.trailingSilence) : out.duration
+            crossfadeStart = max(0, effectiveEnd - crossfadeDuration)
         } else {
             crossfadeStart = 0
         }
@@ -102,18 +137,18 @@ struct Crossfader {
             incoming: inAnalysis
         )
 
-        // Find where the incoming track should enter: matched seam energy,
-        // staying out of vocals where possible (the vocal lead-in still wins
-        // when its energy fit is close).
+        // Find where the incoming track should enter: always trims dead leading silence,
+        // and skips longer intros when a bar-aligned seam fits better without cutting vocals.
+        let leadingSilence = inAnalysis?.leadingSilence ?? 0
         let connectionPoint = findConnectionPoint(
             outgoing: outAnalysis,
             incoming: inAnalysis,
-            crossfadeDuration: crossfadeDuration
+            crossfadeDuration: crossfadeDuration,
+            context: context
         )
 
-        // Skip the incoming intro only when another entry fits the seam
-        // better; the entry itself is bar-aligned (see findConnectionPoint).
-        let skipIntro = connectionPoint > 0.5
+        // Flag intro skip only when skipping meaningful musical intro beyond dead silence.
+        let skipIntro = connectionPoint > max(0.5, leadingSilence + 0.5)
 
         // Compute loudness-matching gain compensation
         let (outGain, inGain) = computeGainCompensation(
@@ -121,12 +156,18 @@ struct Crossfader {
             incoming: inAnalysis
         )
 
-        // Build transition log
+        // Build rich transition log
         let transitionLog = TransitionLog(
             fromTrack: outgoing.url,
             toTrack: incoming.url,
             crossfadeDuration: crossfadeDuration,
-            bpmAdjusted: abs(match.rate - 1.0) > 0.001,
+            style: decision.style,
+            reason: decision.reason,
+            tempoRate: effectiveTempoRate,
+            incomingEntryTime: connectionPoint,
+            outBeatConfidence: outConf,
+            inBeatConfidence: inConf,
+            bpmAdjusted: abs(effectiveTempoRate - 1.0) > 0.001,
             keyCorrected: false,
             vocalDuckingApplied: vocalStrategy != .standard
         )
@@ -134,15 +175,142 @@ struct Crossfader {
         return CrossfadeParams(
             duration: crossfadeDuration,
             crossfadeStart: crossfadeStart,
+            style: decision.style,
+            styleReason: decision.reason,
+            beatPhaseLock: decision.beatPhaseLock,
             vocalStrategy: vocalStrategy,
             transitionLog: transitionLog,
             skipIntro: skipIntro,
             vocalConnectionPoint: connectionPoint,
             incomingGainCompensation: inGain,
             outgoingGainCompensation: outGain,
-            tempoRate: match.rate,
-            tempoCompatible: match.compatible
+            tempoRate: effectiveTempoRate,
+            tempoCompatible: tempoCompatible
         )
+    }
+
+    // MARK: - Context-Aware Transition Style Selection
+
+    private struct StyleDecision {
+        let style: TransitionStyle
+        let reason: String
+        let useTempoSync: Bool
+        let beatPhaseLock: Bool
+    }
+
+    private func selectTransitionStyle(
+        outgoing: TrackAnalysis?,
+        incoming: TrackAnalysis?,
+        bothRhythmic: Bool,
+        tempoCompatible: Bool,
+        context: TransitionContext
+    ) -> StyleDecision {
+        guard let out = outgoing, let inn = incoming else {
+            return StyleDecision(
+                style: .ambientBlend,
+                reason: "missing analysis → safe ambient blend",
+                useTempoSync: false,
+                beatPhaseLock: false
+            )
+        }
+
+        let outMood = MusicMood.from(analysis: out)
+        let inMood = MusicMood.from(analysis: inn)
+        let outEnergetic = outMood == .energeticHappy || outMood == .energeticAngry
+        let inEnergetic = inMood == .energeticHappy || inMood == .energeticAngry
+        let moodClash = outEnergetic != inEnergetic
+        let keyScore = MixEngine.keyCompatibility(a: out, b: inn)
+        let energyDiff = abs(out.averageRMS - inn.averageRMS)
+
+        // 1. Free-time / Ballad / Acoustic (low beat confidence on either track):
+        // Never force time-stretching or beat-grid locking.
+        if !bothRhythmic {
+            if outEnergetic && !inEnergetic {
+                return StyleDecision(
+                    style: .echoOut,
+                    reason: "free-time handoff from energetic track → reverb echo-out",
+                    useTempoSync: false,
+                    beatPhaseLock: false
+                )
+            }
+            return StyleDecision(
+                style: .ambientBlend,
+                reason: "low beat confidence (out=\(String(format: "%.2f", out.beatConfidence)), in=\(String(format: "%.2f", inn.beatConfidence))) → ambient blend",
+                useTempoSync: false,
+                beatPhaseLock: false
+            )
+        }
+
+        // 2. Incompatible BPM (>15% even with harmonic ratios):
+        // Avoid distorted time-stretching; use Echo-Out or a crisp Quick Phrase Cut.
+        if !tempoCompatible {
+            if outEnergetic && inEnergetic && energyDiff < 0.12 && context == .automatic {
+                return StyleDecision(
+                    style: .quickPhraseCut,
+                    reason: "incompatible BPM + matching high energy → quick phrase cut",
+                    useTempoSync: false,
+                    beatPhaseLock: true
+                )
+            }
+            return StyleDecision(
+                style: .echoOut,
+                reason: "incompatible BPM → echo-out (no time-stretch)",
+                useTempoSync: false,
+                beatPhaseLock: false
+            )
+        }
+
+        // 3. Severe Harmonic Key Clash:
+        // Preserve original pitch (0 semitone), mask harmonic clash via rhythmic Echo-Out
+        // (reverb tail dissolves outgoing harmony, incoming drops cleanly on the bar line).
+        if keyScore < 0.35 {
+            return StyleDecision(
+                style: .echoOut,
+                reason: "harmonic key clash (score=\(String(format: "%.2f", keyScore))) → rhythmic echo-out",
+                useTempoSync: false,
+                beatPhaseLock: true
+            )
+        }
+
+        // 4. Both rhythmic, BPM & key compatible (including smooth calm→energetic builds):
+        // Choose Bass-Swap if both carry clear low-end, otherwise Beatmatch Blend.
+        let outBass = Self.edgeBassEnergy(out, useEnd: true)
+        let inBass = Self.edgeBassEnergy(inn, useEnd: false)
+        if outBass >= 0.28 && inBass >= 0.28 {
+            return StyleDecision(
+                style: .bassSwap,
+                reason: "beatmatch + low-end (bass out=\(String(format: "%.2f", outBass)), in=\(String(format: "%.2f", inBass))) → bass swap",
+                useTempoSync: true,
+                beatPhaseLock: true
+            )
+        }
+
+        return StyleDecision(
+            style: .beatmatchBlend,
+            reason: "rhythmic + BPM/key compatible (key=\(String(format: "%.2f", keyScore))\(moodClash ? ", energy-shift" : "")) → beatmatch blend",
+            useTempoSync: true,
+            beatPhaseLock: true
+        )
+    }
+
+    private static func edgeBassEnergy(_ analysis: TrackAnalysis, useEnd: Bool) -> Float {
+        let bass = analysis.bassEnergyProfile
+        guard !bass.isEmpty else { return 0 }
+        let dur = max(0.1, analysis.duration)
+        let n = bass.count
+        let window = min(20, max(1, n / 8))
+        if useEnd {
+            let trail = analysis.trailingSilence > 1.0 ? min(dur, analysis.trailingSilence) : dur
+            let endIdx = max(1, min(n, Int((trail / dur) * Double(n))))
+            let startIdx = max(0, endIdx - window)
+            let slice = bass[startIdx..<endIdx]
+            return slice.reduce(0, +) / Float(max(1, slice.count))
+        } else {
+            let startIdx = max(0, min(n - 1, Int((analysis.leadingSilence / dur) * Double(n))))
+            let endIdx = min(n, startIdx + window)
+            let slice = bass[startIdx..<endIdx]
+            return slice.reduce(0, +) / Float(max(1, slice.count))
+        }
     }
 
     // MARK: - Tempo Match (beat-fit)
@@ -161,8 +329,13 @@ struct Crossfader {
             return (1.0, true)
         }
         let targets = [out, out * 2, out / 2, out * 1.5, out / 1.5]
-        var bestRate = 1.0
-        var bestAdjust = abs(out / inn - 1.0)
+        // Start with the DIRECT ratio — its adjustment is exactly what the
+        // loop compares against, so with bestRate=1.0 the direct fit could
+        // never win (`adjust < bestAdjust` was false) and every blend silently
+        // played at natural tempo instead of beat-matched.
+        let directRate = out / inn
+        var bestRate: Double = (directRate > 0.25 && directRate < 4.0) ? directRate : 1.0
+        var bestAdjust = abs(bestRate - 1.0)
         for target in targets {
             let rate = target / inn
             guard rate > 0.25, rate < 4.0 else { continue }
@@ -285,31 +458,61 @@ struct Crossfader {
         from: TrackAsset,
         to: TrackAsset,
         config: AudioConfig,
+        style: TransitionStyle,
         tempoRate: Double,
-        tempoCompatible: Bool
+        tempoCompatible: Bool,
+        context: TransitionContext
     ) -> Double {
-        guard let fromAnalysis = from.analysis,
-              let toAnalysis = to.analysis else {
-            return config.crossfadeDuration
-        }
-
-        // Bar interval of the outgoing track.
         let outBar: Double
-        if let bpm = fromAnalysis.bpm, bpm > 0 {
+        if let bpm = from.analysis?.bpm, bpm > 0 {
             outBar = 240.0 / bpm  // 4 beats per bar
         } else {
             outBar = 2.0  // default: assume 120 BPM
         }
 
-        // Incompatible tempos — no drifting blend. One bar (+dreamy one),
-        // phase-aligned cut instead.
+        // Responsive manual skip: fast, musical 3–5s handoff (1–2 bars when rhythmic).
+        if context == .manualSkip {
+            let minD = config.manualSkipMinDuration
+            let maxD = config.manualSkipMaxDuration
+            switch style {
+            case .bassSwap, .beatmatchBlend, .quickPhraseCut:
+                let twoBars = outBar * 2.0
+                if twoBars >= minD && twoBars <= maxD { return twoBars }
+                let oneBar = outBar
+                if oneBar >= minD && oneBar <= maxD { return oneBar }
+                return min(maxD, max(minD, twoBars))
+            case .echoOut:
+                return 3.5
+            case .ambientBlend:
+                return 4.0
+            }
+        }
+
+        // Style-specific automatic durations
+        switch style {
+        case .quickPhraseCut:
+            let cut = outBar + (config.dreamyBlends ? outBar * 0.5 : 0)
+            return min(4.5, max(2.0, cut))
+        case .echoOut:
+            // Enough room for the reverb tail to bloom and decay naturally
+            let echoDur = min(6.5, max(4.2, outBar * 2.0))
+            return echoDur
+        case .ambientBlend:
+            return min(9.0, max(5.5, config.crossfadeDuration * (config.dreamyBlends ? 1.0 : 0.85)))
+        case .beatmatchBlend, .bassSwap:
+            break
+        }
+
+        guard let fromAnalysis = from.analysis,
+              let toAnalysis = to.analysis else {
+            return config.crossfadeDuration
+        }
+
         if !tempoCompatible {
             return outBar + (config.dreamyBlends ? outBar : 0)
         }
 
         let baseDuration = config.crossfadeDuration
-
-        // Bar-quantize: round to nearest bar boundary based on outgoing BPM
         let barInterval = outBar
 
         let fromEnergy = fromAnalysis.averageRMS
@@ -395,19 +598,31 @@ struct Crossfader {
     // MARK: - Energy-Matched Entry Point
 
     /// Where the incoming track should start so its opening energy meets the
-    /// outgoing ending — ideally a slight build, never a hard drop. The entry
-    /// is bar-aligned; the vocal connection point wins when it is close.
-    /// Returns 0 when the natural intro already fits.
+    /// outgoing ending — ideally a slight build, never a hard drop. Always trims
+    /// dead leading silence (`incoming.leadingSilence`); skips longer intros only
+    /// when a bar-aligned seam fits better without ever cutting into vocals.
     private func findConnectionPoint(
         outgoing: TrackAnalysis?,
         incoming: TrackAnalysis?,
-        crossfadeDuration: Double
+        crossfadeDuration: Double,
+        context: TransitionContext = .automatic
     ) -> Double {
         guard let incoming else { return 0 }
-        let vocalPoint = findVocalConnectionPoint(
-            outgoing: outgoing,
-            incoming: incoming,
-            crossfadeDuration: crossfadeDuration
+        let silenceFloor = min(incoming.leadingSilence, max(0, incoming.duration * 0.2))
+
+        // On manual skip, keep the natural start (just trim dead leading silence)
+        // so the user hears the song they clicked from the beginning.
+        if context == .manualSkip {
+            return silenceFloor
+        }
+
+        let vocalPoint = max(
+            silenceFloor,
+            findVocalConnectionPoint(
+                outgoing: outgoing,
+                incoming: incoming,
+                crossfadeDuration: crossfadeDuration
+            )
         )
         guard let out = outgoing,
               !out.energyProfile.isEmpty,
@@ -417,7 +632,7 @@ struct Crossfader {
         let target = outEnd + MixTuning.energyBuildDelta
         let profile = incoming.energyProfile
         let sampleDuration = incoming.duration / Double(max(1, profile.count))
-        let cap = min(incoming.duration * 0.5, 90.0)
+        let cap = min(incoming.duration * 0.35, 45.0)
 
         func localEnergy(at time: Double) -> Float {
             let begin = max(0, min(profile.count - 1, Int(time / max(sampleDuration, 0.0001))))
@@ -427,6 +642,14 @@ struct Crossfader {
             return profile[begin..<end].reduce(0, +) / Float(end - begin)
         }
 
+        func localSlope(at time: Double) -> Double {
+            let window = max(2, profile.count / 40)
+            let center = max(0, min(profile.count - 1, Int(time / max(sampleDuration, 0.0001))))
+            let lo = max(0, center - window)
+            let hi = min(profile.count - 1, center + window)
+            return Double(profile[hi]) - Double(profile[lo])
+        }
+
         func vocalLevel(at time: Double) -> Float {
             guard !incoming.vocalActivity.isEmpty else { return 0 }
             let index = max(0, min(incoming.vocalActivity.count - 1,
@@ -434,30 +657,59 @@ struct Crossfader {
             return incoming.vocalActivity[index]
         }
 
+        let outSlope = Self.energySlope(out.energyProfile, at: .end)
+        let slopeScale = max(abs(outSlope), 0.001)
+        let moodBonus = (MusicMood.from(analysis: out) == MusicMood.from(analysis: incoming)) ? 0.05 : 0
+
+        // Mood-aware seam score: energy fit * level + slope-direction fit * ramp.
         func entryScore(_ time: Double) -> Double {
             let fit = Self.seamEnergyFit(incoming: localEnergy(at: time), target: target)
-            let vocalCost = Double(vocalLevel(at: time)) * 0.12
-            let skipCost = min(0.06, (time / max(cap, 1)) * 0.06)
-            return fit - vocalCost - skipCost
+            let inSlope = localSlope(at: time)
+            let slopeFit = 1.0 - min(1.0, abs((outSlope / slopeScale) - (inSlope / max(abs(inSlope), 0.001))) / 2.0)
+            let vocalCost = Double(vocalLevel(at: time)) * 0.08
+            let skipCost = min(0.03, (max(0, time - silenceFloor) / max(cap, 1)) * 0.03)
+            return fit * 0.7 + slopeFit * 0.3 + moodBonus - vocalCost - skipCost
         }
 
-        // The intro already meets the outgoing energy — leave it intact.
-        let naturalScore = entryScore(0)
-        guard naturalScore < 0.85 else { return 0 }
+        // Signature Apple AutoMix intro cueing:
+        // If the incoming track has a long instrumental/sparse intro before the
+        // first vocal (e.g. > crossfadeDuration + 4s), cue into the bar right
+        // before `firstVocalTime - crossfadeDuration` so the groove builds under
+        // the outgoing track and the incoming vocal lands cleanly as the blend finishes.
+        var firstVocalTime = incoming.vocalOnsetTimestamps.first ?? 0.0
+        if firstVocalTime <= 0, !incoming.vocalActivity.isEmpty, incoming.duration > 0 {
+            for (i, v) in incoming.vocalActivity.enumerated() where v > 0.35 {
+                firstVocalTime = Double(i) * (incoming.duration / Double(incoming.vocalActivity.count))
+                break
+            }
+        }
+        if firstVocalTime > silenceFloor + crossfadeDuration + 4.0 {
+            let targetEntry = max(silenceFloor, firstVocalTime - crossfadeDuration)
+            let snappedEntry = Self.snapToBarBefore(targetEntry, bars: incoming.barTimestamps)
+            let maxSkip = min(incoming.duration * 0.30, 35.0)
+            let clamped = min(snappedEntry, maxSkip)
+            if clamped > silenceFloor + 1.5 {
+                return clamped
+            }
+        }
 
-        var candidates = incoming.barTimestamps.filter { $0 > 0.75 && $0 <= cap }
+        // Keep the natural intro (after dead silence) only when it already fits tightly.
+        let naturalScore = entryScore(silenceFloor)
+        guard naturalScore < 0.82 else { return silenceFloor }
+
+        var candidates = incoming.barTimestamps.filter { $0 > silenceFloor + 0.75 && $0 <= cap }
         if candidates.isEmpty {
-            var point = 2.0
+            var point = silenceFloor + 2.0
             while point <= cap {
                 candidates.append(point)
                 point += 2.0
             }
         }
-        if vocalPoint > 0.75 {
+        if vocalPoint > silenceFloor + 0.75 {
             candidates.append(vocalPoint)
         }
 
-        var bestPoint: Double = 0
+        var bestPoint: Double = silenceFloor
         var bestScore = naturalScore
         for point in candidates {
             var score = entryScore(point)
@@ -467,7 +719,14 @@ struct Crossfader {
                 bestPoint = point
             }
         }
-        return bestPoint > 0.5 ? bestPoint : 0
+        // Never enter past the first vocal onset.
+        if firstVocalTime > 0, bestPoint > firstVocalTime {
+            bestPoint = min(vocalPoint, max(silenceFloor, firstVocalTime - 1.0))
+        }
+        guard bestScore >= 0.58, bestPoint > silenceFloor + 0.5 else {
+            return max(silenceFloor, min(vocalPoint, firstVocalTime > 0 ? max(silenceFloor, firstVocalTime - 1.0) : vocalPoint))
+        }
+        return max(silenceFloor, bestPoint)
     }
 
     /// 1.0 when the incoming level sits on the target; drops cost more than
@@ -550,9 +809,9 @@ struct Crossfader {
         // (No bars, or point before the first bar: keep the raw point.)
         let snapped = Self.snapToBarBefore(result, bars: incoming.barTimestamps)
 
-        // Cap: never skip more than half the track or 90s (aggressive, but
-        // the song should still sound like itself).
-        let cap = min(incoming.duration * 0.5, 90.0)
+        // Cap: never skip more than ~25s or 30% of the track — the song should
+        // still sound like itself, and we must not jump over the vocals.
+        let cap = min(incoming.duration * 0.3, 25.0)
         return min(snapped, cap)
     }
 

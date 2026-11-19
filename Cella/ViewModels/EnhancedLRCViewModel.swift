@@ -17,6 +17,10 @@ final class EnhancedLRCViewModel: ObservableObject {
     @Published var recordingCursorIndex: Int = 0
     @Published var loadError: String?
 
+    /// Độ trễ giữa timeline AVPlayer và tiếng ra loa. Đặt 0 để đồng bộ cùng
+    /// chuẩn LRC (không bù thêm) — dùng khi calibrate thiết bị đầu ra nếu cần.
+    @Published var audioOutputLatency: TimeInterval = 0
+
     private var audioPlayer: AVPlayer?
     private var timer: Timer?
     private var lrcFileURL: URL?
@@ -29,6 +33,8 @@ final class EnhancedLRCViewModel: ObservableObject {
 
     var currentLineIndex: Int {
         guard !lines.isEmpty else { return -1 }
+        // currentTime() đã gắn với presentation clock (âm thanh đang output),
+        // basis đồng nhất với recordLine và setTimestampForLine — không trừ latency.
         for i in stride(from: lines.count - 1, through: 0, by: -1) {
             if currentTime >= lines[i].time - 0.1 {
                 return i
@@ -267,13 +273,25 @@ final class EnhancedLRCViewModel: ObservableObject {
 
     /// While recording, stamp the current live position into the next untimed
     /// lyric line, then advance the cursor so the following M fills the next one.
-    func recordLine() {
+    /// `eventTime` (khi truyền từ key monitor) là thời điểm nhấn phím thực sự,
+    /// tránh bị trễ do event loop xử lý sau khi nhấn.
+    /// `player.currentTime()` đã gắn với presentation clock (âm thanh đang output),
+    /// nên không trừ thêm latency — đã bù làm stamp mất đồng bộ.
+    func recordLine(eventTime: CFTimeInterval? = nil) {
         guard currentTrackURL != nil, isRecording, !lines.isEmpty else { return }
         pushUndo()
-        // Read live time straight from the player — timer may lag behind.
-        let liveTime = audioPlayer?.currentTime().seconds ?? currentTime
-        currentTime = liveTime.isFinite ? liveTime : currentTime
-        recordLine(in: &lines, at: &recordingCursorIndex, time: liveTime)
+        // Đọc vị trí player NGAY lúc xử lý phím, rồi trừ độ trễ event loop
+        // (handlerNow - eventTime) để quy về đúng thời điểm nhấn. Đọc trực tiếp
+        // `currentTime()` thay vì cộng dồn wall-clock từ lúc bấm R: AVPlayer có
+        // độ trễ khởi động (FLAC/ALAC càng rõ), nên công thức cộng dồn trước đây
+        // làm MỌI timestamp bị trễ đúng bằng độ trễ khởi động đó.
+        let handlerNow = CACurrentMediaTime()
+        let playerNow = audioPlayer?.currentTime().seconds ?? currentTime
+        let handlerDelay = eventTime.map { max(0, handlerNow - $0) } ?? 0
+        let safeNow = playerNow.isFinite ? playerNow : currentTime
+        let playerTimeAtEvent = max(0, safeNow - handlerDelay)
+        currentTime = playerTimeAtEvent.isFinite ? playerTimeAtEvent : currentTime
+        recordLine(in: &lines, at: &recordingCursorIndex, time: playerTimeAtEvent)
         hasUnsavedChanges = true
     }
 
@@ -310,30 +328,90 @@ final class EnhancedLRCViewModel: ObservableObject {
 
     /// Appends pasted lyric lines. Lines carrying `[mm:ss.xx]` keep their
     /// timestamps; plain lines stamp [00:00.00] for later timing; bare tag
-    /// lines (`[ar:…]`) are skipped. One undo step. Time-sorted, ties keep
-    /// paste order.
+    /// lines (`[ar:…]`) are skipped; `[har mm:ss.xx]` rows land as harmony
+    /// events with their own timestamps. One undo step. Time-sorted, ties
+    /// keep paste order.
     func appendLines(_ texts: [String]) {
         let fresh = texts
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         guard !fresh.isEmpty else { return }
-        var items: [(time: TimeInterval, text: String)] = []
+        var items: [(TimeInterval, String, Bool, [Int])] = []
         for raw in fresh {
-            let parsed = LrcParser.parse(raw)
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Harmony row: `[har mm:ss.xx] lyric text` (+ optional [vN] marks).
+            if line.lowercased().hasPrefix("[har") {
+                if let harmony = Self.parseHarmonyRow(line) {
+                    items.append((harmony.time, harmony.text, true, harmony.vocalists))
+                }
+                continue
+            }
+            let parsed = LrcParser.parse(line)
             if let first = parsed.lines.first {
-                items.append((first.time, first.text))
+                var text = first.text
+                var vocalists = first.vocalists
+                // Fold a leading `[vN]` / `[vN&vM]` marker into attribution.
+                if text.hasPrefix("[v") {
+                    if let close = text.firstIndex(of: "]") {
+                        let ids = String(text[text.index(after: close)...])
+                            .trimmingCharacters(in: .whitespaces)
+                        vocalists = ids.components(separatedBy: "&")
+                            .compactMap { Int($0) }
+                            .filter { $0 > 0 }
+                        text = ids.trimmingCharacters(in: .whitespaces)
+                    }
+                }
+                items.append((first.time, text, false, vocalists))
             } else if parsed.metadata.isEmpty {
-                items.append((0, raw))
+                items.append((0, line, false, []))
             }
         }
         guard !items.isEmpty else { return }
         pushUndo()
-        lines.append(contentsOf: items.map { EditableLrcLine(time: $0.time, text: $0.text) })
+        for item in items {
+            var newLine = EditableLrcLine(time: item.0, text: item.1)
+            newLine.isHarmony = item.2
+            newLine.vocalists = item.3
+            lines.append(newLine)
+        }
         // Stable time sort: ties keep existing + paste order.
         lines = lines.enumerated()
             .sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }
             .map { $0.element }
         hasUnsavedChanges = true
+    }
+
+    /// Parses a CLARC harmony row — `[har mm:ss.xx] lyric text` with an
+    /// optional `[vN]` / `[vN&vM]` vocal marker — into its time, text and
+    /// vocal ids. Returns nil for plain rows so `LrcParser` owns those.
+    private static func parseHarmonyRow(_ line: String) -> (time: TimeInterval, text: String, vocalists: [Int])? {
+        guard let regex = try? NSRegularExpression(
+                pattern: #"^\[har\s+(\d+):(\d{1,2})(?:\.(\d{1,3}))?\]\s*(?:\[(v\d+(?:&v\d+)*)\]\s*)?(.*)"#),
+              let match = regex.firstMatch(
+                in: line, range: NSRange(location: 0, length: (line as NSString).length))
+        else { return nil }
+        func capture(_ i: Int) -> String {
+            let nsLine = line as NSString
+            let r = match.range(at: i)
+            guard r.location != NSNotFound, r.location + r.length <= nsLine.length else { return "" }
+            return nsLine.substring(with: r)
+        }
+        guard let minutes = Double(capture(1)), let seconds = Double(capture(2)), seconds < 60 else { return nil }
+        var fraction: Double = 0
+        let frac = capture(3)
+        if !frac.isEmpty {
+            let padded = frac.padding(toLength: 3, withPad: "0", startingAt: 0)
+            fraction = (Double(padded) ?? 0) / 1000.0
+        }
+        var text = capture(5).trimmingCharacters(in: .whitespaces)
+        var vocalists: [Int] = []
+        if !capture(4).isEmpty {
+            vocalists = capture(4)
+                .components(separatedBy: "&")
+                .compactMap { Int($0.dropFirst()) }
+                .filter { $0 > 0 }
+        }
+        return (time: minutes * 60 + seconds + fraction, text: text, vocalists: vocalists)
     }
 
     func addLine(at index: Int? = nil) {
@@ -434,7 +512,14 @@ final class EnhancedLRCViewModel: ObservableObject {
     func setTimestampForLine(at index: Int) {
         guard index >= 0, index < lines.count else { return }
         pushUndo()
-        lines[index].time = currentTime
+        // Đọc thời gian player trực tiếp tại thời điểm bấm (không dùng currentTime
+        // cache 50ms của timer). Trừ thêm độ trễ event loop của cú click để quy về
+        // đúng thời điểm bấm chuột — không bù latency thiết bị (chuẩn LRC, = 0).
+        let handlerNow = CACurrentMediaTime()
+        let clickTime = NSApp.currentEvent?.timestamp
+        let handlerDelay = clickTime.map { max(0, handlerNow - $0) } ?? 0
+        let t = max(0, (audioPlayer?.currentTime().seconds ?? currentTime) - handlerDelay)
+        lines[index].time = max(0, t)
         hasUnsavedChanges = true
 
         lines.sort { $0.time < $1.time }
